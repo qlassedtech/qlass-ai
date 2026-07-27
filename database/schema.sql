@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS students (
     school TEXT,
     preferred_language TEXT DEFAULT 'en',
     centre_id INTEGER REFERENCES centres(id),
+    pending_profile_field TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 

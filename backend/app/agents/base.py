@@ -16,6 +16,6 @@ class BaseAgent(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def respond(self, student: dict, message: str) -> str:
+    async def respond(self, student: dict, message: str, history: list[dict] | None = None) -> str:
         """Run retrieval (if needed) then call the LLM and return a reply."""
         raise NotImplementedError
