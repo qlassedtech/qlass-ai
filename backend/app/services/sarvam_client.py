@@ -9,6 +9,39 @@ SARVAM_BASE_URL = "https://api.sarvam.ai"
 
 _MARKDOWN_EMPHASIS = re.compile(r"[*_]")
 
+# Explicit language-name mentions (English or Romanized), keyed to Sarvam's
+# supported BCP-47 codes. Checked before falling back to statistical
+# detection — a student typing "Hindi mein pls" is a far stronger, explicit
+# signal than trying to guess the language of ambiguous Romanized text.
+_EXPLICIT_LANGUAGE_NAMES = {
+    "hindi": "hi-IN",
+    "bangla": "bn-IN",
+    "bengali": "bn-IN",
+    "gujarati": "gu-IN",
+    "kannada": "kn-IN",
+    "malayalam": "ml-IN",
+    "marathi": "mr-IN",
+    "odia": "od-IN",
+    "oriya": "od-IN",
+    "punjabi": "pa-IN",
+    "tamil": "ta-IN",
+    "telugu": "te-IN",
+    "english": "en-IN",
+}
+
+
+def detect_explicit_language_request(text: str) -> str | None:
+    """
+    Catches an explicit ask like "Hindi mein pls" or "reply in Tamil" via
+    simple keyword matching — no API call needed, and more reliable than
+    statistical detection for this specific case.
+    """
+    lowered = text.lower()
+    for name, code in _EXPLICIT_LANGUAGE_NAMES.items():
+        if name in lowered:
+            return code
+    return None
+
 
 async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg") -> str | None:
     """

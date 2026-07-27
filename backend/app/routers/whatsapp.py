@@ -12,7 +12,13 @@ from app.services.whatsapp_client import (
     verify_webhook_auth,
 )
 from app.services.profile_builder import next_missing_field, should_ask_this_turn, clean_answer, looks_like_answer
-from app.services.sarvam_client import transcribe_audio, synthesize_speech, detect_language, translate_text
+from app.services.sarvam_client import (
+    transcribe_audio,
+    synthesize_speech,
+    detect_language,
+    translate_text,
+    detect_explicit_language_request,
+)
 from app.agents.tutor_agent import TutorAgent
 
 router = APIRouter()
@@ -81,18 +87,24 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     # distinguishable even in Latin script, so it's still trusted.
     # For ambiguous Romanized-non-English input, keep whatever language this
     # student has already established rather than guessing.
-    detection = await detect_language(message_text)
-    if detection:
-        lang, script = detection
-        is_ambiguous_romanized = (script or "").lower() == "latn" and not lang.startswith("en")
-        if not is_ambiguous_romanized:
-            student.preferred_language = lang
-            db.commit()
-            detected_lang = lang
+    explicit_lang = detect_explicit_language_request(message_text)
+    if explicit_lang:
+        student.preferred_language = explicit_lang
+        db.commit()
+        detected_lang = explicit_lang
+    else:
+        detection = await detect_language(message_text)
+        if detection:
+            lang, script = detection
+            is_ambiguous_romanized = (script or "").lower() == "latn" and not lang.startswith("en")
+            if not is_ambiguous_romanized:
+                student.preferred_language = lang
+                db.commit()
+                detected_lang = lang
+            else:
+                detected_lang = student.preferred_language if student.preferred_language != "en" else None
         else:
             detected_lang = student.preferred_language if student.preferred_language != "en" else None
-    else:
-        detected_lang = student.preferred_language if student.preferred_language != "en" else None
 
     # Pull recent conversation turns *before* saving this message, so the
     # tutor has context but doesn't see this message twice.
