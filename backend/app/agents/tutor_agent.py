@@ -49,7 +49,12 @@ class TutorAgent(BaseAgent):
             "pick one. Long, multi-part messages get cut off mid-sentence on WhatsApp and confuse the "
             "student (e.g. asking them to solve a problem using numbers that got cut off before you "
             "typed them). If \"more\" is requested, give ONE more type/example, then stop and check in, "
-            "rather than a long list plus a fresh worked example in the same breath."
+            "rather than a long list plus a fresh worked example in the same breath.\n"
+            "- Your English gets machine-translated afterward, so avoid sentence patterns that "
+            "translate badly: no long relative clauses like \"that's a bit outside/different from "
+            "what we were discussing\" — say it plainly instead, e.g. \"That's a different topic — "
+            "happy to switch!\". Prefer short, simple, direct sentences over clever or idiomatic "
+            "phrasing throughout."
         )
         if retrieved_chunks:
             knowledge = "\n\n".join(retrieved_chunks)
