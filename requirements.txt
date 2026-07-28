@@ -13,6 +13,7 @@ pydantic-settings
 python-dotenv
 sentence-transformers
 pymupdf
+python-docx
 unstructured
 pillow
 opencv-python-headless

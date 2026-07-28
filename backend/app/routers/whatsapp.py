@@ -1,39 +1,77 @@
-from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models.core import Student, ChatHistory
+from app.database import SessionLocal
+from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
+    parse_incoming_image,
+    parse_incoming_document,
+    guess_filename_from_media_url,
     download_media,
     send_whatsapp_message,
     send_whatsapp_audio,
+    send_whatsapp_image,
     verify_webhook_auth,
 )
-from app.services.profile_builder import next_missing_field, should_ask_this_turn, clean_answer, looks_like_answer
-from app.services.sarvam_client import (
-    transcribe_audio,
-    synthesize_speech,
-    detect_language,
-    translate_text,
-    detect_explicit_language_request,
+from app.services.profile_builder import (
+    next_missing_field,
+    should_ask_this_turn,
+    clean_answer,
+    looks_like_answer,
+    looks_like_confirmation_reply,
 )
+from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
+from app.services.ocr_client import extract_text_from_image
+from app.services.image_client import generate_image
+from app.services.document_client import extract_text_from_document
 from app.agents.tutor_agent import TutorAgent
 
 router = APIRouter()
 tutor_agent = TutorAgent()
 
 HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
+WEAK_TOPICS_LIMIT = 5
+OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
+
+_AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
+
+
+def _looks_affirmative(text: str) -> bool:
+    words = set(text.strip().lower().split())
+    return bool(words & _AFFIRMATIVE_WORDS)
+
+
+def _get_or_create_student(db: Session, from_phone: str) -> Student:
+    student = db.query(Student).filter(Student.phone == from_phone).first()
+    if student is None:
+        student = Student(name="New Student", phone=from_phone)
+        db.add(student)
+        db.commit()
+        db.refresh(student)
+    return student
 
 
 @router.post("/webhook")
-async def receive_message(request: Request, db: Session = Depends(get_db)):
+async def receive_message(request: Request, background_tasks: BackgroundTasks):
     """
-    Full working flow:
-    Wati -> parse (text or voice note) -> find/create Student -> TutorAgent
-    (calls LLM) -> save chat_history -> send reply back via Wati's API,
-    as text or a synthesized voice note matching the input modality.
+    Wati -> ack immediately -> process in the background (parse text/voice/
+    image/document -> find/create Student -> TutorAgent -> save chat_history
+    -> send reply via Wati's API).
+
+    The actual pipeline (STT/LLM/TTS/OCR/image-gen) can take 10+ seconds end
+    to end — Wati's webhook caller times out well before that and marks the
+    delivery "failed", retrying it even though we'd already generated and
+    sent a real reply (confirmed in production: reply appeared in chat
+    history ~12s after the message, but Wati still retried and our own
+    dedup correctly rejected the retry as already-handled — the *retry* was
+    spurious, not the original send). Repeated "failures" like this are also
+    what's likely to get a webhook marked "Defective" by Wati and paused
+    entirely. Acknowledging fast and doing the real work after the response
+    is sent avoids both problems, since sending the reply is already a
+    separate outbound call to Wati's API, not dependent on this response.
 
     Unlike Meta's Cloud API, Wati has no GET verification handshake — you just
     point Wati's dashboard webhook setting at this URL.
@@ -42,69 +80,109 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Invalid webhook auth")
 
     payload = await request.json()
+
+    # Guard against Wati redelivering/retrying a webhook call for a message
+    # we already processed — mark it seen as early as possible, before any
+    # real work, so a duplicate delivery is a no-op rather than a second
+    # confusing reply to the student. This is a fast, single-insert check,
+    # safe to do before acknowledging.
+    webhook_message_id = payload.get("whatsappMessageId") or payload.get("id")
+    if webhook_message_id:
+        db = SessionLocal()
+        try:
+            db.add(ProcessedWebhookMessage(message_id=webhook_message_id))
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return {"received": True, "handled": False, "reason": "duplicate webhook delivery, already processed"}
+        finally:
+            db.close()
+
+    background_tasks.add_task(_process_webhook_payload, payload)
+    return {"received": True, "handled": "processing"}
+
+
+async def _process_webhook_payload(payload: dict) -> None:
+    """
+    The actual work, run after the webhook response has already been sent.
+    Opens its own DB session since the request-scoped one from Depends(get_db)
+    would already be closed by the time a background task runs.
+    """
+    db = SessionLocal()
+    try:
+        await _handle_message(db, payload)
+    finally:
+        db.close()
+
+
+async def _handle_message(db: Session, payload: dict) -> None:
     is_voice_input = False
 
     parsed = parse_incoming_message(payload)
     if parsed:
         from_phone, message_text = parsed
+        student = _get_or_create_student(db, from_phone)
     else:
         audio_parsed = parse_incoming_audio(payload)
-        if not audio_parsed:
-            return {"received": True, "handled": False}
+        image_parsed = parse_incoming_image(payload) if not audio_parsed else None
+        document_parsed = parse_incoming_document(payload) if not (audio_parsed or image_parsed) else None
 
-        from_phone, message_id = audio_parsed
-        audio_bytes = await download_media(message_id)
-        if audio_bytes is None:
-            return {"received": True, "handled": False, "reason": "could not download voice note"}
+        if audio_parsed:
+            from_phone, media_url = audio_parsed
+            student = _get_or_create_student(db, from_phone)
+            if not student.has_feature("voice"):
+                await send_whatsapp_message(
+                    from_phone, "Voice messages aren't available on your account yet — please type your question instead."
+                )
+                return
 
-        message_text = await transcribe_audio(audio_bytes)
-        if not message_text:
-            return {"received": True, "handled": False, "reason": "speech-to-text not configured or failed"}
-        is_voice_input = True
+            audio_bytes = await download_media(media_url)
+            if audio_bytes is None:
+                return
+
+            message_text = await transcribe_audio(audio_bytes)
+            if not message_text:
+                return
+            is_voice_input = True
+        elif image_parsed:
+            from_phone, media_url = image_parsed
+            student = _get_or_create_student(db, from_phone)
+            if not student.has_feature("ocr"):
+                await send_whatsapp_message(
+                    from_phone, "Photo questions aren't available on your account yet — please type your question instead."
+                )
+                return
+
+            image_bytes = await download_media(media_url)
+            if image_bytes is None:
+                return
+
+            message_text = await extract_text_from_image(image_bytes)
+            if not message_text:
+                return
+        elif document_parsed:
+            from_phone, media_url = document_parsed
+            student = _get_or_create_student(db, from_phone)
+            if not student.has_feature("documents"):
+                await send_whatsapp_message(
+                    from_phone,
+                    "PDF/Word file questions aren't available on your account yet — please type your question instead.",
+                )
+                return
+
+            document_bytes = await download_media(media_url)
+            if document_bytes is None:
+                return
+
+            filename = guess_filename_from_media_url(media_url)
+            message_text = extract_text_from_document(document_bytes, filename)
+            if not message_text:
+                return
+        else:
+            return
 
     if not message_text:
-        return {"received": True, "handled": False, "reason": "no text body"}
-
-    # Find or create the student profile (Phase 3/4)
-    student = db.query(Student).filter(Student.phone == from_phone).first()
-    if student is None:
-        student = Student(name="New Student", phone=from_phone)
-        db.add(student)
-        db.commit()
-        db.refresh(student)
-
-    # Detect the language the student is actually writing/speaking in (per
-    # message, since a student may switch languages), so the final reply can
-    # be translated back into it. Claude always reasons/answers in English;
-    # Sarvam handles the Indian-language expression.
-    #
-    # Only trust the guess when it's backed by an actual native script
-    # (Devanagari, Gurmukhi, Tamil, ...) OR is confidently English — detecting
-    # *which Indian language* Romanized/Latin-script text is (e.g. "kyunki
-    # jagah") is inherently ambiguous (Hindi/Punjabi/etc. romanize similarly)
-    # and caused a real misfire (Hindi conversation flipped to Punjabi
-    # mid-thread on a Romanized reply). English itself is reliably
-    # distinguishable even in Latin script, so it's still trusted.
-    # For ambiguous Romanized-non-English input, keep whatever language this
-    # student has already established rather than guessing.
-    explicit_lang = detect_explicit_language_request(message_text)
-    if explicit_lang:
-        student.preferred_language = explicit_lang
-        db.commit()
-        detected_lang = explicit_lang
-    else:
-        detection = await detect_language(message_text)
-        if detection:
-            lang, script = detection
-            is_ambiguous_romanized = (script or "").lower() == "latn" and not lang.startswith("en")
-            if not is_ambiguous_romanized:
-                student.preferred_language = lang
-                db.commit()
-                detected_lang = lang
-            else:
-                detected_lang = student.preferred_language if student.preferred_language != "en" else None
-        else:
-            detected_lang = student.preferred_language if student.preferred_language != "en" else None
+        return
 
     # Pull recent conversation turns *before* saving this message, so the
     # tutor has context but doesn't see this message twice.
@@ -121,30 +199,127 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     db.add(ChatHistory(student_id=student.id, role="user", message=message_text, agent="tutor"))
     db.commit()
 
-    if student.pending_profile_field and looks_like_answer(student.pending_profile_field, message_text):
+    image_prompt = None
+
+    if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
+        # Special case, not a normal profile field — confirming (or declining)
+        # the class-update suggestion triggered by a run of off-level questions.
+        if _looks_affirmative(message_text):
+            student.class_ = student.suggested_class
+            reply_text = f"Got it, updated your class to {student.suggested_class}! 👍 What else can I help you with?"
+        else:
+            reply_text = "No worries, I'll leave it as is! What else can I help you with?"
+        student.pending_profile_field = None
+        student.suggested_class = None
+        db.commit()
+        detected_lang = student.preferred_language or "en-IN"
+    elif student.pending_profile_field and looks_like_answer(student.pending_profile_field, message_text):
         # This message is the answer to a profile question we asked last turn,
-        # not a new tutoring question.
+        # not a new tutoring question — no LLM call, so just keep whatever
+        # language this student was already using.
         setattr(student, student.pending_profile_field, clean_answer(student.pending_profile_field, message_text))
         student.pending_profile_field = None
         db.commit()
         reply_text = "Got it, thanks! 👍 What else can I help you with?"
+        detected_lang = student.preferred_language or "en-IN"
     else:
         # Either there was no pending question, or the student ignored it and
         # asked something else — drop the pending question either way so we
         # don't keep misreading their answers, then answer normally.
         if student.pending_profile_field:
             student.pending_profile_field = None
+            student.suggested_class = None
             db.commit()
 
-        # Route to the Tutor Agent -> real LLM call, with conversation history
-        reply_text = await tutor_agent.respond(student.as_profile_dict(), message_text, history)
+        # Surface topics this student has previously gotten wrong, so the
+        # tutor can naturally revisit them rather than forgetting the moment
+        # they scroll out of the ~6-exchange conversation window.
+        weak_topic_rows = (
+            db.query(TopicProgress.topic)
+            .filter(TopicProgress.student_id == student.id, TopicProgress.is_correct.is_(False))
+            .order_by(TopicProgress.created_at.desc())
+            .limit(WEAK_TOPICS_LIMIT)
+            .all()
+        )
+        weak_topics = list(dict.fromkeys(row[0] for row in weak_topic_rows))  # dedupe, keep order
+
+        # Route to the Tutor Agent -> real LLM call, with conversation history.
+        # Claude decides the reply language itself (sees the actual message
+        # and full context, unlike a stateless per-message detection call) —
+        # see the "lang" field in the tracking tag. It also decides whether a
+        # diagram is warranted (only if image generation is enabled for this
+        # student), returning an image_prompt when so, and whether a text
+        # message should selectively get a voice reply (only if explicitly
+        # asked for — most text stays text).
+        result = await tutor_agent.respond(
+            student.as_profile_dict(),
+            message_text,
+            history,
+            weak_topics,
+            image_generation_enabled=student.has_feature("image_generation"),
+            voice_enabled=student.has_feature("voice"),
+        )
+        reply_text = result["reply"]
+        detected_lang = result["lang"]
+        image_prompt = result["image_prompt"]
+        if result["wants_audio_reply"]:
+            is_voice_input = True  # reuse the existing "reply with synthesized speech" send path
+        if detected_lang != student.preferred_language:
+            student.preferred_language = detected_lang
+            db.commit()
+
+        if result["evaluated"]:
+            # The check question being evaluated was asked in the *previous*
+            # assistant turn, not this one.
+            last_assistant_turn = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
+            db.add(
+                TopicProgress(
+                    student_id=student.id,
+                    topic=result["topic"] or "unknown",
+                    question_text=last_assistant_turn,
+                    given_answer=message_text,
+                    is_correct=result["correct"],
+                )
+            )
+            db.commit()
+
+        # Track a run of consecutive off-level questions (e.g. registered as
+        # class 8 but repeatedly asking Class 12 content) and, after a real
+        # pattern rather than a single one-off question, suggest updating
+        # their registered class — never on the first occurrence.
+        if result["off_level_class"] and result["off_level_class"] != student.class_:
+            student.off_level_count = (student.off_level_count or 0) + 1
+        else:
+            student.off_level_count = 0
+        db.commit()
+
+        if (
+            result["off_level_class"]
+            and student.off_level_count >= OFF_LEVEL_SUGGEST_THRESHOLD
+            and not student.pending_profile_field
+            and not reply_text.rstrip().endswith("?")
+        ):
+            level = result["off_level_class"]
+            reply_text = (
+                f"{reply_text}\n\nBy the way, I've noticed you've been asking Class {level} questions — "
+                f"want me to update your registered class to {level}?"
+            )
+            student.pending_profile_field = "class_confirm"
+            student.suggested_class = level
+            student.off_level_count = 0
+            db.commit()
 
         user_message_count = (
             db.query(ChatHistory)
             .filter(ChatHistory.student_id == student.id, ChatHistory.role == "user")
             .count()
         )
-        if should_ask_this_turn(user_message_count):
+        # Don't stack a profile question onto a reply that already ends with
+        # the tutor's own question (e.g. a check-for-understanding question,
+        # or the class-update suggestion above) — a student answering both at
+        # once ("Radiant and centripetal") gets entirely swallowed as the
+        # profile answer, silently dropping the actual teaching evaluation.
+        if should_ask_this_turn(user_message_count) and not reply_text.rstrip().endswith("?"):
             missing = next_missing_field(student)
             if missing:
                 field, question = missing
@@ -166,20 +341,32 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         if translated:
             outgoing_text = translated
 
-    # Send back over Wati — as a voice note if the student spoke, else text
+    # Send back over Wati — as a voice note if the student spoke or explicitly
+    # asked for an audio reply, a generated diagram (with the explanation as
+    # its caption) if the tutor decided one was warranted, or plain text
+    # otherwise. Falls through to text if any richer attempt fails (checking
+    # actual success, not just "got a response back" — a failed send still
+    # returns a {"sent": False, ...} dict, not None, so checking for None
+    # alone would wrongly treat that as handled and never fall back), so the
+    # student always gets *something*.
     send_result = None
     if is_voice_input:
         audio_reply = await synthesize_speech(outgoing_text, detected_lang)
         if audio_reply:
             send_result = await send_whatsapp_audio(from_phone, audio_reply)
-    if send_result is None:
-        send_result = await send_whatsapp_message(from_phone, outgoing_text)
-
-    return {
-        "received": True,
-        "handled": True,
-        "reply": reply_text,
-        "outgoing_text": outgoing_text,
-        "detected_language": detected_lang,
-        "whatsapp_send": send_result,
-    }
+            if not send_result.get("sent"):
+                print(f"[whatsapp] send_whatsapp_audio failed for {from_phone}: {send_result}")
+            else:
+                # Also send the text transcript, in the same language as the
+                # voice note, so the student has it in writing too.
+                await send_whatsapp_message(from_phone, outgoing_text)
+    elif image_prompt:
+        image_bytes = await generate_image(image_prompt)
+        if image_bytes:
+            send_result = await send_whatsapp_image(from_phone, image_bytes, caption=outgoing_text)
+            if not send_result.get("sent"):
+                print(f"[whatsapp] send_whatsapp_image failed for {from_phone}: {send_result}")
+    if not send_result or not send_result.get("sent"):
+        fallback_result = await send_whatsapp_message(from_phone, outgoing_text)
+        if not fallback_result.get("sent"):
+            print(f"[whatsapp] send_whatsapp_message fallback also failed for {from_phone}: {fallback_result}")

@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS students (
     preferred_language TEXT DEFAULT 'en',
     centre_id INTEGER REFERENCES centres(id),
     pending_profile_field TEXT,
+    state TEXT DEFAULT 'Bihar',
+    features JSONB DEFAULT '{"voice": true, "ocr": true, "image_generation": true, "documents": true}',
+    off_level_count INTEGER DEFAULT 0,
+    suggested_class TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -171,4 +175,24 @@ CREATE TABLE IF NOT EXISTS sessions (
     student_id INTEGER REFERENCES students(id),
     started_at TIMESTAMPTZ DEFAULT now(),
     ended_at TIMESTAMPTZ
+);
+
+-- Interim topic-wise mastery tracking, ahead of real curriculum data (RAG).
+-- Once chapters/subjects are populated from real syllabus content, this can
+-- be linked to chapter_id instead of relying on free-text topic names.
+CREATE TABLE IF NOT EXISTS topic_progress (
+    id SERIAL PRIMARY KEY,
+    student_id INTEGER REFERENCES students(id),
+    topic TEXT NOT NULL,
+    question_text TEXT,
+    given_answer TEXT,
+    is_correct BOOLEAN,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Guards against duplicate processing when Wati redelivers/retries a
+-- webhook call for a message we already handled.
+CREATE TABLE IF NOT EXISTS processed_webhook_messages (
+    message_id TEXT PRIMARY KEY,
+    processed_at TIMESTAMPTZ DEFAULT now()
 );

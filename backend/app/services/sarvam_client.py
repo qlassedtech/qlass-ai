@@ -9,30 +9,32 @@ SARVAM_BASE_URL = "https://api.sarvam.ai"
 
 _MARKDOWN_EMPHASIS = re.compile(r"[*_]")
 
-# Explicit language-name mentions (English or Romanized), keyed to Sarvam's
-# supported BCP-47 codes. Checked before falling back to statistical
-# detection — a student typing "Hindi mein pls" is a far stronger, explicit
-# signal than trying to guess the language of ambiguous Romanized text.
+# Launching in Bihar only — confine language handling to what's actually
+# relevant there. Sarvam has no dedicated code for Bhojpuri or Magahi (not
+# in its supported language set at all); since Bihar has near-universal
+# Hindi literacy/comprehension and these languages share script and much
+# vocabulary with Hindi, they're routed to Hindi rather than mistranslated
+# into an unrelated language. This also eliminates the Punjabi-misdetection
+# class of bug entirely for this market, since detection can never drift to
+# an irrelevant language.
+SUPPORTED_LANGUAGES = {"hi-IN", "en-IN"}
+
+# Explicit language-name mentions (English or Romanized). Checked before
+# falling back to statistical detection — a student typing "Hindi mein pls"
+# is a far stronger, explicit signal than trying to guess the language of
+# ambiguous Romanized text.
 _EXPLICIT_LANGUAGE_NAMES = {
     "hindi": "hi-IN",
-    "bangla": "bn-IN",
-    "bengali": "bn-IN",
-    "gujarati": "gu-IN",
-    "kannada": "kn-IN",
-    "malayalam": "ml-IN",
-    "marathi": "mr-IN",
-    "odia": "od-IN",
-    "oriya": "od-IN",
-    "punjabi": "pa-IN",
-    "tamil": "ta-IN",
-    "telugu": "te-IN",
+    "bhojpuri": "hi-IN",  # no dedicated Sarvam code; closest supported language
+    "magahi": "hi-IN",  # no dedicated Sarvam code; closest supported language
+    "maithili": "hi-IN",  # no dedicated Sarvam code; closest supported language
     "english": "en-IN",
 }
 
 
 def detect_explicit_language_request(text: str) -> str | None:
     """
-    Catches an explicit ask like "Hindi mein pls" or "reply in Tamil" via
+    Catches an explicit ask like "Hindi mein pls" or "Bhojpuri mein bolo" via
     simple keyword matching — no API call needed, and more reliable than
     statistical detection for this specific case.
     """
@@ -41,6 +43,17 @@ def detect_explicit_language_request(text: str) -> str | None:
         if name in lowered:
             return code
     return None
+
+
+def clamp_to_supported_language(language_code: str) -> str:
+    """
+    Map any detected language outside the Bihar-relevant set to the closest
+    supported one, rather than translating into a language irrelevant to
+    this market (or, worse, one Sarvam misdetected).
+    """
+    if language_code in SUPPORTED_LANGUAGES:
+        return language_code
+    return "en-IN" if language_code.startswith("en") else "hi-IN"
 
 
 async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg") -> str | None:
@@ -68,8 +81,15 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
 
 async def synthesize_speech(text: str, language_code: str | None = None) -> bytes | None:
     """
-    Text-to-speech via Sarvam's Bulbul model. Returns WAV audio bytes, or
-    None if Sarvam isn't configured or the call fails.
+    Text-to-speech via Sarvam's Bulbul model. Returns Opus-encoded audio
+    bytes, or None if Sarvam isn't configured or the call fails.
+
+    Explicitly requests Opus (via output_audio_codec) rather than the
+    default WAV — confirmed live that WhatsApp's Business API rejects WAV
+    voice-note uploads outright ("File is not allowed by WhatsApp"), even
+    though the upload call to Wati itself succeeds. Opus is what WhatsApp's
+    own voice notes actually use (confirmed against real incoming .opus
+    voice notes from students).
     """
     if not settings.sarvam_api_key:
         return None
@@ -80,6 +100,8 @@ async def synthesize_speech(text: str, language_code: str | None = None) -> byte
         "target_language_code": language_code or settings.sarvam_language_code,
         "model": "bulbul:v3",
         "speaker": settings.sarvam_tts_speaker,
+        "output_audio_codec": "opus",
+        "speech_sample_rate": "24000",  # opus only supports 8000/12000/16000/24000/48000
     }
 
     try:

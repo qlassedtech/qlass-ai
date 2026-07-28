@@ -45,6 +45,16 @@ def looks_like_answer(field: str, raw_text: str) -> bool:
     return len(raw_text) <= 40  # a board/school name, not a full sentence
 
 
+def looks_like_confirmation_reply(raw_text: str) -> bool:
+    """
+    Best-effort check that the student is actually answering a yes/no
+    confirmation question rather than ignoring it and asking something
+    else — same idea as looks_like_answer, for the class-update suggestion.
+    """
+    raw_text = raw_text.strip()
+    return bool(raw_text) and "?" not in raw_text and not _QUESTION_STARTERS.match(raw_text)
+
+
 def clean_answer(field: str, raw_text: str) -> str:
     raw_text = raw_text.strip()
     if field == "class_":

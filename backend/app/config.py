@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     sarvam_language_code: str = "en-IN"
     sarvam_tts_speaker: str = "shubh"
 
+    # Azure AI Vision (OCR for image-based homework/question photos)
+    azure_vision_endpoint: str | None = None
+    azure_vision_key: str | None = None
+
+    # Azure OpenAI (gpt-image series — DALL-E 3 was retired March 2026)
+    azure_image_endpoint: str | None = None
+    azure_image_key: str | None = None
+    azure_image_deployment: str | None = None
+    azure_image_api_version: str = "2025-04-01-preview"
+
     class Config:
         env_file = str(REPO_ROOT / ".env")
 

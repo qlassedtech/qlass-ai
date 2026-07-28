@@ -1,3 +1,5 @@
+from urllib.parse import urlparse, parse_qs
+
 import httpx
 from app.config import settings
 
@@ -17,6 +19,19 @@ def verify_webhook_auth(auth_header: str | None) -> bool:
 
 
 AUDIO_TYPES = {"audio", "voice", "ptt"}
+IMAGE_TYPES = {"image"}
+DOCUMENT_TYPES = {"document"}
+
+
+def guess_filename_from_media_url(media_url: str) -> str:
+    """
+    Wati's media URLs put the real filename in a "fileName" query param
+    (e.g. ".../showFile?fileName=data/documents/<id>.pdf"), not the URL path
+    itself — confirmed against real audio payloads from Wati.
+    """
+    parsed = urlparse(media_url)
+    query_filename = parse_qs(parsed.query).get("fileName", [None])[0]
+    return query_filename or parsed.path
 
 
 def parse_incoming_message(payload: dict) -> tuple[str, str] | None:
@@ -43,14 +58,13 @@ def parse_incoming_message(payload: dict) -> tuple[str, str] | None:
 
 def parse_incoming_audio(payload: dict) -> tuple[str, str] | None:
     """
-    Returns (from_phone, whatsapp_message_id) for an inbound voice note, or
-    None otherwise. The message id is used to fetch the audio bytes via
-    download_media().
+    Returns (from_phone, media_url) for an inbound voice note, or None
+    otherwise. media_url is used to fetch the audio bytes via download_media().
 
-    NOTE: assumes Wati uses "audio" as the type for voice notes and still
-    includes "whatsappMessageId" — unverified against a real voice-note
-    payload from your Wati account; adjust AUDIO_TYPES/field names if the
-    real payload differs once you send a real voice note through.
+    Confirmed against a real voice-note payload from Wati: the "data" field
+    holds a direct, ready-to-fetch URL
+    (https://.../api/file/showFile?fileName=data/audios/<id>.opus) —
+    it's not looked up by message id via a separate endpoint.
     """
     if payload.get("owner") is True:
         return None
@@ -58,40 +72,96 @@ def parse_incoming_audio(payload: dict) -> tuple[str, str] | None:
         return None
 
     from_phone = payload.get("waId")
-    message_id = payload.get("whatsappMessageId") or payload.get("id")
-    if not from_phone or not message_id:
+    media_url = payload.get("data")
+    if not from_phone or not media_url:
         return None
-    return from_phone, message_id
+    return from_phone, media_url
 
 
-async def download_media(message_id: str) -> bytes | None:
+def parse_incoming_image(payload: dict) -> tuple[str, str] | None:
+    """
+    Returns (from_phone, media_url) for an inbound image (e.g. a photo of a
+    textbook question or homework), or None otherwise. Mirrors
+    parse_incoming_audio — same "data" field convention for media messages.
+    """
+    if payload.get("owner") is True:
+        return None
+    if payload.get("type") not in IMAGE_TYPES:
+        return None
+
+    from_phone = payload.get("waId")
+    media_url = payload.get("data")
+    if not from_phone or not media_url:
+        return None
+    return from_phone, media_url
+
+
+def parse_incoming_document(payload: dict) -> tuple[str, str] | None:
+    """
+    Returns (from_phone, media_url) for an inbound document (PDF or Word
+    file), or None otherwise. Mirrors parse_incoming_audio/image.
+    """
+    if payload.get("owner") is True:
+        return None
+    if payload.get("type") not in DOCUMENT_TYPES:
+        return None
+
+    from_phone = payload.get("waId")
+    media_url = payload.get("data")
+    if not from_phone or not media_url:
+        return None
+    return from_phone, media_url
+
+
+async def download_media(media_url: str) -> bytes | None:
     """Fetch the raw bytes of an incoming media message (e.g. a voice note)."""
-    if not settings.whatsapp_token or not settings.wati_api_endpoint:
+    if not settings.whatsapp_token:
         return None
 
-    url = f"{settings.wati_api_endpoint.rstrip('/')}/api/ext/v3/conversations/messages/file/{message_id}"
-    headers = {"Authorization": f"Bearer {settings.whatsapp_token}", "Accept": "application/octet-stream"}
+    headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=headers)
+            resp = await client.get(media_url, headers=headers)
             resp.raise_for_status()
             return resp.content
     except httpx.HTTPError:
         return None
 
 
-async def send_whatsapp_audio(to_phone: str, audio_bytes: bytes, filename: str = "reply.wav") -> dict:
+async def send_whatsapp_audio(to_phone: str, audio_bytes: bytes, filename: str = "reply.ogg") -> dict:
     if not settings.whatsapp_token or not settings.wati_api_endpoint:
         return {"sent": False, "reason": "Wati credentials not configured in .env"}
 
     url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v1/sendSessionFile/{to_phone}"
     headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
-    files = {"file": (filename, audio_bytes, "audio/wav")}
+    # Opus in an OGG container — WhatsApp's own voice notes use this; WAV
+    # gets rejected outright ("File is not allowed by WhatsApp"), confirmed
+    # against a real send attempt.
+    files = {"file": (filename, audio_bytes, "audio/ogg")}
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(url, headers=headers, files=files)
+            resp.raise_for_status()
+            return {"sent": True, "response": resp.json()}
+    except httpx.HTTPStatusError as exc:
+        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+    except httpx.HTTPError as exc:
+        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
+async def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str, filename: str = "diagram.png") -> dict:
+    if not settings.whatsapp_token or not settings.wati_api_endpoint:
+        return {"sent": False, "reason": "Wati credentials not configured in .env"}
+
+    url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v1/sendSessionFile/{to_phone}"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
+    files = {"file": (filename, image_bytes, "image/png")}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, params={"caption": caption}, files=files)
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:

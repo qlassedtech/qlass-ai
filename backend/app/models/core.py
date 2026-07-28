@@ -34,7 +34,16 @@ class Student(Base):
     preferred_language = Column(Text, default="en")
     centre_id = Column(Integer, ForeignKey("centres.id"))
     pending_profile_field = Column(Text)
+    state = Column(Text, default="Bihar")
+    features = Column(
+        JSONType, default=lambda: {"voice": True, "ocr": True, "image_generation": True, "documents": True}
+    )
+    off_level_count = Column(Integer, default=0)
+    suggested_class = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    def has_feature(self, name: str) -> bool:
+        return bool((self.features or {}).get(name))
 
     centre = relationship("Centre", back_populates="students")
     chat_history = relationship("ChatHistory", back_populates="student")
@@ -264,3 +273,22 @@ class StudySession(Base):
     student_id = Column(Integer, ForeignKey("students.id"))
     started_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     ended_at = Column(TIMESTAMP(timezone=True))
+
+
+class TopicProgress(Base):
+    __tablename__ = "topic_progress"
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"))
+    topic = Column(Text, nullable=False)
+    question_text = Column(Text)
+    given_answer = Column(Text)
+    is_correct = Column(Boolean)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class ProcessedWebhookMessage(Base):
+    __tablename__ = "processed_webhook_messages"
+
+    message_id = Column(Text, primary_key=True)
+    processed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
