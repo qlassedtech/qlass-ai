@@ -40,6 +40,7 @@ class Student(Base):
     )
     off_level_count = Column(Integer, default=0)
     suggested_class = Column(Text)
+    gender = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:

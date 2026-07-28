@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS students (
     features JSONB DEFAULT '{"voice": true, "ocr": true, "image_generation": true, "documents": true}',
     off_level_count INTEGER DEFAULT 0,
     suggested_class TEXT,
+    gender TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 

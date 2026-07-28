@@ -4,6 +4,7 @@ import re
 
 import httpx
 from app.config import settings
+from app.services.audio_qa import has_audio_glitch
 
 SARVAM_BASE_URL = "https://api.sarvam.ai"
 
@@ -79,25 +80,11 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
         return None
 
 
-async def synthesize_speech(text: str, language_code: str | None = None) -> bytes | None:
-    """
-    Text-to-speech via Sarvam's Bulbul model. Returns Opus-encoded audio
-    bytes, or None if Sarvam isn't configured or the call fails.
-
-    Explicitly requests Opus (via output_audio_codec) rather than the
-    default WAV — confirmed live that WhatsApp's Business API rejects WAV
-    voice-note uploads outright ("File is not allowed by WhatsApp"), even
-    though the upload call to Wati itself succeeds. Opus is what WhatsApp's
-    own voice notes actually use (confirmed against real incoming .opus
-    voice notes from students).
-    """
-    if not settings.sarvam_api_key:
-        return None
-
+async def _call_tts_api(text: str, language_code: str) -> bytes | None:
     headers = {"api-subscription-key": settings.sarvam_api_key, "Content-Type": "application/json"}
     payload = {
         "text": text[:2500],  # bulbul:v3 hard limit
-        "target_language_code": language_code or settings.sarvam_language_code,
+        "target_language_code": language_code,
         "model": "bulbul:v3",
         "speaker": settings.sarvam_tts_speaker,
         "output_audio_codec": "opus",
@@ -109,11 +96,39 @@ async def synthesize_speech(text: str, language_code: str | None = None) -> byte
             resp = await client.post(f"{SARVAM_BASE_URL}/text-to-speech", headers=headers, json=payload)
             resp.raise_for_status()
             audios = resp.json().get("audios") or []
-            if not audios:
-                return None
-            return base64.b64decode(audios[0])
+            return base64.b64decode(audios[0]) if audios else None
     except httpx.HTTPError:
         return None
+
+
+async def synthesize_speech(text: str, language_code: str | None = None) -> bytes | None:
+    """
+    Text-to-speech via Sarvam's Bulbul model. Returns Opus-encoded audio
+    bytes, or None if Sarvam isn't configured or the call fails.
+
+    Explicitly requests Opus (via output_audio_codec) rather than the
+    default WAV — confirmed live that WhatsApp's Business API rejects WAV
+    voice-note uploads outright ("File is not allowed by WhatsApp"), even
+    though the upload call to Wati itself succeeds. Opus is what WhatsApp's
+    own voice notes actually use (confirmed against real incoming .opus
+    voice notes from students).
+
+    Regenerates once if the output has a detectable noise/click glitch —
+    confirmed via a real glitchy voice note that Sarvam's TTS occasionally
+    produces audible artifacts unrelated to any specific text pattern (ruled
+    out via A/B testing), so a retry is the practical mitigation rather than
+    trying to avoid some specific triggering character.
+    """
+    if not settings.sarvam_api_key:
+        return None
+
+    lang = language_code or settings.sarvam_language_code
+    audio = await _call_tts_api(text, lang)
+    if audio and has_audio_glitch(audio):
+        retry = await _call_tts_api(text, lang)
+        if retry:
+            audio = retry
+    return audio
 
 
 async def detect_language(text: str) -> tuple[str, str] | None:

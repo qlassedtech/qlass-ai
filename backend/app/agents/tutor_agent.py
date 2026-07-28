@@ -1,7 +1,8 @@
+import asyncio
 import re
 
 from app.agents.base import BaseAgent
-from app.services.llm_client import call_llm
+from app.services.llm_client import call_llm, classify
 
 # Not anchored to the end of the string ($) — the model doesn't reliably
 # keep IMAGE_PROMPT/OFF_LEVEL_CLASS positioned exactly before TRACK as
@@ -9,7 +10,7 @@ from app.services.llm_client import call_llm
 # tag leak into the visible reply) the moment the order varies. Instead, find
 # each tag wherever it appears and strip all of them.
 _TRACK_TAG = re.compile(
-    r'\n?\[\[TRACK topic="([^"]*)" evaluated=(true|false) correct=(true|false|null) lang=(hi-IN|en-IN) '
+    r'\n?\[\[TRACK topic="([^"]*)" evaluated=(true|false) correct=(true|false|null) '
     r"image=(true|false) audio=(true|false) off_level=(true|false)\]\]"
 )
 _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
@@ -39,11 +40,10 @@ class TutorAgent(BaseAgent):
             f"### NON-NEGOTIABLE RULE: write ONLY in English, always ###\n"
             f"Every word of your reply text must be English — no Hindi, no Romanized Hindi/Hinglish "
             f"(no \"hai\", \"kya\", \"karo\", \"bhi\" etc.), regardless of what language the student "
-            f"wrote in, regardless of what language earlier turns in this conversation were written in "
-            f"or translated into, and regardless of what you set the lang= field to below. The lang= "
-            f"field further down is a SEPARATE, isolated decision for a downstream translation step — "
-            f"it does NOT mean you should write in that language. You always write English; a separate "
-            f"process translates your English into the student's language afterward. This translation "
+            f"wrote in, or what language earlier turns in this conversation were written in or "
+            f"translated into. A separate process decides the target language and translates your "
+            f"English into it afterward — that decision is made elsewhere, you never need to think "
+            f"about it. This translation "
             f"step is an internal implementation detail — NEVER mention, explain, or reassure the "
             f"student about it (e.g. don't say \"I'll type in English but it gets converted\"). As far "
             f"as the student is concerned, you're just answering directly.\n"
@@ -97,7 +97,7 @@ class TutorAgent(BaseAgent):
             "TRACKING TAG (mandatory, hidden from the student, stripped before sending) — end EVERY "
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
-            "lang=<hi-IN|en-IN> image=<true|false> audio=<true|false> off_level=<true|false>]]\n"
+            "image=<true|false> audio=<true|false> off_level=<true|false>]]\n"
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -105,20 +105,6 @@ class TutorAgent(BaseAgent):
             "you asked last turn (i.e. you just said whether they got it right or wrong). false for "
             "every other kind of reply (explanations, new check questions, greetings, off-topic chat).\n"
             "- correct: true/false if evaluated=true, otherwise null.\n"
-            f"- lang: a label ONLY, for a downstream translation step to use — it does NOT change how "
-            f"you write the reply text above (that's always plain English, per the rule at the very "
-            f"top). Decide which language the STUDENT's current message is in, fresh each turn: this "
-            f"student's language was last set to {student.get('preferred_language', 'en-IN')}. Decide fresh based on THIS message "
-            "from the student (only Hindi or English are supported here — this product currently only "
-            "serves Bihar, so Bhojpuri/Magahi/Maithili all count as hi-IN, there's no separate code for "
-            "them): if the student wrote in Devanagari script, or in clearly Hindi/Bhojpuri/Magahi/"
-            "Maithili words (even Romanized, e.g. \"kyunki\", \"jagah\", \"hamko\"), use hi-IN. If they "
-            "wrote in clear English, use en-IN — this OVERRIDES the last-known language, i.e. a student "
-            "who was just replying in Hindi and then asks a clear English question should get lang=en-IN "
-            "for that reply, not get stuck in Hindi. If the student explicitly names a language "
-            "(\"Hindi mein\", \"in English please\", \"Bhojpuri mein\"), that always wins. Only for "
-            "genuinely ambiguous short replies with no language signal at all (e.g. just a number, or "
-            "\"👍\") should you keep the last-known language instead of guessing.\n"
             + (
                 "- image: true ONLY if the student explicitly asked for a picture/diagram/drawing, OR "
                 "a diagram is genuinely necessary to explain this (e.g. labeled parts of a cell, a "
@@ -175,6 +161,23 @@ class TutorAgent(BaseAgent):
             )
         return profile
 
+    @staticmethod
+    def _language_classifier_prompt(current_lang: str) -> str:
+        return (
+            "Decide what language the reply to this student should be in: respond with ONLY "
+            "hi-IN or en-IN, nothing else — no punctuation, no explanation.\n"
+            f"This student's language was last set to {current_lang}. This product currently only "
+            "serves Bihar, so Bhojpuri/Magahi/Maithili all count as hi-IN — there's no separate code "
+            "for them. Decide fresh based on the LATEST message: if it's in Devanagari script, or "
+            "clearly Hindi/Bhojpuri/Magahi/Maithili words (even Romanized, e.g. \"kyunki\", \"jagah\", "
+            "\"hamko\"), answer hi-IN. If it's in clear English, answer en-IN — this OVERRIDES the "
+            "last-known language, i.e. a student who was just replying in Hindi and then sends a clear "
+            "English message (including OCR'd text from a photo, or a document) should get en-IN, not "
+            "stay stuck in Hindi. If the student explicitly names a language (\"Hindi mein\", \"in "
+            "English please\"), that always wins. Only for genuinely ambiguous short messages with no "
+            "language signal at all (e.g. just a number, or \"👍\") keep the last-known language."
+        )
+
     async def respond(
         self,
         student: dict,
@@ -190,15 +193,28 @@ class TutorAgent(BaseAgent):
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled
         )
         messages = (history or []) + [{"role": "user", "content": message}]
-        raw_reply = await call_llm(system_prompt=system_prompt, messages=messages)
+        current_lang = student.get("preferred_language") or "en-IN"
+
+        # Language is decided by a separate, deterministic (temperature=0)
+        # call, run concurrently with the main creative reply — this keeps
+        # the tutor's actual phrasing at full natural variation (no lowered
+        # temperature there) while making this specific judgment call
+        # consistent turn-to-turn, since it was prone to occasional
+        # inconsistency when it rode on the same non-deterministic sampling
+        # as the main reply.
+        raw_reply, lang = await asyncio.gather(
+            call_llm(system_prompt=system_prompt, messages=messages),
+            classify(self._language_classifier_prompt(current_lang), messages, fallback=current_lang),
+        )
+        if lang not in ("hi-IN", "en-IN"):
+            lang = current_lang
 
         match = _TRACK_TAG.search(raw_reply)
         if not match:
             # LLM didn't include the tag (fallback message, or model slipped) —
-            # degrade gracefully rather than losing the reply, defaulting to
-            # this student's last-known language rather than guessing. Still
-            # strip any stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't
-            # leak into the visible reply even without a TRACK match.
+            # degrade gracefully rather than losing the reply. Still strip any
+            # stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't leak into
+            # the visible reply even without a TRACK match.
             cleaned = _IMAGE_PROMPT_TAG.sub("", raw_reply)
             cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned).rstrip()
             return {
@@ -206,13 +222,13 @@ class TutorAgent(BaseAgent):
                 "topic": None,
                 "evaluated": False,
                 "correct": None,
-                "lang": student.get("preferred_language") or "en-IN",
+                "lang": lang,
                 "image_prompt": None,
                 "wants_audio_reply": False,
                 "off_level_class": None,
             }
 
-        topic, evaluated, correct, lang, wants_image, wants_audio, off_level = match.groups()
+        topic, evaluated, correct, wants_image, wants_audio, off_level = match.groups()
 
         image_prompt = None
         image_match = _IMAGE_PROMPT_TAG.search(raw_reply)

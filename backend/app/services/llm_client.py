@@ -38,3 +38,28 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
             "Please try again in a bit. "
             f"[LLM error: {exc}]"
         )
+
+
+async def classify(system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6") -> str:
+    """
+    A separate, deterministic (temperature=0) call for narrow classification
+    tasks (e.g. "what language should the reply be in") — kept apart from
+    the main creative reply generation so the tutor's actual phrasing keeps
+    its normal variation/warmth, while decisions that need to be consistent
+    turn-to-turn don't ride on the same non-deterministic sampling.
+    """
+    if _client is None:
+        return fallback
+
+    try:
+        response = await _client.messages.create(
+            model=model,
+            max_tokens=10,
+            temperature=0,
+            system=system_prompt,
+            messages=messages,
+        )
+        text = "".join(block.text for block in response.content if block.type == "text").strip()
+        return text or fallback
+    except anthropic.APIError:
+        return fallback
