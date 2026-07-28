@@ -1,3 +1,6 @@
+import asyncio
+from collections import defaultdict
+
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,6 +27,7 @@ from app.services.profile_builder import (
     looks_like_confirmation_reply,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
+from app.services.llm_client import translate_with_claude
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
@@ -37,6 +41,15 @@ WEAK_TOPICS_LIMIT = 5
 OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
 
 _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
+
+# Per-student locks so messages from the same student are handled one at a
+# time, in order. Without this, a student sending two messages a few seconds
+# apart (common — they re-ask or add a follow-up before the first reply has
+# come back) spawns two concurrent background tasks that each read the chat
+# history before the other has committed its reply, so both answer against
+# the same stale context — producing duplicate/overlapping/out-of-order
+# replies instead of the second one building on the first.
+_student_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _looks_affirmative(text: str) -> bool:
@@ -108,15 +121,34 @@ async def _process_webhook_payload(payload: dict) -> None:
     Opens its own DB session since the request-scoped one from Depends(get_db)
     would already be closed by the time a background task runs.
     """
-    db = SessionLocal()
-    try:
-        await _handle_message(db, payload)
-    finally:
-        db.close()
+    phone = payload.get("waId")
+    lock = _student_locks[phone] if phone else asyncio.Lock()
+    async with lock:
+        db = SessionLocal()
+        try:
+            await _handle_message(db, payload)
+        except Exception:
+            # An uncaught exception here previously meant the student got no
+            # reply at all and we had no record of why — log the full
+            # traceback and let them know something broke instead of leaving
+            # them hanging.
+            import traceback
+            traceback.print_exc()
+            if phone:
+                await send_whatsapp_message(
+                    phone, "Sorry, something went wrong on my end — please try sending that again."
+                )
+        finally:
+            db.close()
 
 
 async def _handle_message(db: Session, payload: dict) -> None:
-    is_voice_input = False
+    # Whether to reply with synthesized speech. Deliberately NOT set just
+    # because the student's own input happened to be a voice note — a
+    # student who spoke their question may still prefer to read the answer.
+    # Only the tutor's explicit "audio=true" decision (student asked for a
+    # voice reply) turns this on, further down.
+    send_voice_reply = False
 
     parsed = parse_incoming_message(payload)
     if parsed:
@@ -138,12 +170,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
             audio_bytes = await download_media(media_url)
             if audio_bytes is None:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't download that voice note — please try sending it again.")
                 return
 
             message_text = await transcribe_audio(audio_bytes)
             if not message_text:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't understand that voice note — could you try again or type your question?")
                 return
-            is_voice_input = True
         elif image_parsed:
             from_phone, media_url = image_parsed
             student = _get_or_create_student(db, from_phone)
@@ -155,10 +188,12 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
             image_bytes = await download_media(media_url)
             if image_bytes is None:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't download that photo — please try sending it again.")
                 return
 
             message_text = await extract_text_from_image(image_bytes)
             if not message_text:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't read any text in that photo — could you try a clearer picture or type your question?")
                 return
         elif document_parsed:
             from_phone, media_url = document_parsed
@@ -172,11 +207,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
             document_bytes = await download_media(media_url)
             if document_bytes is None:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't download that file — please try sending it again.")
                 return
 
             filename = guess_filename_from_media_url(media_url)
             message_text = extract_text_from_document(document_bytes, filename)
             if not message_text:
+                await send_whatsapp_message(from_phone, "Sorry, I couldn't read any text in that file — could you try a different file or type your question?")
                 return
         else:
             return
@@ -263,7 +300,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
         if result["wants_audio_reply"]:
-            is_voice_input = True  # reuse the existing "reply with synthesized speech" send path
+            send_voice_reply = True
         if detected_lang != student.preferred_language:
             student.preferred_language = detected_lang
             db.commit()
@@ -333,24 +370,30 @@ async def _handle_message(db: Session, payload: dict) -> None:
     db.commit()
 
     # Translate into the student's language for what actually gets sent.
-    # Falls back to the English reply if not configured, not needed
-    # (student wrote in English), or the translation call fails.
+    # Claude (Haiku) does this first — cheap token cost instead of Sarvam
+    # Mayura's per-character billing, which was the single largest cost line
+    # item in production. Falls back to Sarvam only if the Claude call fails,
+    # and to the plain English reply if not needed (student wrote in
+    # English) or both translation paths fail.
     outgoing_text = reply_text
     if detected_lang and not detected_lang.startswith("en"):
-        translated = await translate_text(reply_text, "en-IN", detected_lang)
+        translated = await translate_with_claude(reply_text, detected_lang)
+        if not translated:
+            translated = await translate_text(reply_text, "en-IN", detected_lang)
         if translated:
             outgoing_text = translated
 
-    # Send back over Wati — as a voice note if the student spoke or explicitly
-    # asked for an audio reply, a generated diagram (with the explanation as
-    # its caption) if the tutor decided one was warranted, or plain text
-    # otherwise. Falls through to text if any richer attempt fails (checking
-    # actual success, not just "got a response back" — a failed send still
-    # returns a {"sent": False, ...} dict, not None, so checking for None
-    # alone would wrongly treat that as handled and never fall back), so the
-    # student always gets *something*.
+    # Send back over Wati — as a voice note only if the student explicitly
+    # asked for an audio reply (never just because their own input was
+    # voice), a generated diagram (with the explanation as its caption) if
+    # the tutor decided one was warranted, or plain text otherwise. Falls
+    # through to text if any richer attempt fails (checking actual success,
+    # not just "got a response back" — a failed send still returns a
+    # {"sent": False, ...} dict, not None, so checking for None alone would
+    # wrongly treat that as handled and never fall back), so the student
+    # always gets *something*.
     send_result = None
-    if is_voice_input:
+    if send_voice_reply:
         audio_reply = await synthesize_speech(outgoing_text, detected_lang)
         if audio_reply:
             send_result = await send_whatsapp_audio(from_phone, audio_reply)
@@ -360,12 +403,18 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 # Also send the text transcript, in the same language as the
                 # voice note, so the student has it in writing too.
                 await send_whatsapp_message(from_phone, outgoing_text)
-    elif image_prompt:
+    if image_prompt:
         image_bytes = await generate_image(image_prompt)
         if image_bytes:
-            send_result = await send_whatsapp_image(from_phone, image_bytes, caption=outgoing_text)
-            if not send_result.get("sent"):
-                print(f"[whatsapp] send_whatsapp_image failed for {from_phone}: {send_result}")
+            image_result = await send_whatsapp_image(from_phone, image_bytes, caption=outgoing_text)
+            if not image_result.get("sent"):
+                print(f"[whatsapp] send_whatsapp_image failed for {from_phone}: {image_result}")
+            elif not send_result:
+                # Voice reply (if any) already covered the spoken explanation;
+                # the image send itself counts as having delivered something,
+                # so only treat this as the "send_result" when there wasn't
+                # already a successful voice send above.
+                send_result = image_result
     if not send_result or not send_result.get("sent"):
         fallback_result = await send_whatsapp_message(from_phone, outgoing_text)
         if not fallback_result.get("sent"):

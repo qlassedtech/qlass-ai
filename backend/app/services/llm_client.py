@@ -63,3 +63,44 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
         return text or fallback
     except anthropic.APIError:
         return fallback
+
+
+async def translate_with_claude(
+    text: str, target_language_code: str, model: str = "claude-haiku-4-5-20251001"
+) -> str | None:
+    """
+    Translate the tutor's English reply into the student's language using
+    Claude (Haiku, for cost) instead of a dedicated translation API.
+
+    Sarvam's Mayura charges per character and was consistently the single
+    biggest cost line item in production — bigger than TTS or STT combined —
+    since almost every reply to a Bihar student needs translating. Folding
+    translation into the same LLM call path we already pay for replaces that
+    per-character billing with ordinary (cheap, Haiku-tier) token cost, and
+    as a bonus keeps tone/idiom decisions in one model's "voice" rather than
+    handing already-natural phrasing to a second, more literal translator.
+    Returns None (letting the caller fall back to Sarvam) on any failure,
+    rather than silently sending an untranslated English reply.
+    """
+    if _client is None:
+        return None
+
+    lang_name = "Hindi" if target_language_code.startswith("hi") else target_language_code
+    system_prompt = (
+        f"Translate the given text into natural, colloquial {lang_name} as spoken in Bihar, India. "
+        "Keep it warm and conversational, the way a friendly tutor talks to a student — not stiff or "
+        "overly literal. Preserve all markdown formatting (*bold* markers) and line breaks exactly as "
+        "in the original. Output ONLY the translated text — no preamble, no quotes, no explanation."
+    )
+    try:
+        response = await _client.messages.create(
+            model=model,
+            max_tokens=1024,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": text}],
+        )
+        translated = "".join(block.text for block in response.content if block.type == "text").strip()
+        return translated or None
+    except anthropic.APIError:
+        return None

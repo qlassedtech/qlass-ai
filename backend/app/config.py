@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Sarvam (Indic speech-to-text / text-to-speech) — Voice Tutor (Phase 11)
     sarvam_api_key: str | None = None
     sarvam_language_code: str = "en-IN"
-    sarvam_tts_speaker: str = "shubh"
+    sarvam_tts_speaker: str = "priya"
 
     # Azure AI Vision (OCR for image-based homework/question photos)
     azure_vision_endpoint: str | None = None
