@@ -27,7 +27,10 @@ class Student(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(Text, nullable=False)
-    phone = Column(Text, unique=True, nullable=False)
+    # Not unique — a shared family phone can have more than one student
+    # profile; see app.services.active_profile for how the active one is
+    # resolved per incoming message.
+    phone = Column(Text, nullable=False, index=True)
     class_ = Column("class", Text)
     board = Column(Text)
     school = Column(Text)
@@ -44,6 +47,11 @@ class Student(Base):
     off_level_count = Column(Integer, default=0)
     suggested_class = Column(Text)
     gender = Column(Text)
+    active_document_text = Column(Text)
+    active_quiz_id = Column(Integer, ForeignKey("quizzes.id"))
+    focus_topic = Column(Text)
+    hints_given_count = Column(Integer, default=0)
+    direct_solutions_count = Column(Integer, default=0)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:
@@ -61,6 +69,7 @@ class Student(Base):
             "board": self.board,
             "school": self.school,
             "preferred_language": self.preferred_language,
+            "focus_topic": self.focus_topic,
         }
 
 

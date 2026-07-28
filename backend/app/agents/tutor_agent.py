@@ -11,7 +11,7 @@ from app.services.llm_client import call_llm, classify
 # each tag wherever it appears and strip all of them.
 _TRACK_TAG = re.compile(
     r'\n?\[\[TRACK topic="([^"]*)" evaluated=(true|false) correct=(true|false|null) '
-    r"image=(true|false) audio=(true|false) off_level=(true|false) video=(true|false)\]\]"
+    r"image=(true|false) audio=(true|false) off_level=(true|false) video=(true|false) solved=(true|false|na)\]\]"
 )
 _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
 _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
@@ -29,6 +29,7 @@ class TutorAgent(BaseAgent):
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
         video_enabled: bool = False,
+        active_document_text: str | None = None,
     ) -> str:
         profile = (
             f"You are the Qlass AI Tutor, speaking with a student in class "
@@ -107,7 +108,8 @@ class TutorAgent(BaseAgent):
             "TRACKING TAG (mandatory, hidden from the student, stripped before sending) — end EVERY "
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
-            "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false>]]\n"
+            "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false> "
+            "solved=<true|false|na>]]\n"
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -115,6 +117,13 @@ class TutorAgent(BaseAgent):
             "you asked last turn (i.e. you just said whether they got it right or wrong). false for "
             "every other kind of reply (explanations, new check questions, greetings, off-topic chat).\n"
             "- correct: true/false if evaluated=true, otherwise null.\n"
+            "- solved: only applies when the STUDENT brought you a problem/equation/exercise to work "
+            "out (per the hint-not-solve rule above) — true if you gave the full worked solution/answer "
+            "this reply, false if you gave a hint or partial step instead, na for every other kind of "
+            "reply (explanations, check questions, off-topic chat). This is purely a background signal "
+            "for a teacher-facing report on how much a student leans on direct answers vs. working "
+            "things out — never mention it or let it change your own behavior beyond the hint-not-solve "
+            "rule already given.\n"
             + (
                 "- image: true ONLY if the student explicitly asked for a picture/diagram/drawing, OR "
                 "a diagram is genuinely necessary to explain this (e.g. labeled parts of a cell, a "
@@ -129,15 +138,21 @@ class TutorAgent(BaseAgent):
                 else "- image: always false — image generation isn't available for this student.\n"
             )
             + (
-                "- audio: true ONLY if the student typed a message but explicitly asked for a voice "
-                "reply (e.g. \"send as voice\", \"bolke batao\", \"audio mein bhejo\", \"can you say "
-                "this out loud\"). false for ordinary text messages — most replies should stay text, "
-                "this is NOT about whether the student SENT a voice note (that's handled separately). "
-                "IMPORTANT: a real downstream system genuinely converts your text into an actual voice "
-                "message whenever audio=true — this is a real, working feature, not a hypothetical. When "
-                "a student asks for voice, agree normally (e.g. \"Sure!\") and set audio=true — NEVER "
-                "say you can't send voice messages or apologize for not being able to; that would be "
-                "flatly wrong, since audio=true is exactly what makes it happen.\n"
+                "- audio: true ONLY if the student explicitly asked for a voice reply (e.g. \"send as "
+                "voice\", \"bolke batao\", \"audio mein bhejo\", \"record karke batana\", \"can you say "
+                "this out loud\") — this applies whether they typed that request or SPOKE it in a voice "
+                "note (a spoken \"record karke batana\" counts exactly the same as typing it). false for "
+                "ordinary replies — most should stay text.\n"
+                "IMPORTANT: a real downstream system genuinely converts your reply TEXT into an actual "
+                "voice message whenever audio=true — this is a real, working feature, not a hypothetical, "
+                "and your written reply IS the voice message, word for word. That means:\n"
+                "  (a) When a student asks for voice, agree normally (e.g. \"Sure!\") and set audio=true "
+                "— NEVER say you can't send voice messages or apologize for not being able to.\n"
+                "  (b) NEVER write a reply that only acknowledges or promises to explain (e.g. \"Sure, "
+                "I'll send you a voice explanation!\") without actually explaining anything — there is no "
+                "separate follow-up turn where the real explanation happens; whatever you write now is "
+                "the entire spoken message the student receives. Write the actual explanation itself, "
+                "just like you would for a text-only reply.\n"
                 if voice_enabled
                 else "- audio: always false — voice replies aren't available for this student. If asked "
                 "for one, just say you can't right now and continue in text, briefly and naturally.\n"
@@ -179,11 +194,33 @@ class TutorAgent(BaseAgent):
                 f"they're asking now, you can naturally check whether they've got it better now, or "
                 f"weave in a reminder — but don't force it if it's unrelated to the current question."
             )
+        if student.get("focus_topic"):
+            profile += (
+                f"\n\nThis student's teacher has asked for extra focus on: {student['focus_topic']}. "
+                f"When there's a natural opening (the student finishes a topic, asks what to study next, "
+                f"or asks for practice questions), steer toward this — but always answer whatever they "
+                f"actually asked first; never ignore their real question to force this in."
+            )
         if retrieved_chunks:
             knowledge = "\n\n".join(retrieved_chunks)
             profile += (
                 "\n\nUse the following textbook material as ground truth where relevant:\n\n"
                 f"{knowledge}"
+            )
+        if active_document_text:
+            # Kept OUTSIDE the sliding chat-history window on purpose: that
+            # window only holds the last ~6 exchanges, so a long problem set
+            # (e.g. a 20-question homework PDF) scrolls the original
+            # questions out of context after just a few Q&A turns — the
+            # tutor then has no idea what "Q5" even refers to and asks the
+            # student to re-paste it (confirmed live). Pinning the most
+            # recently uploaded document/photo here means it stays available
+            # for the entire session, however long the problem set is.
+            profile += (
+                "\n\nThe student uploaded this document/photo earlier in the conversation — refer back "
+                "to it whenever they mention a question number, or any content from it, even if that "
+                "upload has scrolled out of the visible chat history:\n\n"
+                f"{active_document_text}"
             )
         return profile
 
@@ -213,11 +250,13 @@ class TutorAgent(BaseAgent):
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
         video_enabled: bool = False,
+        active_document_text: str | None = None,
     ) -> dict:
         # TODO Phase 6: replace [] with real RAG retrieval against document_chunks
         retrieved_chunks: list[str] = []
         system_prompt = self.build_context(
-            student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled
+            student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
+            active_document_text,
         )
         messages = (history or []) + [{"role": "user", "content": message}]
         current_lang = student.get("preferred_language") or "en-IN"
@@ -231,7 +270,18 @@ class TutorAgent(BaseAgent):
         # as the main reply.
         llm_result, classify_result = await asyncio.gather(
             call_llm(system_prompt=system_prompt, messages=messages),
-            classify(self._language_classifier_prompt(current_lang), messages, fallback=current_lang),
+            classify(
+                self._language_classifier_prompt(current_lang),
+                # Only the latest message, not the full conversation history
+                # — the classifier prompt itself says to decide fresh off
+                # the LATEST message, and the one piece of prior context it
+                # actually needs (the last-known language) is already passed
+                # separately as `current_lang`. Sending the full history
+                # here was pure wasted input tokens for a call this narrow.
+                [{"role": "user", "content": message}],
+                fallback=current_lang,
+                model="claude-haiku-4-5-20251001",
+            ),
         )
         raw_reply = llm_result.text
         lang = classify_result.text
@@ -242,9 +292,13 @@ class TutorAgent(BaseAgent):
             "main_model": llm_result.model,
             "main_input_tokens": llm_result.input_tokens,
             "main_output_tokens": llm_result.output_tokens,
+            "main_cache_write_tokens": llm_result.cache_write_tokens,
+            "main_cache_read_tokens": llm_result.cache_read_tokens,
             "classify_model": classify_result.model,
             "classify_input_tokens": classify_result.input_tokens,
             "classify_output_tokens": classify_result.output_tokens,
+            "classify_cache_write_tokens": classify_result.cache_write_tokens,
+            "classify_cache_read_tokens": classify_result.cache_read_tokens,
         }
 
         match = _TRACK_TAG.search(raw_reply)
@@ -266,10 +320,11 @@ class TutorAgent(BaseAgent):
                 "wants_audio_reply": False,
                 "off_level_class": None,
                 "video_query": None,
+                "solved_directly": None,
                 "usage": usage,
             }
 
-        topic, evaluated, correct, wants_image, wants_audio, off_level, wants_video = match.groups()
+        topic, evaluated, correct, wants_image, wants_audio, off_level, wants_video, solved = match.groups()
 
         image_prompt = None
         image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
@@ -303,5 +358,6 @@ class TutorAgent(BaseAgent):
             "image_prompt": image_prompt,
             "off_level_class": off_level_class,
             "video_query": video_query,
+            "solved_directly": {"true": True, "false": False, "na": None}[solved],
             "usage": usage,
         }

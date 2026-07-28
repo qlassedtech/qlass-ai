@@ -18,36 +18,52 @@ from app.services import cost_tracker  # noqa: E402
 def _estimate(db) -> None:
     """
     Rough per-turn cost for a few usage profiles, using real measured Claude
-    token counts from a plain-text turn plus the documented per-unit rates
-    for translation/voice/image add-ons — see cost_tracker.PRICING for the
-    per-unit numbers this is built from (Sarvam rates are exact, from a real
-    invoice; Claude/Azure rates are estimates until calibrated against a
-    real bill).
+    token counts plus the documented per-unit rates for translation/voice/
+    image add-ons — see cost_tracker.PRICING for the per-unit numbers this
+    is built from (Sarvam rates are exact, from a real invoice; Claude/
+    Azure rates are estimates until calibrated against a real bill).
+
+    Two cost profiles shown per chat type: the FIRST turn of a session
+    (system prompt not cached yet — pays the cache-write premium) and every
+    SUBSEQUENT turn within the same ~5-minute window (system prompt hits
+    Anthropic's prompt cache at ~10% of normal input cost). Measured live:
+    first-turn main reply ~₹0.77 raw, cached-turn main reply ~₹0.24 raw.
     """
     m = cost_tracker.MARKUP_MULTIPLIER
     p = cost_tracker.PRICING
 
-    # Measured on a real plain-English tutor turn (main reply + language classify).
-    text_turn_raw = 0.37732 + 1.00583
-    text_turn = text_turn_raw * m
+    # Measured on a real plain-English tutor turn (main reply on Sonnet +
+    # language classify on Haiku, now trimmed to just the latest message).
+    first_turn_raw = 0.766715 + 0.02226
+    cached_turn_raw = 0.242026 + 0.02247
+    first_turn = first_turn_raw * m
+    cached_turn = cached_turn_raw * m
 
     haiku = p["claude_haiku"]
     translate_raw = (150 / 1000) * haiku["input_per_1k_tokens"] + (120 / 1000) * haiku["output_per_1k_tokens"]
-    hindi_turn = text_turn + translate_raw * m
+    hindi_add_on = translate_raw * m
 
     stt_raw = (12 / 60) * p["sarvam_stt"]["per_minute"]
     tts_raw = 400 * p["sarvam_tts"]["per_char"]
-    voice_turn = hindi_turn + (stt_raw + tts_raw) * m
+    voice_add_on = (stt_raw + tts_raw) * m
 
     image_add_on = p["azure_image"]["per_call"] * m
 
     balance = cost_tracker.get_balance(db)
     print(f"Current balance: ₹{balance:.2f}\n")
-    print(f"{'Chat type':<32}{'Cost/turn':>12}{'Turns left':>14}")
-    print(f"{'Plain English text':<32}₹{text_turn:>10.2f}{balance / text_turn:>14.0f}")
-    print(f"{'Hindi text (w/ translation)':<32}₹{hindi_turn:>10.2f}{balance / hindi_turn:>14.0f}")
-    print(f"{'Voice in + voice reply':<32}₹{voice_turn:>10.2f}{balance / voice_turn:>14.0f}")
+    print(f"{'Chat type':<32}{'1st turn':>12}{'cached turn':>14}{'turns @cached':>16}")
+    print(f"{'Plain English text':<32}₹{first_turn:>10.2f}₹{cached_turn:>12.2f}{balance / cached_turn:>16.0f}")
+    print(
+        f"{'Hindi text (w/ translation)':<32}₹{first_turn + hindi_add_on:>10.2f}"
+        f"₹{cached_turn + hindi_add_on:>12.2f}{balance / (cached_turn + hindi_add_on):>16.0f}"
+    )
+    print(
+        f"{'Voice in + voice reply':<32}₹{first_turn + hindi_add_on + voice_add_on:>10.2f}"
+        f"₹{cached_turn + hindi_add_on + voice_add_on:>12.2f}"
+        f"{balance / (cached_turn + hindi_add_on + voice_add_on):>16.0f}"
+    )
     print(f"\n(+ ₹{image_add_on:.2f} extra whenever a diagram is generated)")
+    print("Cache hits require turns within ~5 min of each other — a slow/cold session pays the '1st turn' rate again.")
 
 
 def main() -> None:

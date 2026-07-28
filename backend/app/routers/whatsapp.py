@@ -1,14 +1,13 @@
-import asyncio
 import logging
-import time
-from collections import defaultdict, deque
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
+from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage, Quiz, Question, Answer
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -36,6 +35,28 @@ from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
 from app.services.youtube_client import find_best_video
 from app.services import cost_tracker
+from app.services.rate_limit import is_rate_limited, student_lock
+from app.services.active_profile import (
+    looks_like_new_profile_request,
+    get_active_profile,
+    set_active_profile,
+    build_disambiguation_prompt,
+    match_student_by_name,
+)
+from app.services.progress_report import (
+    looks_like_progress_request,
+    get_student_stats,
+    get_activity_stats,
+    get_welcome_back_note,
+    format_progress_message,
+)
+from app.services.quiz_service import (
+    extract_quiz_topic,
+    looks_like_quiz_stop,
+    generate_quiz_questions,
+    grade_answer,
+    QUIZ_QUESTION_COUNT,
+)
 from app.agents.tutor_agent import TutorAgent
 
 logger = logging.getLogger(__name__)
@@ -46,6 +67,19 @@ tutor_agent = TutorAgent()
 HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
 WEAK_TOPICS_LIMIT = 5
 OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
+
+# A message this long is almost certainly a multi-question problem set (a
+# pasted homework list, an OCR'd photo of one, or an extracted PDF/Word
+# document) rather than a single question — pin it as the student's active
+# document (see Student.active_document_text) so later turns like "now Q5"
+# still work once the original message has scrolled out of HISTORY_TURNS.
+ACTIVE_DOCUMENT_MIN_CHARS = 400
+# Upper bound on what actually gets pinned — confirmed live that a 33,000-
+# char paste got stored with no cap at all, permanently bloating that
+# student's system prompt (and cost) for the rest of the session. 8,000
+# chars comfortably covers a real 20-30 question DPP/homework sheet while
+# still bounding the worst case.
+ACTIVE_DOCUMENT_MAX_CHARS = 8000
 
 _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
 
@@ -63,21 +97,109 @@ FULL_ACCESS_PHONES = {"918789674434", "918460184666", "918252345266"}
 # deliberately for a first pass rather than not offering it at all.
 OPPOSITE_GENDER_SPEAKER = {"male": "priya", "female": "shubh"}
 
-# Per-student locks so messages from the same student are handled one at a
-# time, in order. Without this, a student sending two messages a few seconds
-# apart (common — they re-ask or add a follow-up before the first reply has
-# come back) spawns two concurrent background tasks that each read the chat
-# history before the other has committed its reply, so both answer against
-# the same stale context — producing duplicate/overlapping/out-of-order
-# replies instead of the second one building on the first.
-_student_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-# Simple sliding-window rate limit per student — protects against a script
-# (or a bug on the sender's side) hammering the webhook and burning paid API
-# calls faster than any human actually types.
-RATE_LIMIT_MAX_MESSAGES = 15
-RATE_LIMIT_WINDOW_SECONDS = 60
-_message_timestamps: dict[str, deque] = defaultdict(deque)
+def _assistant_voice_gender(student: Student) -> str:
+    """
+    Which gender the tutor's own voice reads as — needed so a Hindi
+    translation can use matching grammatically-gendered verb forms (Hindi
+    conjugates first-person verbs by the speaker's gender), not just for
+    picking the TTS speaker name. Falls back to the configured default
+    speaker's gender when the student's own gender hasn't been detected yet.
+    """
+    speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender, settings.sarvam_tts_speaker)
+    return "male" if speaker == "shubh" else "female"
+
+
+# Per-feature WEEKLY usage caps (no daily tracking at all) — the actual AI
+# cost per voice-reply/diagram/video (see cost_tracker.PRICING) is high
+# enough that unlimited usage isn't sustainable at a mass-market price;
+# these are the lever that keeps a subscription price profitable. Counted
+# against the existing credit_events ledger (each already writes a row
+# tagged by service), not a separate counter. All soft: hitting one just
+# skips that extra (falling back to plain text, which already stands on its
+# own) rather than blocking the whole conversation — the actual hard stop
+# is the monthly ₹ credit limit below, which covers the core text feature.
+FEATURE_LIMITS = {
+    "voice": {"services": ["sarvam_tts"], "period": "week", "max": 5, "label": "voice replies"},
+    "image_generation": {"services": ["azure_image"], "period": "week", "max": 3, "label": "diagrams"},
+    "youtube_videos": {"services": ["youtube_search", "youtube_search_overage"], "period": "week", "max": 5, "label": "videos"},
+}
+
+# Per-student monthly AI credit allowance — the hard stop for the core
+# (text) tutoring feature. Tracked in ₹ actually spent (at the already-2x
+# ledger rate), not a raw message count, since cost varies a lot per turn
+# (a Hindi translation or an off-level question costs more than a short
+# English answer) — capping by ₹ is the accurate version of "how much of
+# this month's subscription value have they used."
+MONTHLY_STUDENT_CREDIT_LIMIT = 100.0  # INR
+USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]
+
+
+def _weekly_usage_snapshot(db: Session, student: Student) -> dict[str, int]:
+    """
+    One query for every soft-capped service's usage this week, instead of a
+    separate round-trip per feature (voice/image/video checks used to each
+    hit the database independently — up to 3 queries per turn).
+    """
+    if student.phone in FULL_ACCESS_PHONES:
+        return {}
+    all_services = [service for cfg in FEATURE_LIMITS.values() for service in cfg["services"]]
+    return cost_tracker.get_usage_counts_by_service(db, student.id, all_services, "week")
+
+
+def _usage_status(student: Student, feature: str, weekly_counts: dict[str, int]) -> tuple[int, int, str]:
+    cfg = FEATURE_LIMITS[feature]
+    if student.phone in FULL_ACCESS_PHONES:
+        # Caps exist to keep a customer subscription price profitable — they
+        # don't apply to the team's own internal demo/testing numbers.
+        return 0, cfg["max"], cfg["period"]
+    used = sum(weekly_counts.get(service, 0) for service in cfg["services"])
+    return used, cfg["max"], cfg["period"]
+
+
+def _limit_reached_message(feature: str, used: int, limit: int, period: str) -> str:
+    label = FEATURE_LIMITS[feature]["label"]
+    return f"You've used all {limit} {label} for this week — check back next Monday!"
+
+
+def _threshold_notice(feature: str, used: int, limit: int, period: str) -> str | None:
+    label = FEATURE_LIMITS[feature]["label"]
+    for fraction in USAGE_WARNING_FRACTIONS:
+        if used == round(limit * fraction):
+            if fraction >= 1.0:
+                return f"⚠️ That was your last {label[:-1] if label.endswith('s') else label} for this week — more available next Monday."
+            return f"ℹ️ Heads up — you've used {used}/{limit} {label} for this week ({round(fraction * 100)}%)."
+    return None
+
+
+def _monthly_spend_status(db: Session, student: Student) -> float:
+    if student.phone in FULL_ACCESS_PHONES:
+        return 0.0  # internal demo/testing numbers aren't metered against the customer credit limit
+    return cost_tracker.get_student_monthly_spend(db, student.id)
+
+
+def _monthly_limit_reached_message() -> str:
+    return f"You've used all ₹{MONTHLY_STUDENT_CREDIT_LIMIT:.0f} of this month's AI credit — resets on the 1st of next month!"
+
+
+def _monthly_threshold_notice(spent_before: float, spent_after: float) -> str | None:
+    """
+    Spend is a continuous ₹ amount, not an integer count, so it won't land
+    exactly on a 50%/90% boundary — instead, check whether this turn's cost
+    carried the running total *across* a threshold, and report the highest
+    one crossed (covers an expensive single turn, e.g. voice, jumping past
+    more than one threshold at once, so only one notice goes out per turn).
+    """
+    crossed = [f for f in USAGE_WARNING_FRACTIONS if spent_before < MONTHLY_STUDENT_CREDIT_LIMIT * f <= spent_after]
+    if not crossed:
+        return None
+    fraction = max(crossed)
+    if fraction >= 1.0:
+        return _monthly_limit_reached_message()
+    return (
+        f"ℹ️ Heads up — you've used ₹{spent_after:.2f} of your ₹{MONTHLY_STUDENT_CREDIT_LIMIT:.0f} "
+        f"monthly AI credit ({round(fraction * 100)}%)."
+    )
 
 
 def _looks_affirmative(text: str) -> bool:
@@ -85,28 +207,62 @@ def _looks_affirmative(text: str) -> bool:
     return bool(words & _AFFIRMATIVE_WORDS)
 
 
-def _is_rate_limited(phone: str) -> bool:
-    now = time.monotonic()
-    window = _message_timestamps[phone]
-    while window and now - window[0] > RATE_LIMIT_WINDOW_SECONDS:
-        window.popleft()
-    window.append(now)
-    return len(window) > RATE_LIMIT_MAX_MESSAGES
-
-
-def _get_or_create_student(db: Session, from_phone: str) -> Student:
-    student = db.query(Student).filter(Student.phone == from_phone).first()
-    if student is None:
-        features = (
-            {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
-            if from_phone in FULL_ACCESS_PHONES
-            else {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
-        )
-        student = Student(name="New Student", phone=from_phone, features=features)
-        db.add(student)
-        db.commit()
-        db.refresh(student)
+def _create_new_student(db: Session, from_phone: str) -> Student:
+    features = (
+        {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
+        if from_phone in FULL_ACCESS_PHONES
+        else {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
+    )
+    student = Student(name="New Student", phone=from_phone, features=features)
+    db.add(student)
+    db.commit()
+    db.refresh(student)
     return student
+
+
+async def _resolve_active_student(db: Session, from_phone: str, message_text: str) -> tuple[Student, str | None]:
+    """
+    Returns (student, early_reply). If early_reply is set, the caller should
+    send it and stop instead of treating this message as a real tutoring
+    question — covers two cases: we don't know which student is chatting
+    yet (disambiguation) and we just created a fresh profile for a new
+    sibling (which needs a "what's your name?" confirmation, not the LLM
+    trying to answer what was really a "different child" trigger phrase).
+    For the overwhelmingly common case (one profile per phone) this is a
+    single query with zero extra overhead; the multi-profile path only
+    kicks in for phones that actually have more than one student on them.
+    """
+    students = db.query(Student).filter(Student.phone == from_phone).order_by(Student.id).all()
+
+    if not students:
+        return _create_new_student(db, from_phone), None
+
+    if looks_like_new_profile_request(message_text):
+        new_student = _create_new_student(db, from_phone)
+        await set_active_profile(from_phone, new_student.id)
+        missing = next_missing_field(new_student)
+        question = missing[1] if missing else "What's your name?"
+        if missing:
+            new_student.pending_profile_field = missing[0]
+            db.commit()
+        return new_student, f"Got it, setting up a new profile! {question}"
+
+    if len(students) == 1:
+        return students[0], None
+
+    active_id = await get_active_profile(from_phone)
+    if active_id:
+        match = next((s for s in students if s.id == active_id), None)
+        if match:
+            return match, None
+
+    name_match = match_student_by_name(students, message_text)
+    if name_match:
+        await set_active_profile(from_phone, name_match.id)
+        return name_match, None
+
+    prompt = build_disambiguation_prompt([s.name for s in students])
+    return students[0], prompt
 
 
 @router.post("/webhook")
@@ -134,7 +290,13 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
     if not verify_webhook_auth(request.headers.get("authorization")):
         raise HTTPException(status_code=403, detail="Invalid webhook auth")
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        # Malformed/non-JSON body — Wati itself never sends one, but
+        # anything reachable over the internet eventually gets a malformed
+        # request, and this previously fell through as an unhandled 500.
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     # Guard against Wati redelivering/retrying a webhook call for a message
     # we already processed — mark it seen as early as possible, before any
@@ -164,23 +326,23 @@ async def _process_webhook_payload(payload: dict) -> None:
     would already be closed by the time a background task runs.
     """
     phone = payload.get("waId")
-    lock = _student_locks[phone] if phone else asyncio.Lock()
-    async with lock:
-        db = SessionLocal()
-        try:
-            await _handle_message(db, payload)
-        except Exception:
-            # An uncaught exception here previously meant the student got no
-            # reply at all and we had no record of why — log the full
-            # traceback and let them know something broke instead of leaving
-            # them hanging.
-            logger.exception("Unhandled error processing webhook payload for %s", phone)
-            if phone:
-                await send_whatsapp_message(
-                    phone, "Sorry, something went wrong on my end — please try sending that again."
-                )
-        finally:
-            db.close()
+    try:
+        async with (student_lock(phone) if phone else nullcontext()):
+            db = SessionLocal()
+            try:
+                await _handle_message(db, payload)
+            finally:
+                db.close()
+    except Exception:
+        # An uncaught exception here (including failing to even acquire the
+        # per-student lock) previously meant the student got no reply at all
+        # and we had no record of why — log the full traceback and let them
+        # know something broke instead of leaving them hanging.
+        logger.exception("Unhandled error processing webhook payload for %s", phone)
+        if phone:
+            await send_whatsapp_message(
+                phone, "Sorry, something went wrong on my end — please try sending that again."
+            )
 
 
 async def _handle_message(db: Session, payload: dict) -> None:
@@ -195,9 +357,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if not from_phone:
         return
 
-    student = _get_or_create_student(db, from_phone)
-
-    if _is_rate_limited(from_phone):
+    if await is_rate_limited(from_phone):
         await send_whatsapp_message(
             from_phone, "You're sending messages a bit fast — please wait a moment before sending more."
         )
@@ -209,7 +369,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
         )
         return
 
+    # Parsed before resolving which student profile is active, so a shared
+    # family phone with multiple profiles can be disambiguated by matching
+    # a name mentioned in this text (see _resolve_active_student). For
+    # audio/image/document messages the text isn't known yet at this point
+    # (needs downloading/transcribing/OCR first), so name-matching only
+    # applies to plain text messages — that's an acceptable gap: someone on
+    # an ambiguous shared phone would still get asked "who's this?" before
+    # a voice/photo message is processed.
     parsed = parse_incoming_message(payload)
+    probe_text = parsed[1] if parsed else ""
+    student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
+    if early_reply:
+        await send_whatsapp_message(from_phone, early_reply)
+        return
+
     if parsed:
         _, message_text = parsed
     else:
@@ -293,6 +467,15 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if not message_text:
         return
 
+    # Computed BEFORE this message is saved, so "days since last message"
+    # reflects the prior session, not this one — otherwise it would always
+    # read as 0 days once this message is in chat_history.
+    welcome_back_note = get_welcome_back_note(db, student.id)
+
+    if len(message_text) >= ACTIVE_DOCUMENT_MIN_CHARS:
+        student.active_document_text = message_text[:ACTIVE_DOCUMENT_MAX_CHARS]
+        db.commit()
+
     # Pull recent conversation turns *before* saving this message, so the
     # tutor has context but doesn't see this message twice.
     prior_rows = (
@@ -310,6 +493,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     image_prompt = None
     video_query = None
+    did_answer_via_llm = False
+    monthly_spend_before = _monthly_spend_status(db, student)
+    quiz_topic_request = extract_quiz_topic(message_text)
 
     if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
         # Special case, not a normal profile field — confirming (or declining)
@@ -332,7 +518,115 @@ async def _handle_message(db: Session, payload: dict) -> None:
         db.commit()
         reply_text = "Got it, thanks! 👍 What else can I help you with?"
         detected_lang = student.preferred_language or "en-IN"
+    elif student.active_quiz_id and looks_like_quiz_stop(message_text):
+        # Free — no LLM call, so available even if the monthly credit is
+        # exhausted (a student shouldn't get stuck unable to exit a quiz).
+        student.active_quiz_id = None
+        db.commit()
+        reply_text = "No problem, quiz stopped! What else can I help you with?"
+        detected_lang = student.preferred_language or "en-IN"
+    elif looks_like_progress_request(message_text):
+        # Computed directly from real TopicProgress rows — no LLM call, so
+        # no cost and no risk of the model inventing stats. Checked before
+        # the monthly credit-limit gate since it costs nothing either way.
+        stats = get_student_stats(db, student.id)
+        activity = get_activity_stats(db, student.id)
+        reply_text = format_progress_message(stats, activity)
+        detected_lang = student.preferred_language or "en-IN"
+    elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
+        # Monthly ₹ credit limit reached — hard stop before the paid LLM
+        # call, since this is the core metered feature the subscription
+        # price is actually sized against.
+        #
+        # Sent directly and returned early, deliberately NOT saved to
+        # chat_history — a system notice like this isn't tutoring content,
+        # and saving it as an "assistant" turn pollutes the model's own
+        # conversation history: confirmed live, a later real reply echoed
+        # this exact message back verbatim because it was sitting in
+        # history as if it were the tutor's own prior statement.
+        translated_limit_msg = None
+        lang = student.preferred_language or "en-IN"
+        limit_msg = _monthly_limit_reached_message()
+        if lang and not lang.startswith("en"):
+            translated_result = await translate_with_claude(limit_msg, lang, speaker_gender=_assistant_voice_gender(student))
+            if translated_result:
+                translated_limit_msg = translated_result.text
+                cost_tracker.record_claude_usage(
+                    db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
+                    cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
+                )
+        await send_whatsapp_message(from_phone, translated_limit_msg or limit_msg)
+        return
+    elif student.active_quiz_id:
+        # Treat this message as the answer to the current quiz question.
+        quiz_questions = db.query(Question).filter(Question.quiz_id == student.active_quiz_id).order_by(Question.id).all()
+        answered_count = (
+            db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).count()
+            if quiz_questions else 0
+        )
+        if not quiz_questions or answered_count >= len(quiz_questions):
+            # Shouldn't normally happen (quiz should already have ended), but guard anyway.
+            student.active_quiz_id = None
+            db.commit()
+            reply_text = "Looks like that quiz already wrapped up! What else can I help you with?"
+            detected_lang = student.preferred_language or "en-IN"
+        else:
+            current_question = quiz_questions[answered_count]
+            is_correct, grade_result = await grade_answer(
+                current_question.question_text, current_question.correct_answer, message_text
+            )
+            cost_tracker.record_claude_usage(
+                db, grade_result.model, grade_result.input_tokens, grade_result.output_tokens, student.id,
+                cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
+            )
+            db.add(Answer(
+                question_id=current_question.id, student_id=student.id,
+                given_answer=message_text, is_correct=is_correct,
+            ))
+            db.commit()
+            answered_count += 1
+            feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
+            if answered_count < len(quiz_questions):
+                next_question = quiz_questions[answered_count]
+                reply_text = f"{feedback}\n\nQuestion {answered_count + 1}/{len(quiz_questions)}: {next_question.question_text}"
+            else:
+                all_answers = db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).all()
+                score = sum(1 for a in all_answers if a.is_correct)
+                student.active_quiz_id = None
+                db.commit()
+                reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{len(quiz_questions)}*."
+        detected_lang = student.preferred_language or "en-IN"
+    elif quiz_topic_request:
+        questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_)
+        cost_tracker.record_claude_usage(
+            db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
+            cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
+        )
+        if not questions_data:
+            reply_text = (
+                "Sorry, I couldn't put together a quiz on that right now — want to try a different "
+                "topic, or just ask me questions directly?"
+            )
+        else:
+            quiz = Quiz(student_id=student.id)
+            db.add(quiz)
+            db.commit()
+            db.refresh(quiz)
+            for q in questions_data:
+                db.add(Question(
+                    quiz_id=quiz.id, question_type="short_answer",
+                    question_text=q["question"], correct_answer=q["answer"],
+                ))
+            db.commit()
+            student.active_quiz_id = quiz.id
+            db.commit()
+            reply_text = (
+                f"Great, let's do a {len(questions_data)}-question quiz on *{quiz_topic_request}*! 📝\n\n"
+                f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
+            )
+        detected_lang = student.preferred_language or "en-IN"
     else:
+        did_answer_via_llm = True
         # Either there was no pending question, or the student ignored it and
         # asked something else — drop the pending question either way so we
         # don't keep misreading their answers, then answer normally.
@@ -369,20 +663,56 @@ async def _handle_message(db: Session, payload: dict) -> None:
             image_generation_enabled=student.has_feature("image_generation"),
             voice_enabled=student.has_feature("voice"),
             video_enabled=student.has_feature("youtube_videos"),
+            active_document_text=student.active_document_text,
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
         video_query = result["video_query"]
         usage = result["usage"]
-        cost_tracker.record_claude_usage(db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id)
         cost_tracker.record_claude_usage(
-            db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id
+            db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
+            cache_write_tokens=usage["main_cache_write_tokens"], cache_read_tokens=usage["main_cache_read_tokens"],
+        )
+        cost_tracker.record_claude_usage(
+            db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id,
+            cache_write_tokens=usage["classify_cache_write_tokens"], cache_read_tokens=usage["classify_cache_read_tokens"],
         )
         if result["wants_audio_reply"]:
             send_voice_reply = True
+
+        # Soft weekly caps: voice/image/video are supplements, not the core
+        # paid feature, so hitting their cap just skips that extra (falling
+        # back to the text reply, which already stands on its own) rather
+        # than blocking the whole turn like the monthly ₹ credit hard stop.
+        # One query for all three instead of up to three separate ones.
+        weekly_counts = _weekly_usage_snapshot(db, student)
+        if send_voice_reply:
+            used, limit, _ = _usage_status(student, "voice", weekly_counts)
+            if used >= limit:
+                send_voice_reply = False
+        if image_prompt:
+            used, limit, _ = _usage_status(student, "image_generation", weekly_counts)
+            if used >= limit:
+                image_prompt = None
+        if video_query:
+            used, limit, _ = _usage_status(student, "youtube_videos", weekly_counts)
+            if used >= limit:
+                video_query = None
+
         if detected_lang != student.preferred_language:
             student.preferred_language = detected_lang
+            db.commit()
+
+        # Academic-integrity signal for the teacher digest — how often the
+        # tutor gave a hint vs. a full worked solution when the student
+        # brought a problem to solve. None means "not applicable this turn"
+        # (an explanation, check question, etc., not a problem to solve).
+        if result["solved_directly"] is True:
+            student.direct_solutions_count = (student.direct_solutions_count or 0) + 1
+            db.commit()
+        elif result["solved_directly"] is False:
+            student.hints_given_count = (student.hints_given_count or 0) + 1
             db.commit()
 
         if result["evaluated"]:
@@ -444,10 +774,29 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 student.pending_profile_field = field
                 db.commit()
 
+    if welcome_back_note:
+        reply_text = f"{welcome_back_note}\n\n{reply_text}"
+
     # Save the reply — kept in English (what Claude actually said) so future
     # turns give the model a consistent conversation history to reason over.
+    # Deliberately BEFORE the usage-threshold notice below: that notice is a
+    # system aside, not tutoring content, and saving it into history would
+    # let a future turn see it as if it were the tutor's own prior statement
+    # and potentially echo it back (confirmed live during testing).
     db.add(ChatHistory(student_id=student.id, role="assistant", message=reply_text, agent="tutor"))
     db.commit()
+
+    # This turn's own AI usage just added to this month's spend — warn at
+    # 50%/90%/100% of the ₹100 monthly credit so the hard stop is never a
+    # surprise. Only added to the outgoing message, never to what was just
+    # saved to chat_history above. Only relevant when a real LLM call
+    # actually happened this turn (not the profile-answer/class-confirm
+    # branches, which never touch the monthly credit).
+    if did_answer_via_llm:
+        monthly_spend_after = _monthly_spend_status(db, student)
+        monthly_notice = _monthly_threshold_notice(monthly_spend_before, monthly_spend_after)
+        if monthly_notice:
+            reply_text = f"{reply_text}\n\n{monthly_notice}"
 
     # Translate into the student's language for what actually gets sent.
     # Claude (Haiku) does this first — cheap token cost instead of Sarvam
@@ -457,11 +806,12 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # English) or both translation paths fail.
     outgoing_text = reply_text
     if detected_lang and not detected_lang.startswith("en"):
-        translated_result = await translate_with_claude(reply_text, detected_lang)
+        translated_result = await translate_with_claude(reply_text, detected_lang, speaker_gender=_assistant_voice_gender(student))
         if translated_result:
             outgoing_text = translated_result.text
             cost_tracker.record_claude_usage(
-                db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id
+                db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
+                cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
             )
         else:
             translated = await translate_text(reply_text, "en-IN", detected_lang)
@@ -510,7 +860,8 @@ async def _handle_message(db: Session, payload: dict) -> None:
             logger.error("send_whatsapp_message fallback also failed for %s: %s", from_phone, fallback_result)
 
     if video_query:
-        video = await find_best_video(video_query)
+        video = await find_best_video(video_query, student_language_code=detected_lang, student_class=student.class_)
+        cost_tracker.record_youtube_search(db, student.id)
         if video:
             # Sent as its own follow-up message (Wati has no native rich video
             # embed) rather than folded into the main reply, so the link

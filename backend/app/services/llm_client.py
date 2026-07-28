@@ -14,6 +14,20 @@ class LLMResult:
     model: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+
+
+def _cached_system(system_prompt: str) -> list[dict]:
+    """
+    Marks the system prompt as cacheable. The tutor's system prompt is long
+    and identical across a student's back-and-forth turns within a session
+    (same profile/feature flags, weak_topics rarely changes) but was being
+    resent as fresh input tokens on every single call — a cache hit (any
+    call reusing the same system prompt within Anthropic's 5-minute cache
+    window) costs ~90% less than a fresh read on that portion.
+    """
+    return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
 
 
 async def call_llm(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
@@ -43,12 +57,17 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
         response = await _client.messages.create(
             model=model,
             max_tokens=1024,
-            system=system_prompt,
+            system=_cached_system(system_prompt),
             messages=messages,
         )
         text = "".join(block.text for block in response.content if block.type == "text")
         return LLMResult(
-            text=text, model=model, input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens
+            text=text,
+            model=model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
+            cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError as exc:
         return LLMResult(
@@ -77,7 +96,7 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
             model=model,
             max_tokens=10,
             temperature=0,
-            system=system_prompt,
+            system=_cached_system(system_prompt),
             messages=messages,
         )
         text = "".join(block.text for block in response.content if block.type == "text").strip()
@@ -86,13 +105,18 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
             model=model,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
+            cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError:
         return LLMResult(text=fallback, model=model)
 
 
 async def translate_with_claude(
-    text: str, target_language_code: str, model: str = "claude-haiku-4-5-20251001"
+    text: str,
+    target_language_code: str,
+    model: str = "claude-haiku-4-5-20251001",
+    speaker_gender: str | None = None,
 ) -> LLMResult | None:
     """
     Translate the tutor's English reply into the student's language using
@@ -107,13 +131,27 @@ async def translate_with_claude(
     handing already-natural phrasing to a second, more literal translator.
     Returns None (letting the caller fall back to Sarvam) on any failure,
     rather than silently sending an untranslated English reply.
+
+    `speaker_gender` ("male" or "female") matters for Hindi specifically —
+    Hindi verbs conjugate by the SPEAKER's gender for first-person statements
+    (करता हूँ vs करती हूँ), and a translation with no gender in mind defaults
+    to masculine forms regardless of which TTS voice actually reads it out —
+    confirmed live: a female-voiced reply spoke in grammatically masculine
+    Hindi, which sounds wrong to a native speaker. This aligns the text's
+    grammar with whichever voice (see OPPOSITE_GENDER_SPEAKER) will speak it.
     """
     if _client is None:
         return None
 
     lang_name = "Hindi" if target_language_code.startswith("hi") else target_language_code
+    gender_note = ""
+    if speaker_gender and lang_name == "Hindi":
+        gender_note = (
+            f" The speaker is {speaker_gender} — use grammatically {speaker_gender} first-person verb "
+            f"forms throughout (e.g. {'करता हूँ, दूंगा' if speaker_gender == 'male' else 'करती हूँ, दूंगी'})."
+        )
     system_prompt = (
-        f"Translate the given text into natural, colloquial {lang_name} as spoken in Bihar, India. "
+        f"Translate the given text into natural, colloquial {lang_name} as spoken in Bihar, India.{gender_note} "
         "Keep it warm and conversational, the way a friendly tutor talks to a student — not stiff or "
         "overly literal. Preserve all markdown formatting (*bold* markers) and line breaks exactly as "
         "in the original. Output ONLY the translated text — no preamble, no quotes, no explanation."
@@ -123,14 +161,19 @@ async def translate_with_claude(
             model=model,
             max_tokens=1024,
             temperature=0,
-            system=system_prompt,
+            system=_cached_system(system_prompt),
             messages=[{"role": "user", "content": text}],
         )
         translated = "".join(block.text for block in response.content if block.type == "text").strip()
         if not translated:
             return None
         return LLMResult(
-            text=translated, model=model, input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens
+            text=translated,
+            model=model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
+            cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError:
         return None

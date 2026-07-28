@@ -12,7 +12,10 @@ CREATE TABLE IF NOT EXISTS centres (
 CREATE TABLE IF NOT EXISTS students (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    phone TEXT UNIQUE NOT NULL,
+    -- Not UNIQUE — a shared family phone can have more than one student
+    -- profile (see app.services.active_profile for how the active one is
+    -- resolved per message).
+    phone TEXT NOT NULL,
     class TEXT,
     board TEXT,
     school TEXT,
@@ -24,8 +27,13 @@ CREATE TABLE IF NOT EXISTS students (
     off_level_count INTEGER DEFAULT 0,
     suggested_class TEXT,
     gender TEXT,
+    active_document_text TEXT,
+    focus_topic TEXT,
+    hints_given_count INTEGER DEFAULT 0,
+    direct_solutions_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);
 
 CREATE TABLE IF NOT EXISTS parents (
     id SERIAL PRIMARY KEY,
@@ -83,6 +91,7 @@ CREATE TABLE IF NOT EXISTS chat_history (
     agent TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_chat_history_student_created ON chat_history(student_id, created_at);
 
 CREATE TABLE IF NOT EXISTS quizzes (
     id SERIAL PRIMARY KEY,
@@ -90,6 +99,9 @@ CREATE TABLE IF NOT EXISTS quizzes (
     chapter_id INTEGER REFERENCES chapters(id),
     created_at TIMESTAMPTZ DEFAULT now()
 );
+-- Added here (not in the students CREATE TABLE above) since it references
+-- quizzes, which isn't defined until this point in the file.
+ALTER TABLE students ADD COLUMN IF NOT EXISTS active_quiz_id INTEGER REFERENCES quizzes(id);
 
 CREATE TABLE IF NOT EXISTS questions (
     id SERIAL PRIMARY KEY,
@@ -190,6 +202,7 @@ CREATE TABLE IF NOT EXISTS topic_progress (
     is_correct BOOLEAN,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_topic_progress_student_correct_created ON topic_progress(student_id, is_correct, created_at);
 
 -- Guards against duplicate processing when Wati redelivers/retries a
 -- webhook call for a message we already handled.
