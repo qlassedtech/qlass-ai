@@ -12,6 +12,46 @@ ENERGY_SPIKE_MIN = 0.05
 FLATNESS_NOISE_THRESHOLD = 0.02
 
 
+def get_duration_seconds(audio_bytes: bytes) -> float:
+    """Audio length in seconds, used to bill Sarvam STT (billed per minute). Returns 0.0 if undecodable."""
+    try:
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None)
+        return len(y) / sr if sr else 0.0
+    except Exception:
+        return 0.0
+
+
+# Rough male/female fundamental-frequency (F0) crossover — typical adult male
+# speech sits ~85-180Hz, typical adult female ~165-255Hz. This is a coarse
+# heuristic, not a reliable classifier (school-age voices in particular can
+# sit well outside these adult ranges), but it's a real, working signal
+# rather than nothing — accepted deliberately, error rate and all, so the
+# opposite-gender voice selection has *something* to go on for a first
+# voice note.
+GENDER_PITCH_THRESHOLD_HZ = 165.0
+
+
+def detect_gender_from_pitch(audio_bytes: bytes) -> str | None:
+    """
+    Estimate speaker gender from the average pitch (F0) of a voice note.
+    Returns "male", "female", or None if pitch couldn't be estimated (e.g.
+    too short, too noisy, or undecodable) — callers should treat None as
+    "unknown" and not guess further.
+    """
+    try:
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None)
+        f0, _voiced_flag, _voiced_probs = librosa.pyin(
+            y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"), sr=sr
+        )
+        voiced_f0 = f0[~np.isnan(f0)]
+        if len(voiced_f0) == 0:
+            return None
+        mean_f0 = float(np.mean(voiced_f0))
+        return "male" if mean_f0 < GENDER_PITCH_THRESHOLD_HZ else "female"
+    except Exception:
+        return None
+
+
 def has_audio_glitch(audio_bytes: bytes) -> bool:
     """
     Detects the class of noise/click artifact found in Sarvam's Opus TTS

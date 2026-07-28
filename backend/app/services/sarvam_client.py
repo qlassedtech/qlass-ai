@@ -1,12 +1,16 @@
 import asyncio
 import base64
+import logging
 import re
 
 import httpx
 from app.config import settings
 from app.services.audio_qa import has_audio_glitch
 
+logger = logging.getLogger(__name__)
+
 SARVAM_BASE_URL = "https://api.sarvam.ai"
+TTS_CHAR_LIMIT = 2500
 
 _MARKDOWN_EMPHASIS = re.compile(r"[*_]")
 
@@ -80,13 +84,19 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
         return None
 
 
-async def _call_tts_api(text: str, language_code: str) -> bytes | None:
+async def _call_tts_api(text: str, language_code: str, speaker: str) -> bytes | None:
+    if len(text) > TTS_CHAR_LIMIT:
+        logger.warning(
+            "TTS text (%d chars) exceeds bulbul:v3's %d-char limit — voice note will be truncated mid-reply.",
+            len(text), TTS_CHAR_LIMIT,
+        )
+
     headers = {"api-subscription-key": settings.sarvam_api_key, "Content-Type": "application/json"}
     payload = {
-        "text": text[:2500],  # bulbul:v3 hard limit
+        "text": text[:TTS_CHAR_LIMIT],  # bulbul:v3 hard limit
         "target_language_code": language_code,
         "model": "bulbul:v3",
-        "speaker": settings.sarvam_tts_speaker,
+        "speaker": speaker,
         "output_audio_codec": "opus",
         "speech_sample_rate": "24000",  # opus only supports 8000/12000/16000/24000/48000
     }
@@ -101,10 +111,14 @@ async def _call_tts_api(text: str, language_code: str) -> bytes | None:
         return None
 
 
-async def synthesize_speech(text: str, language_code: str | None = None) -> bytes | None:
+async def synthesize_speech(text: str, language_code: str | None = None, speaker: str | None = None) -> bytes | None:
     """
     Text-to-speech via Sarvam's Bulbul model. Returns Opus-encoded audio
     bytes, or None if Sarvam isn't configured or the call fails.
+
+    `speaker` overrides the configured default voice — used to select an
+    opposite-gender voice from the detected gender of the student's own
+    voice notes (see audio_qa.detect_gender_from_pitch).
 
     Explicitly requests Opus (via output_audio_codec) rather than the
     default WAV — confirmed live that WhatsApp's Business API rejects WAV
@@ -123,9 +137,10 @@ async def synthesize_speech(text: str, language_code: str | None = None) -> byte
         return None
 
     lang = language_code or settings.sarvam_language_code
-    audio = await _call_tts_api(text, lang)
+    voice = speaker or settings.sarvam_tts_speaker
+    audio = await _call_tts_api(text, lang, voice)
     if audio and has_audio_glitch(audio):
-        retry = await _call_tts_api(text, lang)
+        retry = await _call_tts_api(text, lang, voice)
         if retry:
             audio = retry
     return audio

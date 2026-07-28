@@ -1,5 +1,7 @@
 import asyncio
-from collections import defaultdict
+import logging
+import time
+from collections import defaultdict, deque
 
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
@@ -28,10 +30,15 @@ from app.services.profile_builder import (
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
 from app.services.llm_client import translate_with_claude
+from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
+from app.services.youtube_client import find_best_video
+from app.services import cost_tracker
 from app.agents.tutor_agent import TutorAgent
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 tutor_agent = TutorAgent()
@@ -42,6 +49,20 @@ OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before sugges
 
 _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
 
+# Numbers with full feature access during this demo phase (per-account
+# feature configuration at real onboarding is still TODO — see
+# _get_or_create_student). Everyone else gets a plain-text-only tutor: no
+# voice/OCR/image-generation/document costs until they're actually
+# provisioned, so a random or leaked number can't run up paid API spend.
+FULL_ACCESS_PHONES = {"918789674434", "918460184666", "918252345266"}
+
+# Opposite-gender voice: a female voice for a detected-male student, a male
+# voice for a detected-female student. Speaker names are from Sarvam's
+# bulbul:v3 roster. Detection is pitch-based (see audio_qa.detect_gender_
+# from_pitch) — a coarse, admittedly error-prone heuristic accepted
+# deliberately for a first pass rather than not offering it at all.
+OPPOSITE_GENDER_SPEAKER = {"male": "priya", "female": "shubh"}
+
 # Per-student locks so messages from the same student are handled one at a
 # time, in order. Without this, a student sending two messages a few seconds
 # apart (common — they re-ask or add a follow-up before the first reply has
@@ -51,16 +72,37 @@ _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "
 # replies instead of the second one building on the first.
 _student_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# Simple sliding-window rate limit per student — protects against a script
+# (or a bug on the sender's side) hammering the webhook and burning paid API
+# calls faster than any human actually types.
+RATE_LIMIT_MAX_MESSAGES = 15
+RATE_LIMIT_WINDOW_SECONDS = 60
+_message_timestamps: dict[str, deque] = defaultdict(deque)
+
 
 def _looks_affirmative(text: str) -> bool:
     words = set(text.strip().lower().split())
     return bool(words & _AFFIRMATIVE_WORDS)
 
 
+def _is_rate_limited(phone: str) -> bool:
+    now = time.monotonic()
+    window = _message_timestamps[phone]
+    while window and now - window[0] > RATE_LIMIT_WINDOW_SECONDS:
+        window.popleft()
+    window.append(now)
+    return len(window) > RATE_LIMIT_MAX_MESSAGES
+
+
 def _get_or_create_student(db: Session, from_phone: str) -> Student:
     student = db.query(Student).filter(Student.phone == from_phone).first()
     if student is None:
-        student = Student(name="New Student", phone=from_phone)
+        features = (
+            {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
+            if from_phone in FULL_ACCESS_PHONES
+            else {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
+        )
+        student = Student(name="New Student", phone=from_phone, features=features)
         db.add(student)
         db.commit()
         db.refresh(student)
@@ -132,8 +174,7 @@ async def _process_webhook_payload(payload: dict) -> None:
             # reply at all and we had no record of why — log the full
             # traceback and let them know something broke instead of leaving
             # them hanging.
-            import traceback
-            traceback.print_exc()
+            logger.exception("Unhandled error processing webhook payload for %s", phone)
             if phone:
                 await send_whatsapp_message(
                     phone, "Sorry, something went wrong on my end — please try sending that again."
@@ -150,18 +191,34 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # voice reply) turns this on, further down.
     send_voice_reply = False
 
+    from_phone = payload.get("waId")
+    if not from_phone:
+        return
+
+    student = _get_or_create_student(db, from_phone)
+
+    if _is_rate_limited(from_phone):
+        await send_whatsapp_message(
+            from_phone, "You're sending messages a bit fast — please wait a moment before sending more."
+        )
+        return
+
+    if not cost_tracker.has_credits(db):
+        await send_whatsapp_message(
+            from_phone, "We're temporarily out of AI credits — please check back a bit later. Sorry for the inconvenience!"
+        )
+        return
+
     parsed = parse_incoming_message(payload)
     if parsed:
-        from_phone, message_text = parsed
-        student = _get_or_create_student(db, from_phone)
+        _, message_text = parsed
     else:
         audio_parsed = parse_incoming_audio(payload)
         image_parsed = parse_incoming_image(payload) if not audio_parsed else None
         document_parsed = parse_incoming_document(payload) if not (audio_parsed or image_parsed) else None
 
         if audio_parsed:
-            from_phone, media_url = audio_parsed
-            student = _get_or_create_student(db, from_phone)
+            _, media_url = audio_parsed
             if not student.has_feature("voice"):
                 await send_whatsapp_message(
                     from_phone, "Voice messages aren't available on your account yet — please type your question instead."
@@ -177,9 +234,18 @@ async def _handle_message(db: Session, payload: dict) -> None:
             if not message_text:
                 await send_whatsapp_message(from_phone, "Sorry, I couldn't understand that voice note — could you try again or type your question?")
                 return
+            cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
+
+            if student.gender is None:
+                # Only estimate once — a cheap local computation (no API
+                # cost), used to pick an opposite-gender voice for future
+                # replies. Never re-guessed once set.
+                detected_gender = detect_gender_from_pitch(audio_bytes)
+                if detected_gender:
+                    student.gender = detected_gender
+                    db.commit()
         elif image_parsed:
-            from_phone, media_url = image_parsed
-            student = _get_or_create_student(db, from_phone)
+            _, media_url = image_parsed
             if not student.has_feature("ocr"):
                 await send_whatsapp_message(
                     from_phone, "Photo questions aren't available on your account yet — please type your question instead."
@@ -195,9 +261,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
             if not message_text:
                 await send_whatsapp_message(from_phone, "Sorry, I couldn't read any text in that photo — could you try a clearer picture or type your question?")
                 return
+            cost_tracker.record_flat_usage(db, "azure_ocr", student.id)
         elif document_parsed:
-            from_phone, media_url = document_parsed
-            student = _get_or_create_student(db, from_phone)
+            _, media_url = document_parsed
             if not student.has_feature("documents"):
                 await send_whatsapp_message(
                     from_phone,
@@ -216,6 +282,12 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 await send_whatsapp_message(from_phone, "Sorry, I couldn't read any text in that file — could you try a different file or type your question?")
                 return
         else:
+            # Unsupported message type (sticker, location, contact card,
+            # button/list reply, etc.) — let the student know rather than
+            # going silent.
+            await send_whatsapp_message(
+                from_phone, "Sorry, I can only handle text, voice notes, photos, and documents right now."
+            )
             return
 
     if not message_text:
@@ -237,6 +309,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     db.commit()
 
     image_prompt = None
+    video_query = None
 
     if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
         # Special case, not a normal profile field — confirming (or declining)
@@ -281,13 +354,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
         weak_topics = list(dict.fromkeys(row[0] for row in weak_topic_rows))  # dedupe, keep order
 
         # Route to the Tutor Agent -> real LLM call, with conversation history.
-        # Claude decides the reply language itself (sees the actual message
-        # and full context, unlike a stateless per-message detection call) —
-        # see the "lang" field in the tracking tag. It also decides whether a
-        # diagram is warranted (only if image generation is enabled for this
-        # student), returning an image_prompt when so, and whether a text
-        # message should selectively get a voice reply (only if explicitly
-        # asked for — most text stays text).
+        # The reply language is decided by a separate deterministic classify()
+        # call inside tutor_agent.respond(), not by the main generation — see
+        # the "lang" field it returns. It also decides whether a diagram is
+        # warranted (only if image generation is enabled for this student),
+        # returning an image_prompt when so, and whether a text message
+        # should selectively get a voice reply (only if explicitly asked
+        # for — most text stays text).
         result = await tutor_agent.respond(
             student.as_profile_dict(),
             message_text,
@@ -295,10 +368,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
             weak_topics,
             image_generation_enabled=student.has_feature("image_generation"),
             voice_enabled=student.has_feature("voice"),
+            video_enabled=student.has_feature("youtube_videos"),
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
+        video_query = result["video_query"]
+        usage = result["usage"]
+        cost_tracker.record_claude_usage(db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id)
+        cost_tracker.record_claude_usage(
+            db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id
+        )
         if result["wants_audio_reply"]:
             send_voice_reply = True
         if detected_lang != student.preferred_language:
@@ -377,11 +457,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # English) or both translation paths fail.
     outgoing_text = reply_text
     if detected_lang and not detected_lang.startswith("en"):
-        translated = await translate_with_claude(reply_text, detected_lang)
-        if not translated:
+        translated_result = await translate_with_claude(reply_text, detected_lang)
+        if translated_result:
+            outgoing_text = translated_result.text
+            cost_tracker.record_claude_usage(
+                db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id
+            )
+        else:
             translated = await translate_text(reply_text, "en-IN", detected_lang)
-        if translated:
-            outgoing_text = translated
+            if translated:
+                outgoing_text = translated
+                cost_tracker.record_char_usage(db, "sarvam_translate", len(reply_text), student.id)
 
     # Send back over Wati — as a voice note only if the student explicitly
     # asked for an audio reply (never just because their own input was
@@ -394,11 +480,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # always gets *something*.
     send_result = None
     if send_voice_reply:
-        audio_reply = await synthesize_speech(outgoing_text, detected_lang)
+        speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender)
+        audio_reply = await synthesize_speech(outgoing_text, detected_lang, speaker=speaker)
         if audio_reply:
+            cost_tracker.record_char_usage(db, "sarvam_tts", len(outgoing_text), student.id)
             send_result = await send_whatsapp_audio(from_phone, audio_reply)
             if not send_result.get("sent"):
-                print(f"[whatsapp] send_whatsapp_audio failed for {from_phone}: {send_result}")
+                logger.error("send_whatsapp_audio failed for %s: %s", from_phone, send_result)
             else:
                 # Also send the text transcript, in the same language as the
                 # voice note, so the student has it in writing too.
@@ -406,9 +494,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if image_prompt:
         image_bytes = await generate_image(image_prompt)
         if image_bytes:
+            cost_tracker.record_flat_usage(db, "azure_image", student.id)
             image_result = await send_whatsapp_image(from_phone, image_bytes, caption=outgoing_text)
             if not image_result.get("sent"):
-                print(f"[whatsapp] send_whatsapp_image failed for {from_phone}: {image_result}")
+                logger.error("send_whatsapp_image failed for %s: %s", from_phone, image_result)
             elif not send_result:
                 # Voice reply (if any) already covered the spoken explanation;
                 # the image send itself counts as having delivered something,
@@ -418,4 +507,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if not send_result or not send_result.get("sent"):
         fallback_result = await send_whatsapp_message(from_phone, outgoing_text)
         if not fallback_result.get("sent"):
-            print(f"[whatsapp] send_whatsapp_message fallback also failed for {from_phone}: {fallback_result}")
+            logger.error("send_whatsapp_message fallback also failed for %s: %s", from_phone, fallback_result)
+
+    if video_query:
+        video = await find_best_video(video_query)
+        if video:
+            # Sent as its own follow-up message (Wati has no native rich video
+            # embed) rather than folded into the main reply, so the link
+            # doesn't get lost inside a long translated paragraph.
+            video_result = await send_whatsapp_message(from_phone, f"📺 {video['title']}\n{video['url']}")
+            if not video_result.get("sent"):
+                logger.error("send video suggestion failed for %s: %s", from_phone, video_result)

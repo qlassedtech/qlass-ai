@@ -31,12 +31,15 @@ class Student(Base):
     class_ = Column("class", Text)
     board = Column(Text)
     school = Column(Text)
-    preferred_language = Column(Text, default="en")
+    preferred_language = Column(Text, default="en-IN")
     centre_id = Column(Integer, ForeignKey("centres.id"))
     pending_profile_field = Column(Text)
     state = Column(Text, default="Bihar")
     features = Column(
-        JSONType, default=lambda: {"voice": True, "ocr": True, "image_generation": True, "documents": True}
+        JSONType,
+        default=lambda: {
+            "voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False
+        },
     )
     off_level_count = Column(Integer, default=0)
     suggested_class = Column(Text)
@@ -293,3 +296,15 @@ class ProcessedWebhookMessage(Base):
 
     message_id = Column(Text, primary_key=True)
     processed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class CreditEvent(Base):
+    __tablename__ = "credit_events"
+
+    id = Column(Integer, primary_key=True)
+    amount = Column(Numeric, nullable=False)  # positive = top-up, negative = deduction (INR)
+    service = Column(Text)  # e.g. "claude_sonnet", "sarvam_tts" — null for top-ups
+    raw_cost = Column(Numeric)  # actual provider cost before the markup multiplier
+    student_id = Column(Integer, ForeignKey("students.id"))
+    note = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

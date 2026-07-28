@@ -2,7 +2,10 @@ from fastapi import FastAPI
 from app.routers import whatsapp, students, health, broadcast
 from app.database import Base, engine
 from app.config import settings
+from app.logging_config import setup_logging
 import app.models.core  # noqa: F401 - registers models on Base
+
+setup_logging()
 
 app = FastAPI(title="Qlass AI OS", version="0.1.0")
 

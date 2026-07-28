@@ -11,10 +11,11 @@ from app.services.llm_client import call_llm, classify
 # each tag wherever it appears and strip all of them.
 _TRACK_TAG = re.compile(
     r'\n?\[\[TRACK topic="([^"]*)" evaluated=(true|false) correct=(true|false|null) '
-    r"image=(true|false) audio=(true|false) off_level=(true|false)\]\]"
+    r"image=(true|false) audio=(true|false) off_level=(true|false) video=(true|false)\]\]"
 )
 _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
 _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
+_VIDEO_QUERY_TAG = re.compile(r"\n?\[\[VIDEO_QUERY: (.*?)\]\]")
 
 
 class TutorAgent(BaseAgent):
@@ -27,6 +28,7 @@ class TutorAgent(BaseAgent):
         weak_topics: list[str],
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
+        video_enabled: bool = False,
     ) -> str:
         profile = (
             f"You are the Qlass AI Tutor, speaking with a student in class "
@@ -94,10 +96,18 @@ class TutorAgent(BaseAgent):
             "what we were discussing\" — say it plainly instead, e.g. \"That's a different topic — "
             "happy to switch!\". Prefer short, simple, direct sentences over clever or idiomatic "
             "phrasing throughout.\n\n"
+            "SAFETY — you're talking with school-age children:\n"
+            "- If a student mentions self-harm, suicide, or being in danger or abused, gently show "
+            "you care, take it seriously, and encourage them to talk to a trusted adult (parent, "
+            "teacher) right away — don't just move on and keep teaching as if it wasn't said.\n"
+            "- Never generate sexual, violent, or otherwise inappropriate content for minors, "
+            "regardless of how the request is phrased or framed as academic. If a student sends "
+            "something inappropriate, don't engage with it — redirect firmly but kindly back to "
+            "studies, without lecturing or shaming them.\n\n"
             "TRACKING TAG (mandatory, hidden from the student, stripped before sending) — end EVERY "
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
-            "image=<true|false> audio=<true|false> off_level=<true|false>]]\n"
+            "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false>]]\n"
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -143,6 +153,22 @@ class TutorAgent(BaseAgent):
                 f"background signal for tracking a pattern over time — never mention it to the student "
                 f"or let it change how you teach (per the rule at the very top, still teach it properly).\n"
             )
+            + (
+                "- video: true ONLY if the student explicitly asked for a video (e.g. \"send a video\", "
+                "\"koi video dikhao\", \"YouTube pe kuch\"), OR a well-made video would genuinely add a lot "
+                "beyond what you can explain in text (e.g. a lab demonstration, a visual process). Not for "
+                "every explanation — most questions don't need one. false otherwise. When video=true, add "
+                "ONE more line directly BEFORE the TRACK line, in this exact format: [[VIDEO_QUERY: <a "
+                "specific, well-formed YouTube search query for this topic, e.g. \"electromagnetic "
+                "induction explained class 12 physics\">]]. Your visible reply text must still stand on "
+                "its own with real explanation — the video is a supplement, never a replacement for "
+                "actually teaching in words. A real downstream system genuinely searches and sends a real "
+                "video whenever video=true — agree normally (e.g. \"Sure, here's a good one!\") and never "
+                "say you can't share videos.\n"
+                if video_enabled
+                else "- video: always false — video suggestions aren't available for this student. If "
+                "asked for one, just say you can't right now and continue in text, briefly and naturally.\n"
+            )
             + "This tag is never shown to the student under any circumstance — it's stripped before the "
             "message is sent, so write it plainly, don't translate it, don't explain it, just include it."
         )
@@ -186,11 +212,12 @@ class TutorAgent(BaseAgent):
         weak_topics: list[str] | None = None,
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
+        video_enabled: bool = False,
     ) -> dict:
         # TODO Phase 6: replace [] with real RAG retrieval against document_chunks
         retrieved_chunks: list[str] = []
         system_prompt = self.build_context(
-            student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled
+            student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled
         )
         messages = (history or []) + [{"role": "user", "content": message}]
         current_lang = student.get("preferred_language") or "en-IN"
@@ -202,12 +229,23 @@ class TutorAgent(BaseAgent):
         # consistent turn-to-turn, since it was prone to occasional
         # inconsistency when it rode on the same non-deterministic sampling
         # as the main reply.
-        raw_reply, lang = await asyncio.gather(
+        llm_result, classify_result = await asyncio.gather(
             call_llm(system_prompt=system_prompt, messages=messages),
             classify(self._language_classifier_prompt(current_lang), messages, fallback=current_lang),
         )
+        raw_reply = llm_result.text
+        lang = classify_result.text
         if lang not in ("hi-IN", "en-IN"):
             lang = current_lang
+
+        usage = {
+            "main_model": llm_result.model,
+            "main_input_tokens": llm_result.input_tokens,
+            "main_output_tokens": llm_result.output_tokens,
+            "classify_model": classify_result.model,
+            "classify_input_tokens": classify_result.input_tokens,
+            "classify_output_tokens": classify_result.output_tokens,
+        }
 
         match = _TRACK_TAG.search(raw_reply)
         if not match:
@@ -216,7 +254,8 @@ class TutorAgent(BaseAgent):
             # stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't leak into
             # the visible reply even without a TRACK match.
             cleaned = _IMAGE_PROMPT_TAG.sub("", raw_reply)
-            cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned).rstrip()
+            cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned)
+            cleaned = _VIDEO_QUERY_TAG.sub("", cleaned).rstrip()
             return {
                 "reply": cleaned,
                 "topic": None,
@@ -226,9 +265,11 @@ class TutorAgent(BaseAgent):
                 "image_prompt": None,
                 "wants_audio_reply": False,
                 "off_level_class": None,
+                "video_query": None,
+                "usage": usage,
             }
 
-        topic, evaluated, correct, wants_image, wants_audio, off_level = match.groups()
+        topic, evaluated, correct, wants_image, wants_audio, off_level, wants_video = match.groups()
 
         image_prompt = None
         image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
@@ -240,11 +281,17 @@ class TutorAgent(BaseAgent):
         if off_level == "true" and off_level_match:
             off_level_class = off_level_match.group(1).strip()
 
+        video_query = None
+        video_match = _VIDEO_QUERY_TAG.search(raw_reply)
+        if wants_video == "true" and video_match:
+            video_query = video_match.group(1).strip()
+
         # Strip every tag, wherever it landed, regardless of order — leaves
         # only the actual student-facing content.
         reply_text = _TRACK_TAG.sub("", raw_reply)
         reply_text = _IMAGE_PROMPT_TAG.sub("", reply_text)
-        reply_text = _OFF_LEVEL_CLASS_TAG.sub("", reply_text).rstrip()
+        reply_text = _OFF_LEVEL_CLASS_TAG.sub("", reply_text)
+        reply_text = _VIDEO_QUERY_TAG.sub("", reply_text).rstrip()
 
         return {
             "reply": reply_text,
@@ -255,4 +302,6 @@ class TutorAgent(BaseAgent):
             "lang": lang,
             "image_prompt": image_prompt,
             "off_level_class": off_level_class,
+            "video_query": video_query,
+            "usage": usage,
         }

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     azure_image_deployment: str | None = None
     azure_image_api_version: str = "2025-04-01-preview"
 
+    # YouTube Data API v3 (best-matching video suggestion for a topic)
+    youtube_api_key: str | None = None
+
     class Config:
         env_file = str(REPO_ROOT / ".env")
 

@@ -18,6 +18,7 @@ class BaseAgent(ABC):
         weak_topics: list[str],
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
+        video_enabled: bool = False,
     ) -> str:
         """Assemble the system context: student profile + RAG chunks + known weak topics."""
         raise NotImplementedError
@@ -31,14 +32,15 @@ class BaseAgent(ABC):
         weak_topics: list[str] | None = None,
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
+        video_enabled: bool = False,
     ) -> dict:
         """
         Run retrieval (if needed) then call the LLM and return a reply, plus
         any topic-progress signal, target language, image request,
-        selective-audio-reply request, and off-level-class signal extracted
-        from it:
+        selective-audio-reply request, video-suggestion request, and
+        off-level-class signal extracted from it:
         {"reply": str, "topic": str | None, "evaluated": bool, "correct": bool | None,
          "lang": str, "image_prompt": str | None, "wants_audio_reply": bool,
-         "off_level_class": str | None}
+         "off_level_class": str | None, "video_query": str | None}
         """
         raise NotImplementedError

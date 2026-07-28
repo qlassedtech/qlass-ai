@@ -1,10 +1,22 @@
+from dataclasses import dataclass
+
 import anthropic
 from app.config import settings
 
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
 
 
-async def call_llm(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-6") -> str:
+@dataclass
+class LLMResult:
+    """Reply text plus token usage, so callers can record actual API cost."""
+
+    text: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+async def call_llm(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
     """
     Single point of contact with the LLM. Swap `model` or the provider
     here later without touching any agent code.
@@ -19,9 +31,12 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
     """
     if _client is None:
         last_message = messages[-1]["content"] if messages else ""
-        return (
-            "[LLM not configured] Set ANTHROPIC_API_KEY in .env to get real replies. "
-            f"Would have answered: {last_message}"
+        return LLMResult(
+            text=(
+                "[LLM not configured] Set ANTHROPIC_API_KEY in .env to get real replies. "
+                f"Would have answered: {last_message}"
+            ),
+            model=model,
         )
 
     try:
@@ -31,16 +46,22 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
             system=system_prompt,
             messages=messages,
         )
-        return "".join(block.text for block in response.content if block.type == "text")
+        text = "".join(block.text for block in response.content if block.type == "text")
+        return LLMResult(
+            text=text, model=model, input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens
+        )
     except anthropic.APIError as exc:
-        return (
-            "Sorry, I'm having trouble reaching the AI service right now. "
-            "Please try again in a bit. "
-            f"[LLM error: {exc}]"
+        return LLMResult(
+            text=(
+                "Sorry, I'm having trouble reaching the AI service right now. "
+                "Please try again in a bit. "
+                f"[LLM error: {exc}]"
+            ),
+            model=model,
         )
 
 
-async def classify(system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6") -> str:
+async def classify(system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6") -> LLMResult:
     """
     A separate, deterministic (temperature=0) call for narrow classification
     tasks (e.g. "what language should the reply be in") — kept apart from
@@ -49,7 +70,7 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
     turn-to-turn don't ride on the same non-deterministic sampling.
     """
     if _client is None:
-        return fallback
+        return LLMResult(text=fallback, model=model)
 
     try:
         response = await _client.messages.create(
@@ -60,14 +81,19 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
             messages=messages,
         )
         text = "".join(block.text for block in response.content if block.type == "text").strip()
-        return text or fallback
+        return LLMResult(
+            text=text or fallback,
+            model=model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
     except anthropic.APIError:
-        return fallback
+        return LLMResult(text=fallback, model=model)
 
 
 async def translate_with_claude(
     text: str, target_language_code: str, model: str = "claude-haiku-4-5-20251001"
-) -> str | None:
+) -> LLMResult | None:
     """
     Translate the tutor's English reply into the student's language using
     Claude (Haiku, for cost) instead of a dedicated translation API.
@@ -101,6 +127,10 @@ async def translate_with_claude(
             messages=[{"role": "user", "content": text}],
         )
         translated = "".join(block.text for block in response.content if block.type == "text").strip()
-        return translated or None
+        if not translated:
+            return None
+        return LLMResult(
+            text=translated, model=model, input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens
+        )
     except anthropic.APIError:
         return None

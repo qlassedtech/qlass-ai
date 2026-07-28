@@ -16,11 +16,11 @@ CREATE TABLE IF NOT EXISTS students (
     class TEXT,
     board TEXT,
     school TEXT,
-    preferred_language TEXT DEFAULT 'en',
+    preferred_language TEXT DEFAULT 'en-IN',
     centre_id INTEGER REFERENCES centres(id),
     pending_profile_field TEXT,
     state TEXT DEFAULT 'Bihar',
-    features JSONB DEFAULT '{"voice": true, "ocr": true, "image_generation": true, "documents": true}',
+    features JSONB DEFAULT '{"voice": false, "ocr": false, "image_generation": false, "documents": false, "youtube_videos": false}',
     off_level_count INTEGER DEFAULT 0,
     suggested_class TEXT,
     gender TEXT,
@@ -196,4 +196,17 @@ CREATE TABLE IF NOT EXISTS topic_progress (
 CREATE TABLE IF NOT EXISTS processed_webhook_messages (
     message_id TEXT PRIMARY KEY,
     processed_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Credit/cost ledger: append-only top-ups (positive amount) and per-request
+-- deductions (negative amount, tagged by service). Current balance =
+-- SUM(amount). See database/migrations/0009_add_credit_tracking.sql.
+CREATE TABLE IF NOT EXISTS credit_events (
+    id SERIAL PRIMARY KEY,
+    amount NUMERIC NOT NULL,
+    service TEXT,
+    raw_cost NUMERIC,
+    student_id INTEGER REFERENCES students(id),
+    note TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
