@@ -8,9 +8,15 @@ _QUIZ_START_PATTERNS = [
     r"test me about (.+)", r"give me a quiz on (.+)", r"take a quiz on (.+)",
 ]
 _QUIZ_STOP_PHRASES = ["stop quiz", "cancel quiz", "end quiz", "quit quiz", "exit quiz"]
+_QUIZ_SKIP_PHRASES = ["skip", "pass", "next question", "i don't know", "idk", "no idea"]
 
 QUIZ_QUESTION_COUNT = 5
 QUIZ_MODEL = "claude-haiku-4-5-20251001"  # narrow, well-defined tasks — cheap tier is enough
+
+
+def looks_like_quiz_skip(text: str) -> bool:
+    lowered = text.lower().strip(" .!?")
+    return lowered in _QUIZ_SKIP_PHRASES or any(lowered.startswith(p) for p in _QUIZ_SKIP_PHRASES)
 
 
 def extract_quiz_topic(text: str) -> str | None:

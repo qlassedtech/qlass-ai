@@ -1,3 +1,5 @@
+import re
+
 import redis.asyncio as redis
 
 from app.config import settings
@@ -8,10 +10,19 @@ from app.config import settings
 # rather than silently inheriting a sibling's profile.
 ACTIVE_PROFILE_TTL_SECONDS = 6 * 3600
 
+# Phrases that mean "set up a NEW sibling profile" — distinct from
+# switching to an EXISTING one (see extract_switch_target_name below).
+# Deliberately excludes anything like "switch to <name>", since that should
+# try to match an existing profile first, not blindly create a new one.
 _NEW_PROFILE_PHRASES = [
     "different child", "different student", "different kid", "another child", "another student",
     "add my other", "add another", "naya student", "dusra bachcha", "dusri bacchi",
-    "switch profile", "switch student", "switch child", "i am a different", "this is not",
+]
+
+# "switch to Priya", "it's Raj now", "this is Priya", "switch profile to Raj"
+_SWITCH_PATTERNS = [
+    r"switch (?:profile )?to (\w+)", r"it'?s (\w+) now", r"this is (\w+)(?: talking| here)?$",
+    r"switch (?:to )?(\w+)'s profile",
 ]
 
 _redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if settings.redis_url else None
@@ -20,6 +31,15 @@ _redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if sett
 def looks_like_new_profile_request(text: str) -> bool:
     lowered = text.lower()
     return any(phrase in lowered for phrase in _NEW_PROFILE_PHRASES)
+
+
+def extract_switch_target_name(text: str) -> str | None:
+    lowered = text.lower().strip()
+    for pattern in _SWITCH_PATTERNS:
+        match = re.search(pattern, lowered)
+        if match:
+            return match.group(1)
+    return None
 
 
 async def get_active_profile(phone: str) -> int | None:

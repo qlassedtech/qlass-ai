@@ -38,6 +38,7 @@ from app.services import cost_tracker
 from app.services.rate_limit import is_rate_limited, student_lock
 from app.services.active_profile import (
     looks_like_new_profile_request,
+    extract_switch_target_name,
     get_active_profile,
     set_active_profile,
     build_disambiguation_prompt,
@@ -48,11 +49,13 @@ from app.services.progress_report import (
     get_student_stats,
     get_activity_stats,
     get_welcome_back_note,
+    get_chapter_coverage,
     format_progress_message,
 )
 from app.services.quiz_service import (
     extract_quiz_topic,
     looks_like_quiz_stop,
+    looks_like_quiz_skip,
     generate_quiz_questions,
     grade_answer,
     QUIZ_QUESTION_COUNT,
@@ -249,6 +252,24 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
 
     if len(students) == 1:
         return students[0], None
+
+    # Explicit switch request ("switch to Raj", "it's Priya now") overrides
+    # any cached active profile — without this, once one sibling's session
+    # is cached, the other has no way to take over except waiting out the
+    # TTL or happening to mention their own name in an ordinary question.
+    switch_target = extract_switch_target_name(message_text)
+    if switch_target:
+        match = next((s for s in students if s.name and s.name.lower() == switch_target.lower()), None)
+        if match:
+            await set_active_profile(from_phone, match.id)
+            return match, f"Switched! Hey {match.name}, what can I help you with? 😊"
+        # Named someone we don't have a profile for — don't silently create
+        # one on a guess (typo risk); ask instead.
+        existing_names = ", ".join(s.name for s in students if s.name)
+        return students[0], (
+            f"I don't have a profile for '{switch_target}' yet — I've got {existing_names} on this number. "
+            f"Want me to set up a new profile instead?"
+        )
 
     active_id = await get_active_profile(from_phone)
     if active_id:
@@ -531,7 +552,8 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # the monthly credit-limit gate since it costs nothing either way.
         stats = get_student_stats(db, student.id)
         activity = get_activity_stats(db, student.id)
-        reply_text = format_progress_message(stats, activity)
+        coverage = get_chapter_coverage(db, student)
+        reply_text = format_progress_message(stats, activity, coverage)
         detected_lang = student.preferred_language or "en-IN"
     elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
         # Monthly ₹ credit limit reached — hard stop before the paid LLM
@@ -572,29 +594,39 @@ async def _handle_message(db: Session, payload: dict) -> None:
             detected_lang = student.preferred_language or "en-IN"
         else:
             current_question = quiz_questions[answered_count]
-            is_correct, grade_result = await grade_answer(
-                current_question.question_text, current_question.correct_answer, message_text
-            )
-            cost_tracker.record_claude_usage(
-                db, grade_result.model, grade_result.input_tokens, grade_result.output_tokens, student.id,
-                cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
-            )
+            if looks_like_quiz_skip(message_text):
+                # No grading call needed — is_correct=None marks it as
+                # skipped rather than wrong, so it doesn't count against
+                # the student's score at the end.
+                is_correct = None
+                feedback = f"Skipped ⏭️ — the answer was *{current_question.correct_answer}*."
+            else:
+                is_correct, grade_result = await grade_answer(
+                    current_question.question_text, current_question.correct_answer, message_text
+                )
+                cost_tracker.record_claude_usage(
+                    db, grade_result.model, grade_result.input_tokens, grade_result.output_tokens, student.id,
+                    cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
+                )
+                feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
             db.add(Answer(
                 question_id=current_question.id, student_id=student.id,
                 given_answer=message_text, is_correct=is_correct,
             ))
             db.commit()
             answered_count += 1
-            feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
             if answered_count < len(quiz_questions):
                 next_question = quiz_questions[answered_count]
                 reply_text = f"{feedback}\n\nQuestion {answered_count + 1}/{len(quiz_questions)}: {next_question.question_text}"
             else:
                 all_answers = db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).all()
-                score = sum(1 for a in all_answers if a.is_correct)
+                score = sum(1 for a in all_answers if a.is_correct is True)
+                skipped = sum(1 for a in all_answers if a.is_correct is None)
+                attempted = len(quiz_questions) - skipped
                 student.active_quiz_id = None
                 db.commit()
-                reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{len(quiz_questions)}*."
+                skip_note = f" ({skipped} skipped)" if skipped else ""
+                reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{attempted}*{skip_note}."
         detected_lang = student.preferred_language or "en-IN"
     elif quiz_topic_request:
         questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_)

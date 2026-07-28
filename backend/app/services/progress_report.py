@@ -1,9 +1,19 @@
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.core import ChatHistory, TopicProgress
+from app.models.core import ChatHistory, TopicProgress, Subject, Chapter
+
+# The seeded curriculum (see scripts/seed_ncert_curriculum.py) is the NCERT
+# syllabus specifically. NCERT chapter names/order don't reliably apply to
+# ICSE or most State boards, which use entirely different textbooks — only
+# match coverage against it when the student is CBSE or hasn't told us
+# their board yet (most likely CBSE/NCERT-aligned by default in this
+# market), never for a board we know is different.
+_NCERT_ALIGNED_BOARDS = {"", "cbse", "ncert"}
+_STOPWORDS = {"the", "and", "of", "in", "on", "a", "an", "to", "for", "with"}
 
 _PROGRESS_REQUEST_PHRASES = [
     "how am i doing", "how am i doin", "my progress", "mera progress", "meri progress",
@@ -120,7 +130,45 @@ def get_welcome_back_note(db: Session, student_id: int, gap_threshold_days: int 
     return f"Welcome back! 👋 It's been {gap} days since we last talked."
 
 
-def format_progress_message(stats: dict, activity: dict | None = None) -> str:
+def _significant_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z']+", text.lower()) if len(w) >= 4 and w not in _STOPWORDS}
+
+
+def get_chapter_coverage(db: Session, student) -> dict | None:
+    """
+    Which seeded NCERT chapters (for this student's class) have been
+    touched based on topics discussed, vs. not yet — a fuzzy word-overlap
+    match against free-text TopicProgress.topic values, since topics aren't
+    linked to a specific chapter_id anywhere in the tutoring flow yet.
+    Returns None when not applicable: no class on file, or a board other
+    than CBSE/NCERT/unset (see _NCERT_ALIGNED_BOARDS).
+    """
+    board = (student.board or "").strip().lower()
+    if board not in _NCERT_ALIGNED_BOARDS or not student.class_:
+        return None
+
+    chapters = (
+        db.query(Chapter)
+        .join(Subject, Chapter.subject_id == Subject.id)
+        .filter(Subject.class_ == student.class_)
+        .all()
+    )
+    if not chapters:
+        return None
+
+    topic_rows = db.query(TopicProgress.topic).filter(TopicProgress.student_id == student.id).distinct().all()
+    topic_word_sets = [_significant_words(t[0]) for t in topic_rows if t[0]]
+
+    covered, not_covered = [], []
+    for chapter in chapters:
+        chapter_words = _significant_words(chapter.name)
+        touched = any(topic_words & chapter_words for topic_words in topic_word_sets)
+        (covered if touched else not_covered).append(chapter.name)
+
+    return {"covered": covered, "not_covered": not_covered, "total": len(chapters)}
+
+
+def format_progress_message(stats: dict, activity: dict | None = None, coverage: dict | None = None) -> str:
     if stats["total_evaluated"] == 0:
         return (
             "You haven't answered any check questions yet — keep chatting with me and I'll start "
@@ -136,6 +184,11 @@ def format_progress_message(stats: dict, activity: dict | None = None) -> str:
         lines.append("- No major weak spots right now — nice work! 👏")
     if activity and activity["streak_days"] >= 2:
         lines.append(f"- 🔥 {activity['streak_days']}-day streak — keep it going!")
+    if coverage and coverage["total"] > 0:
+        lines.append(f"- 📚 Covered {len(coverage['covered'])}/{coverage['total']} NCERT chapters for your class this year")
+        if coverage["not_covered"]:
+            preview = ", ".join(coverage["not_covered"][:3])
+            lines.append(f"  Not touched yet: {preview}{'...' if len(coverage['not_covered']) > 3 else ''}")
     lines.append("\nKeep it up — the more we practice together, the better this gets!")
     return "\n".join(lines)
 
