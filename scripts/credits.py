@@ -1,9 +1,12 @@
 """
-View, top up, or estimate the AI credit balance.
+View or top up a specific student's AI credit wallet, or estimate typical
+per-turn cost. Credits are per-student now (each student has their own
+wallet) — use the admin portal for routine top-ups; this is a CLI
+convenience for the same operations.
 
 Usage:
-    python scripts/credits.py balance
-    python scripts/credits.py add 500 "initial top-up"
+    python scripts/credits.py balance <phone>
+    python scripts/credits.py add <phone> 50 "manual top-up"
     python scripts/credits.py estimate
 """
 import sys
@@ -12,10 +15,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import SessionLocal  # noqa: E402
+from app.models.core import Student  # noqa: E402
 from app.services import cost_tracker  # noqa: E402
 
 
-def _estimate(db) -> None:
+def _get_student(db, phone: str) -> Student | None:
+    return db.query(Student).filter(Student.phone == phone).first()
+
+
+def _estimate() -> None:
     """
     Rough per-turn cost for a few usage profiles, using real measured Claude
     token counts plus the documented per-unit rates for translation/voice/
@@ -32,8 +40,6 @@ def _estimate(db) -> None:
     m = cost_tracker.MARKUP_MULTIPLIER
     p = cost_tracker.PRICING
 
-    # Measured on a real plain-English tutor turn (main reply on Sonnet +
-    # language classify on Haiku, now trimmed to just the latest message).
     first_turn_raw = 0.766715 + 0.02226
     cached_turn_raw = 0.242026 + 0.02247
     first_turn = first_turn_raw * m
@@ -49,18 +55,13 @@ def _estimate(db) -> None:
 
     image_add_on = p["azure_image"]["per_call"] * m
 
-    balance = cost_tracker.get_balance(db)
-    print(f"Current balance: ₹{balance:.2f}\n")
-    print(f"{'Chat type':<32}{'1st turn':>12}{'cached turn':>14}{'turns @cached':>16}")
-    print(f"{'Plain English text':<32}₹{first_turn:>10.2f}₹{cached_turn:>12.2f}{balance / cached_turn:>16.0f}")
-    print(
-        f"{'Hindi text (w/ translation)':<32}₹{first_turn + hindi_add_on:>10.2f}"
-        f"₹{cached_turn + hindi_add_on:>12.2f}{balance / (cached_turn + hindi_add_on):>16.0f}"
-    )
+    print(f"Trial credit granted to every new student: ₹{cost_tracker.TRIAL_CREDITS:.2f}\n")
+    print(f"{'Chat type':<32}{'1st turn':>12}{'cached turn':>14}")
+    print(f"{'Plain English text':<32}₹{first_turn:>10.2f}₹{cached_turn:>12.2f}")
+    print(f"{'Hindi text (w/ translation)':<32}₹{first_turn + hindi_add_on:>10.2f}₹{cached_turn + hindi_add_on:>12.2f}")
     print(
         f"{'Voice in + voice reply':<32}₹{first_turn + hindi_add_on + voice_add_on:>10.2f}"
         f"₹{cached_turn + hindi_add_on + voice_add_on:>12.2f}"
-        f"{balance / (cached_turn + hindi_add_on + voice_add_on):>16.0f}"
     )
     print(f"\n(+ ₹{image_add_on:.2f} extra whenever a diagram is generated)")
     print("Cache hits require turns within ~5 min of each other — a slow/cold session pays the '1st turn' rate again.")
@@ -71,17 +72,29 @@ def main() -> None:
         print(__doc__)
         return
 
+    if sys.argv[1] == "estimate":
+        _estimate()
+        return
+
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return
+
     db = SessionLocal()
     try:
+        phone = sys.argv[2]
+        student = _get_student(db, phone)
+        if not student:
+            print(f"No student found with phone {phone}")
+            return
+
         if sys.argv[1] == "balance":
-            print(f"Current balance: ₹{cost_tracker.get_balance(db):.2f}")
+            print(f"{student.name} ({phone}): ₹{cost_tracker.get_balance(db, student.id):.2f}")
         elif sys.argv[1] == "add":
-            amount = float(sys.argv[2])
-            note = sys.argv[3] if len(sys.argv) > 3 else None
-            new_balance = cost_tracker.add_credits(db, amount, note)
-            print(f"Added ₹{amount:.2f}. New balance: ₹{new_balance:.2f}")
-        elif sys.argv[1] == "estimate":
-            _estimate(db)
+            amount = float(sys.argv[3])
+            note = sys.argv[4] if len(sys.argv) > 4 else None
+            new_balance = cost_tracker.add_credits(db, student.id, amount, note)
+            print(f"Added ₹{amount:.2f} to {student.name} ({phone}). New balance: ₹{new_balance:.2f}")
         else:
             print(__doc__)
     finally:

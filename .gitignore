@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 rag/chroma_store/
+backend/static/uploads/
 *.db
 .DS_Store
 node_modules/

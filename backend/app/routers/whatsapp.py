@@ -35,7 +35,16 @@ from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
 from app.services.youtube_client import find_best_video
 from app.services import cost_tracker
+from app.services.habit import evaluate_habit_milestones
 from app.services.rate_limit import is_rate_limited, student_lock
+from app.services.tenancy import get_qlass_direct_centre_id
+from app.services.referral import (
+    generate_referral_code,
+    extract_referral_code,
+    looks_like_referral_request,
+    evaluate_referral_milestones,
+    REFERRAL_SIGNUP_BONUS,
+)
 from app.services.active_profile import (
     looks_like_new_profile_request,
     extract_switch_target_name,
@@ -210,16 +219,37 @@ def _looks_affirmative(text: str) -> bool:
     return bool(words & _AFFIRMATIVE_WORDS)
 
 
-def _create_new_student(db: Session, from_phone: str) -> Student:
+def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
     features = (
         {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
         if from_phone in FULL_ACCESS_PHONES
         else {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
     )
-    student = Student(name="New Student", phone=from_phone, features=features)
+
+    referred_by_id = None
+    referral_code = extract_referral_code(message_text)
+    if referral_code:
+        referrer = db.query(Student).filter(Student.referral_code == referral_code).first()
+        if referrer:
+            referred_by_id = referrer.id
+
+    student = Student(
+        name="New Student", phone=from_phone, features=features,
+        centre_id=get_qlass_direct_centre_id(db), referred_by_id=referred_by_id,
+    )
     db.add(student)
     db.commit()
     db.refresh(student)
+    student.referral_code = generate_referral_code(student.id)
+    db.commit()
+    cost_tracker.add_trial_credits(db, student.id)
+    if referred_by_id:
+        # Signup itself is the first referral milestone — paid immediately,
+        # not gated on any activity (see REFERRAL_MILESTONES for the rest,
+        # which DO require the referred student to actually engage).
+        cost_tracker.grant_referral_credit(
+            db, referred_by_id, REFERRAL_SIGNUP_BONUS, note="Referral milestone: signup"
+        )
     return student
 
 
@@ -238,7 +268,7 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     students = db.query(Student).filter(Student.phone == from_phone).order_by(Student.id).all()
 
     if not students:
-        return _create_new_student(db, from_phone), None
+        return _create_new_student(db, from_phone, message_text), None
 
     if looks_like_new_profile_request(message_text):
         new_student = _create_new_student(db, from_phone)
@@ -384,12 +414,6 @@ async def _handle_message(db: Session, payload: dict) -> None:
         )
         return
 
-    if not cost_tracker.has_credits(db):
-        await send_whatsapp_message(
-            from_phone, "We're temporarily out of AI credits — please check back a bit later. Sorry for the inconvenience!"
-        )
-        return
-
     # Parsed before resolving which student profile is active, so a shared
     # family phone with multiple profiles can be disambiguated by matching
     # a name mentioned in this text (see _resolve_active_student). For
@@ -403,6 +427,15 @@ async def _handle_message(db: Session, payload: dict) -> None:
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
         await send_whatsapp_message(from_phone, early_reply)
+        return
+
+    # Each student has their own wallet now (see cost_tracker) — checked
+    # here, after resolving which student this actually is, rather than
+    # against one shared account-wide balance.
+    if not cost_tracker.has_credits(db, student.id):
+        await send_whatsapp_message(
+            from_phone, "You're out of AI credits — ask your school to top up your account to keep chatting with me!"
+        )
         return
 
     if parsed:
@@ -555,6 +588,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
         coverage = get_chapter_coverage(db, student)
         reply_text = format_progress_message(stats, activity, coverage)
         detected_lang = student.preferred_language or "en-IN"
+    elif looks_like_referral_request(message_text):
+        # Free — no LLM call. Generated lazily here too (not just at
+        # signup) so students created before this feature shipped still get
+        # a code the first time they ask.
+        if not student.referral_code:
+            student.referral_code = generate_referral_code(student.id)
+            db.commit()
+        reply_text = (
+            f"Share your code with a friend — when they message me for the first time and start "
+            f"asking questions, you'll get ₹{cost_tracker.REFERRAL_BONUS:.0f} in AI credits "
+            f"(up to ₹{cost_tracker.REFERRAL_LIFETIME_CAP:.0f} total)! 🎉\n\n"
+            f"Your code: *{student.referral_code}*\n"
+            f"Tell them to just message me and mention this code in their first message."
+        )
+        detected_lang = student.preferred_language or "en-IN"
     elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
         # Monthly ₹ credit limit reached — hard stop before the paid LLM
         # call, since this is the core metered feature the subscription
@@ -659,6 +707,15 @@ async def _handle_message(db: Session, payload: dict) -> None:
         detected_lang = student.preferred_language or "en-IN"
     else:
         did_answer_via_llm = True
+
+        # This is a real tutoring question (not onboarding/quiz/profile
+        # noise) — the activity signal the day1-3/week2/week3 referral
+        # milestones are checked against (see evaluate_referral_milestones).
+        # No-ops immediately for non-referred students or once every
+        # milestone's already settled.
+        evaluate_referral_milestones(db, student)
+        evaluate_habit_milestones(db, student)
+
         # Either there was no pending question, or the student ignored it and
         # asked something else — drop the pending question either way so we
         # don't keep misreading their answers, then answer normally.

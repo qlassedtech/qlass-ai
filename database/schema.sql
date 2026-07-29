@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS centres (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     city TEXT,
+    logo_url TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -31,6 +32,12 @@ CREATE TABLE IF NOT EXISTS students (
     focus_topic TEXT,
     hints_given_count INTEGER DEFAULT 0,
     direct_solutions_count INTEGER DEFAULT 0,
+    photo_url TEXT,
+    referral_code TEXT UNIQUE,
+    referred_by_id INTEGER REFERENCES students(id),
+    referral_milestones_paid JSONB DEFAULT '[]',
+    habit_milestones_paid JSONB DEFAULT '[]',
+    is_staff_profile BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);
@@ -46,7 +53,10 @@ CREATE TABLE IF NOT EXISTS teachers (
     id SERIAL PRIMARY KEY,
     name TEXT,
     phone TEXT UNIQUE,
-    centre_id INTEGER REFERENCES centres(id)
+    centre_id INTEGER REFERENCES centres(id),
+    password_hash TEXT,
+    role TEXT DEFAULT 'teacher',
+    photo_url TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subjects (
@@ -221,5 +231,21 @@ CREATE TABLE IF NOT EXISTS credit_events (
     raw_cost NUMERIC,
     student_id INTEGER REFERENCES students(id),
     note TEXT,
+    external_ref TEXT UNIQUE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Separate ledger from credit_events (per-student) — teacher-facing tools
+-- like the workbook PDF generator and Gamma presentations are billed to
+-- the SCHOOL, not any one student's wallet.
+CREATE TABLE IF NOT EXISTS school_credit_events (
+    id SERIAL PRIMARY KEY,
+    amount NUMERIC NOT NULL,
+    service TEXT,
+    raw_cost NUMERIC,
+    centre_id INTEGER NOT NULL REFERENCES centres(id),
+    note TEXT,
+    external_ref TEXT UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_school_credit_events_centre ON school_credit_events(centre_id);

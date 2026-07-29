@@ -44,6 +44,20 @@ class Settings(BaseSettings):
     # YouTube Data API v3 (best-matching video suggestion for a topic)
     youtube_api_key: str | None = None
 
+    # Razorpay (parent/student self-serve credit top-ups)
+    razorpay_key_id: str | None = None
+    razorpay_key_secret: str | None = None
+
+    # Gamma (teacher-facing AI presentation generation) — Generate API is
+    # beta/paid; needs a real key from https://gamma.app/api before this
+    # feature can go live. See app.services.gamma_service.
+    gamma_api_key: str | None = None
+
+    # Where the frontend portal is actually reachable — needed server-side
+    # to build a /pay link to text a parent (the backend has no notion of
+    # "the current browser's origin" the way frontend code does).
+    portal_base_url: str = "http://localhost:5173"
+
     class Config:
         env_file = str(REPO_ROOT / ".env")
 

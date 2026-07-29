@@ -16,6 +16,10 @@ class Centre(Base):
     id = Column(Integer, primary_key=True)
     name = Column(Text, nullable=False)
     city = Column(Text)
+    # Shown on the school's own portal header and stamped onto anything
+    # generated on their behalf (e.g. practice-set PDFs) alongside the
+    # "Powered by Qlass Learning" mark.
+    logo_url = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     students = relationship("Student", back_populates="centre")
@@ -52,6 +56,28 @@ class Student(Base):
     focus_topic = Column(Text)
     hints_given_count = Column(Integer, default=0)
     direct_solutions_count = Column(Integer, default=0)
+    # Manually uploaded from the portal — WhatsApp's Business API doesn't
+    # expose a contact's profile photo to a business account (Meta blocks
+    # this for user privacy), so there's no way to pull it in automatically.
+    photo_url = Column(Text)
+    referral_code = Column(Text, unique=True)
+    referred_by_id = Column(Integer, ForeignKey("students.id"))
+    # Which of app.services.referral.REFERRAL_MILESTONES have already paid
+    # the referrer for THIS referred student (e.g. ["day1", "week2"]) — a
+    # list rather than one boolean since there are several distinct
+    # milestones now, each payable at most once.
+    referral_milestones_paid = Column(JSONType, default=list)
+    # Which of app.services.habit.HABIT_MILESTONES this student has already
+    # earned (see evaluate_habit_milestones) — a 21-day engagement-building
+    # reward schedule, separate from referral credits.
+    habit_milestones_paid = Column(JSONType, default=list)
+    # True only for a teacher/admin's own personal "My AI Tutor" profile
+    # (see app.services.tenancy.get_or_create_linked_student) — excluded
+    # from the real Student Roster and other student-facing lists so it
+    # never appears as if it were an enrolled student, and matched
+    # specifically on lookup so it can never collide with a real student
+    # who happens to share the same phone number.
+    is_staff_profile = Column(Boolean, default=False)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:
@@ -91,6 +117,15 @@ class Teacher(Base):
     name = Column(Text)
     phone = Column(Text, unique=True)
     centre_id = Column(Integer, ForeignKey("centres.id"))
+    password_hash = Column(Text)
+    # "teacher" | "admin" | "super_admin". "teacher"/"admin" are scoped to
+    # their own centre_id (school) — this product is sold to multiple
+    # schools, so each school's students/teachers must stay isolated from
+    # every other school's. "admin" additionally manages other teacher
+    # accounts for their own school. "super_admin" is Qlass's own staff
+    # role and sees/manages across every school, centre_id is null for it.
+    role = Column(Text, default="teacher")
+    photo_url = Column(Text)
 
     centre = relationship("Centre", back_populates="teachers")
 
@@ -316,4 +351,29 @@ class CreditEvent(Base):
     raw_cost = Column(Numeric)  # actual provider cost before the markup multiplier
     student_id = Column(Integer, ForeignKey("students.id"))
     note = Column(Text)
+    # A Razorpay payment_id (or other external transaction id) — set only
+    # for real payments, unique so the same payment can never be credited
+    # twice (e.g. a client retrying /pay/verify after a slow response, or a
+    # replayed request with a still-valid signature).
+    external_ref = Column(Text, unique=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class SchoolCreditEvent(Base):
+    """
+    A separate ledger from CreditEvent (which is per-student) — teacher-
+    facing tools like the workbook/practice-set PDF generator and Gamma
+    presentations are billed to the SCHOOL, not any one student's wallet.
+    """
+    __tablename__ = "school_credit_events"
+
+    id = Column(Integer, primary_key=True)
+    amount = Column(Numeric, nullable=False)
+    service = Column(Text)  # e.g. "workbook_pdf", "gamma_presentation" — null for top-ups
+    raw_cost = Column(Numeric)
+    centre_id = Column(Integer, ForeignKey("centres.id"), nullable=False)
+    note = Column(Text)
+    # Same idempotency purpose as CreditEvent.external_ref — a Razorpay
+    # payment_id, unique so the same payment can never be credited twice.
+    external_ref = Column(Text, unique=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

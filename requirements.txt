@@ -30,3 +30,8 @@ python-multipart
 aiofiles
 anthropic
 httpx
+pyjwt
+bcrypt
+razorpay
+pytest
+pytest-asyncio

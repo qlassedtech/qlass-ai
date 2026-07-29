@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.core import Student
+from app.models.core import Student, Teacher
+from app.services.teacher_auth import get_current_teacher
 from app.services.whatsapp_client import send_broadcast_template
 
 router = APIRouter()
@@ -23,11 +24,18 @@ class BroadcastRequest(BaseModel):
 
 
 @router.post("/send")
-async def send_broadcast(req: BroadcastRequest, db: Session = Depends(get_db)):
+async def send_broadcast(
+    req: BroadcastRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
+):
     """
     Send an approved WhatsApp template to a list of students, either matched
     by filters (class/board/centre) or an explicit phone number list.
+    Restricted to admin/super_admin — mass-messaging every enrolled student
+    (or arbitrary phone numbers) isn't a plain teacher action.
     """
+    if teacher.role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can send broadcasts")
+
     if req.phone_numbers:
         receivers = [{"whatsappNumber": phone, "customParams": []} for phone in req.phone_numbers]
     else:
@@ -36,8 +44,12 @@ async def send_broadcast(req: BroadcastRequest, db: Session = Depends(get_db)):
             query = query.filter(Student.class_ == req.filters.class_)
         if req.filters.board:
             query = query.filter(Student.board == req.filters.board)
-        if req.filters.centre_id:
-            query = query.filter(Student.centre_id == req.filters.centre_id)
+        # A school admin can only ever target their own school, regardless
+        # of what centre_id was requested — only super_admin (Qlass staff)
+        # may target a different school.
+        centre_id = teacher.centre_id if teacher.role != "super_admin" else req.filters.centre_id
+        if centre_id:
+            query = query.filter(Student.centre_id == centre_id)
         students = query.all()
         receivers = [
             {

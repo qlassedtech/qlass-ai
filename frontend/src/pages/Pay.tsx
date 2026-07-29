@@ -1,0 +1,117 @@
+import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { payApi } from "../api";
+
+declare global {
+  interface Window {
+    Razorpay: new (options: Record<string, unknown>) => { open: () => void };
+  }
+}
+
+function loadRazorpayScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.Razorpay) return resolve();
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Couldn't load the payment widget — check your connection and retry"));
+    document.body.appendChild(script);
+  });
+}
+
+export default function Pay() {
+  const [searchParams] = useSearchParams();
+  const prefilledPhone = searchParams.get("phone") || "";
+  const [phone, setPhone] = useState(prefilledPhone);
+  const [amount, setAmount] = useState("");
+  const [status, setStatus] = useState<{ kind: "error" | "success"; message: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handlePay(e: React.FormEvent) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      await loadRazorpayScript();
+      const order = await payApi.createOrder(phone, Number(amount));
+
+      const razorpay = new window.Razorpay({
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: "Qlass Learning",
+        description: "AI Tutor credit top-up",
+        order_id: order.order_id,
+        handler: async (response: {
+          razorpay_order_id: string;
+          razorpay_payment_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const result = await payApi.verify({ ...response, phone });
+            setStatus({
+              kind: "success",
+              message: `Payment successful — ₹${result.credited.toFixed(2)} added. New balance: ₹${result.balance.toFixed(2)}`,
+            });
+          } catch (err) {
+            setStatus({
+              kind: "error",
+              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Qlass support",
+            });
+          }
+        },
+        modal: { ondismiss: () => setLoading(false) },
+        theme: { color: "#2b3ec4" },
+      });
+      razorpay.open();
+    } catch (err) {
+      setStatus({ kind: "error", message: err instanceof Error ? err.message : "Something went wrong" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="center-page">
+      <div className="card">
+        <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
+        <h1>Top Up AI Credits</h1>
+        <p className="login-subtitle">Add credits to your child's Qlass AI Tutor account on WhatsApp.</p>
+
+        <form onSubmit={handlePay}>
+          <label>
+            Student's WhatsApp number
+            <input
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="e.g. 91XXXXXXXXXX"
+              required
+              readOnly={!!prefilledPhone}
+            />
+          </label>
+          <label>
+            Amount (₹)
+            <input
+              type="number"
+              min="10"
+              step="1"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="e.g. 100"
+              required
+            />
+          </label>
+          <button type="submit" disabled={loading}>
+            {loading ? "Please wait…" : "Pay & Add Credits"}
+          </button>
+        </form>
+
+        {status && (
+          <p className="status" style={{ color: status.kind === "error" ? "var(--error)" : "var(--success)" }}>
+            {status.message}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}

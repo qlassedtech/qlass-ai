@@ -12,6 +12,14 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 STUDENT_LOCK_TIMEOUT_SECONDS = 60  # auto-expires if a worker crashes mid-processing
 STUDENT_LOCK_BLOCKING_TIMEOUT_SECONDS = 30
 
+# Deliberately stricter and a separate key namespace from the WhatsApp
+# chat limit above — a 6-digit OTP only has 1M combinations, so without
+# this, an unauthenticated attacker could brute-force it across its
+# 10-minute lifetime given enough parallel requests. Also protects
+# request-otp itself from being used to spam a victim's WhatsApp.
+OTP_RATE_LIMIT_MAX_ATTEMPTS = 5
+OTP_RATE_LIMIT_WINDOW_SECONDS = 600
+
 _redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if settings.redis_url else None
 
 # Fallback for when Redis isn't reachable at all: per-process only, same
@@ -44,6 +52,30 @@ async def is_rate_limited(phone: str) -> bool:
     pipe.expire(key, RATE_LIMIT_WINDOW_SECONDS)
     _, _, count, _ = await pipe.execute()
     return count > RATE_LIMIT_MAX_MESSAGES
+
+
+async def is_otp_rate_limited(purpose: str, phone: str) -> bool:
+    """Same sliding-window approach as is_rate_limited, but its own key
+    namespace/threshold — used for both requesting and verifying an OTP
+    (see app.services.otp), so neither can be spammed or brute-forced."""
+    key_prefix = f"otprate:{purpose}"
+    if _redis is None:
+        now = time.monotonic()
+        window = _fallback_timestamps[f"{key_prefix}:{phone}"]
+        window[:] = [t for t in window if now - t <= OTP_RATE_LIMIT_WINDOW_SECONDS]
+        window.append(now)
+        return len(window) > OTP_RATE_LIMIT_MAX_ATTEMPTS
+
+    key = f"{key_prefix}:{phone}"
+    now = time.time()
+    member = f"{now}:{uuid.uuid4()}"
+    pipe = _redis.pipeline()
+    pipe.zremrangebyscore(key, 0, now - OTP_RATE_LIMIT_WINDOW_SECONDS)
+    pipe.zadd(key, {member: now})
+    pipe.zcard(key)
+    pipe.expire(key, OTP_RATE_LIMIT_WINDOW_SECONDS)
+    _, _, count, _ = await pipe.execute()
+    return count > OTP_RATE_LIMIT_MAX_ATTEMPTS
 
 
 def student_lock(phone: str):
