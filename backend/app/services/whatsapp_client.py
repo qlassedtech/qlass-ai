@@ -224,14 +224,12 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
     tap on an interactive button/list reply sent by send_whatsapp_buttons,
     or None otherwise.
 
-    UNVERIFIED AGAINST A LIVE WATI WEBHOOK — Wati's public docs describe the
-    *send* endpoint precisely but don't document the exact reply payload
-    shape for a button tap. This checks several plausible field paths
-    (interactiveButtonReply/listReply objects, or a "button"-typed message
-    with the button text directly in "text") defensively, so a shape this
-    doesn't anticipate just falls through to None (treated as an unhandled
-    message type) rather than raising. Confirm the real shape against one
-    live button tap once deployed, and tighten this if it doesn't match.
+    Confirmed against a real live button tap (2026-07-29): Wati sends
+    {"type": "interactive", "text": "<button title>", "waId": "...",
+    "interactiveButtonReply": {"id": "1", "title": "<button title>"},
+    "listReply": None, ...} — "text" at the top level already carries the
+    tapped button's title too, but interactiveButtonReply/listReply are
+    checked first since they're the more explicit/structured source.
     """
     if payload.get("owner") is True:
         return None
@@ -246,10 +244,8 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
         if text:
             return from_phone, text
 
-    if payload.get("type") == "button":
-        text = payload.get("text") or payload.get("button", {}).get("text")
-        if text:
-            return from_phone, text
+    if payload.get("type") == "interactive" and payload.get("text"):
+        return from_phone, payload["text"]
 
     return None
 

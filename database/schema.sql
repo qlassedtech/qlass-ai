@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS students (
     deletion_requested_at TIMESTAMPTZ,
     is_deleted BOOLEAN DEFAULT FALSE,
     consecutive_unresolved_hints INTEGER DEFAULT 0,
+    last_discussed_topic TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);

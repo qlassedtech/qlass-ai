@@ -79,7 +79,6 @@ from app.services.quiz_service import (
     looks_like_quiz_skip,
     generate_quiz_questions,
     grade_answer,
-    QUIZ_QUESTION_COUNT,
     MOCK_TEST_QUESTION_COUNT,
 )
 from app.agents.tutor_agent import TutorAgent
@@ -602,28 +601,52 @@ async def _handle_message(db: Session, payload: dict) -> None:
     video_query = None
     did_answer_via_llm = False
     monthly_spend_before = _monthly_spend_status(db, student)
+    # Logged once per turn, before the routing ladder below decides which
+    # branch handles it — the ladder has grown into ~10 branches across
+    # several features (quiz, mock test, escalation, menu, profile
+    # onboarding...), so this is the fastest way to answer "why did the bot
+    # respond that way" from logs alone, without re-reading the whole ladder.
+    logger.info(
+        "turn start phone=%s student_id=%s pending_field=%s active_quiz_id=%s text=%r",
+        from_phone, student.id, student.pending_profile_field, student.active_quiz_id, message_text[:200],
+    )
     quiz_topic_request = extract_quiz_topic(message_text)
     if quiz_topic_request and is_vague_quiz_topic(quiz_topic_request):
         # "quiz on the same"/"quiz on this" etc. captures the referential
         # phrase itself as the "topic" — resolve it to whatever topic was
         # actually last discussed instead of literally quizzing on "the
-        # same". Falls back to None (treated as a normal tutoring message)
-        # if nothing's been recorded yet for this student.
-        last_topic_row = (
-            db.query(TopicProgress.topic)
-            .filter(TopicProgress.student_id == student.id)
-            .order_by(TopicProgress.created_at.desc())
-            .first()
-        )
-        quiz_topic_request = last_topic_row[0] if last_topic_row else None
+        # same". Prefers last_discussed_topic (updated on EVERY real
+        # tutoring turn, see the LLM branch below) over TopicProgress,
+        # which is only written when a scored check question is evaluated —
+        # relying on TopicProgress alone previously resolved to a stale
+        # topic from an unrelated earlier session whenever the answer to
+        # today's check question and the quiz request arrived in the same
+        # message (confirmed live: "demand and supply" resolved to a
+        # leftover physics topic from hours earlier). Falls back to
+        # TopicProgress, then None (treated as a normal tutoring message),
+        # for a student who hasn't triggered last_discussed_topic yet.
+        if student.last_discussed_topic:
+            quiz_topic_request = student.last_discussed_topic
+        else:
+            last_topic_row = (
+                db.query(TopicProgress.topic)
+                .filter(TopicProgress.student_id == student.id)
+                .order_by(TopicProgress.created_at.desc())
+                .first()
+            )
+            quiz_topic_request = last_topic_row[0] if last_topic_row else None
 
     mock_test_request = looks_like_mock_test_request(message_text)
 
-    if _looks_like_menu_request(message_text):
+    if _looks_like_menu_request(message_text) and not student.active_quiz_id:
         # Free, zero-cost UI affordance — returns immediately without
         # touching chat_history/credits, same as the progress/referral
         # checks below but even earlier since it doesn't depend on any
-        # student state.
+        # student state. Guarded against an active quiz: "help"/"menu"
+        # typed mid-quiz should stay inside the quiz's own answer/skip/stop
+        # handling below rather than being hijacked into the main menu —
+        # a stuck student typing "help" mid-quiz almost certainly means
+        # "help with this question," not "show me the main menu."
         button_result = await send_whatsapp_buttons(from_phone, "Hi! What would you like to do?", MENU_BUTTONS)
         if not button_result.get("sent"):
             await send_whatsapp_message(
@@ -632,13 +655,16 @@ async def _handle_message(db: Session, payload: dict) -> None:
             )
         return
 
-    if student.pending_profile_field == "class_confirm" and quiz_topic_request:
+    if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
         # An explicit new request in the same message (e.g. "No, quiz me on
-        # circular motion") should win over resolving the pending class-
-        # update nudge, rather than being silently discarded because
-        # _looks_affirmative matched an incidental "please" — treat it as an
-        # implicit decline (leave the class as-is) and let quiz_topic_request
-        # start the quiz further down in this same if/elif ladder.
+        # circular motion" or "no, mock test on circular motion") should win
+        # over resolving the pending class-update nudge, rather than being
+        # silently discarded because _looks_affirmative matched an incidental
+        # "please" — treat it as an implicit decline (leave the class as-is)
+        # and let quiz_topic_request/mock_test_request start the quiz further
+        # down in this same if/elif ladder. Covers both since a mock-test
+        # request wouldn't otherwise be caught here (it's a separate flag,
+        # not part of extract_quiz_topic's own patterns).
         student.pending_profile_field = None
         student.suggested_class = None
         db.commit()
@@ -732,7 +758,6 @@ async def _handle_message(db: Session, payload: dict) -> None:
         return
     elif student.active_quiz_id:
         # Treat this message as the answer to the current quiz question.
-        current_quiz = db.query(Quiz).filter(Quiz.id == student.active_quiz_id).first()
         quiz_questions = db.query(Question).filter(Question.quiz_id == student.active_quiz_id).order_by(Question.id).all()
         answered_count = (
             db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).count()
@@ -778,6 +803,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 student.active_quiz_id = None
                 db.commit()
                 skip_note = f" ({skipped} skipped)" if skipped else ""
+                # Only fetched here (quiz completion), not on every
+                # intermediate answer/skip turn — is_mock_test/created_at
+                # are only needed for the final report.
+                current_quiz = db.query(Quiz).filter(Quiz.id == quiz_questions[0].quiz_id).first()
                 if current_quiz is not None and current_quiz.is_mock_test and current_quiz.created_at:
                     started_at = current_quiz.created_at
                     if started_at.tzinfo is None:
@@ -790,6 +819,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
                     )
                 else:
                     reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{attempted}*{skip_note}."
+
+                # A real tutor doesn't just report a bad score and move on —
+                # offer to actually go back over the material. Only on a
+                # genuinely weak showing (not a single skip dragging down an
+                # otherwise-fine attempt), and only when there's a topic to
+                # offer to re-teach.
+                if attempted > 0 and score / attempted < 0.5 and current_quiz is not None and current_quiz.title:
+                    reply_text += (
+                        f"\n\nLooks like *{current_quiz.title}* could use more practice — "
+                        f"want me to go over it again from the start?"
+                    )
         detected_lang = student.preferred_language or "en-IN"
     elif mock_test_request:
         mock_topic = extract_mock_test_topic(message_text) or "a mixed review covering everything we've discussed so far"
@@ -804,13 +844,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 "or just ask me questions directly?"
             )
         else:
-            quiz = Quiz(student_id=student.id, is_mock_test=True)
+            quiz = Quiz(student_id=student.id, is_mock_test=True, title=mock_topic)
             db.add(quiz)
             db.commit()
             db.refresh(quiz)
             for q in questions_data:
                 db.add(Question(
-                    quiz_id=quiz.id, question_type="short_answer",
+                    quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
                     question_text=q["question"], correct_answer=q["answer"],
                 ))
             db.commit()
@@ -834,13 +874,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 "topic, or just ask me questions directly?"
             )
         else:
-            quiz = Quiz(student_id=student.id)
+            quiz = Quiz(student_id=student.id, title=quiz_topic_request)
             db.add(quiz)
             db.commit()
             db.refresh(quiz)
             for q in questions_data:
                 db.add(Question(
-                    quiz_id=quiz.id, question_type="short_answer",
+                    quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
                     question_text=q["question"], correct_answer=q["answer"],
                 ))
             db.commit()
@@ -943,6 +983,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # tutor gave a hint vs. a full worked solution when the student
         # brought a problem to solve. None means "not applicable this turn"
         # (an explanation, check question, etc., not a problem to solve).
+        if result["topic"]:
+            # Updated on every real tutoring turn (not gated on "evaluated"
+            # like TopicProgress below) — see Student.last_discussed_topic
+            # and the "quiz on the same" resolution near the top of this
+            # function.
+            student.last_discussed_topic = result["topic"]
+            db.commit()
+
         if result["solved_directly"] is True:
             student.direct_solutions_count = (student.direct_solutions_count or 0) + 1
             db.commit()
@@ -1028,6 +1076,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # and potentially echo it back (confirmed live during testing).
     db.add(ChatHistory(student_id=student.id, role="assistant", message=reply_text, agent="tutor"))
     db.commit()
+    logger.info(
+        "turn end phone=%s student_id=%s via_llm=%s active_quiz_id=%s reply=%r",
+        from_phone, student.id, did_answer_via_llm, student.active_quiz_id, reply_text[:200],
+    )
 
     # This turn's own AI usage just added to this month's spend — warn at
     # 50%/90%/100% of the ₹100 monthly credit so the hard stop is never a

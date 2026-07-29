@@ -735,7 +735,7 @@ async def assign_quiz(
         db.refresh(quiz)
         for q in questions_data:
             db.add(Question(
-                quiz_id=quiz.id, question_type="short_answer",
+                quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
                 question_text=q["question"], correct_answer=q["answer"],
             ))
         db.commit()

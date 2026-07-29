@@ -66,6 +66,16 @@ class Student(Base):
     active_document_text = Column(Text)
     active_quiz_id = Column(Integer, ForeignKey("quizzes.id"))
     focus_topic = Column(Text)
+    # Auto-updated on every real tutoring turn from the LLM's own topic
+    # classification — NOT the same as focus_topic above (that's a
+    # teacher-set steering field). Used to resolve "quiz on the same"/"quiz
+    # on this" to what's actually being discussed right now. Deliberately
+    # separate from TopicProgress (only written when a scored check
+    # question is evaluated — a plain explanatory turn never writes there,
+    # so relying on TopicProgress alone can resolve to a stale topic from
+    # an unrelated earlier session when the current topic and a quiz
+    # request arrive in the same message).
+    last_discussed_topic = Column(Text)
     hints_given_count = Column(Integer, default=0)
     direct_solutions_count = Column(Integer, default=0)
     # Consecutive hint-only turns (solved_directly is False) since the last
