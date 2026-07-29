@@ -56,6 +56,22 @@ qlass-ai/
   docker/       docker-compose.yml, Dockerfiles
 ```
 
+## Scheduled Jobs
+No Celery/scheduler is wired up yet — these are meant to be run via cron
+once the backend is deployed on a real server (not a local dev machine,
+since a laptop cron won't fire reliably). Add to that server's crontab:
+```
+# Weekly student progress digest to a teacher/parent — pick your own day/recipients
+0 8 * * MON  cd /path/to/qlass-ai && venv/bin/python3 scripts/send_teacher_digest.py --to <phone> --students <phone1> [<phone2> ...] >> logs/teacher_digest.log 2>&1
+
+# Daily nudge for students inside a 21-day habit milestone window who haven't engaged yet today
+0 9  * * *   cd /path/to/qlass-ai && venv/bin/python3 scripts/send_habit_nudges.py >> logs/habit_nudges.log 2>&1
+
+# Weekly referral nudge to active + over-engaged students — Sunday: more free time to actually message a friend
+0 10 * * SUN cd /path/to/qlass-ai && venv/bin/python3 scripts/send_referral_nudges.py >> logs/referral_nudges.log 2>&1
+```
+Each script supports `--dry-run` (except send_teacher_digest.py) to preview without sending. `logs/` is gitignored — create it on the server (`mkdir -p logs`) before the first cron run.
+
 ## Roadmap
 See `docs/roadmap.md` for the full 20-phase plan. Currently scaffolded:
 Phase 1 (Foundation), skeletons for Phase 2 (WhatsApp webhook) and
