@@ -82,7 +82,7 @@ export default function ParentDashboard() {
         Top Up AI Credits
       </button>
 
-      <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--rule, #e8e9f3)" }}>
+      <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
         <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>Privacy & Data</p>
         {deletionRequested ? (
           <p className="muted" style={{ fontSize: 13 }}>

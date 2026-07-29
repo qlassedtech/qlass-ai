@@ -198,36 +198,60 @@ label {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 40px 20px;
+  position: relative;
+  overflow: hidden;
   background:
-    radial-gradient(circle at 15% 10%, rgba(43, 62, 196, 0.08), transparent 45%),
-    radial-gradient(circle at 85% 90%, rgba(43, 62, 196, 0.06), transparent 40%),
+    radial-gradient(circle at 8% -5%, rgba(43, 62, 196, 0.16), transparent 42%),
+    radial-gradient(circle at 100% 8%, rgba(28, 42, 143, 0.10), transparent 38%),
+    radial-gradient(circle at 90% 100%, rgba(43, 62, 196, 0.12), transparent 42%),
     var(--bg);
 }
 
+/* Faint dot-grid texture, softly masked toward the edges — the kind of
+   understated detail that reads as "considered" rather than a flat,
+   empty backdrop, without competing with the form itself. */
+.center-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(43, 62, 196, 0.16) 1px, transparent 1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: radial-gradient(circle at 50% 35%, black, transparent 68%);
+  mask-image: radial-gradient(circle at 50% 35%, black, transparent 68%);
+  pointer-events: none;
+}
+
 .center-page .card {
-  width: 360px;
+  position: relative;
+  z-index: 1;
+  width: 400px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 44px 40px 36px;
+  box-shadow: 0 1px 2px rgba(20, 23, 60, 0.05), 0 24px 48px -12px rgba(28, 42, 143, 0.22);
 }
 
 .center-page h1 {
   text-align: center;
   margin-bottom: 4px;
+  font-size: 26px;
 }
 
 .login-subtitle {
   text-align: center;
   color: var(--text-muted);
   font-size: 13px;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
 .login-logo {
   width: 100%;
-  max-width: 210px;
+  max-width: 176px;
   height: auto;
-  margin: 0 auto 20px;
+  margin: 0 auto 28px;
   display: block;
 }
 
@@ -410,6 +434,28 @@ label {
   grid-template-columns: 1fr 1fr;
   gap: 24px;
   align-items: start;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+}
+
+/* Below this, a fixed 4- or 2-column grid starts clipping/overflowing
+   horizontally rather than reflowing — confirmed on a real narrower
+   viewport, not just a hypothetical breakpoint. */
+@media (max-width: 1020px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .grid-2,
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .feature-toggles {

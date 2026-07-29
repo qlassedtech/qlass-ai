@@ -1,15 +1,28 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 
 export default function AssignQuiz() {
   const [topic, setTopic] = useState("");
   const [classNum, setClassNum] = useState("");
   const [board, setBoard] = useState("");
+  const [classOptions, setClassOptions] = useState<string[]>([]);
+  const [boardOptions, setBoardOptions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ assigned_count: number; assigned: string[]; skipped_already_in_quiz: string[] } | null>(
     null,
   );
+
+  useEffect(() => {
+    // Populated from the actual student roster rather than free-text entry
+    // — a typo or case mismatch (e.g. "cbse" vs "CBSE") would silently
+    // return "No matching students found," since the backend filters by
+    // exact match.
+    api.listStudents().then((students) => {
+      setClassOptions([...new Set(students.map((s) => s.class).filter((c): c is string => !!c))].sort());
+      setBoardOptions([...new Set(students.map((s) => s.board).filter((b): b is string => !!b))].sort());
+    });
+  }, []);
 
   async function handleAssign(e: React.FormEvent) {
     e.preventDefault();
@@ -46,12 +59,26 @@ export default function AssignQuiz() {
             <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g. circular motion" required />
           </label>
           <label>
-            Class (optional — leave blank to target all classes)
-            <input value={classNum} onChange={(e) => setClassNum(e.target.value)} placeholder="e.g. 11" />
+            Class
+            <select value={classNum} onChange={(e) => setClassNum(e.target.value)}>
+              <option value="">All classes</option>
+              {classOptions.map((c) => (
+                <option key={c} value={c}>
+                  Class {c}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
-            Board (optional)
-            <input value={board} onChange={(e) => setBoard(e.target.value)} placeholder="e.g. CBSE" />
+            Board
+            <select value={board} onChange={(e) => setBoard(e.target.value)}>
+              <option value="">All boards</option>
+              {boardOptions.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
           </label>
           <button type="submit" disabled={loading}>
             {loading ? "Sending…" : "Assign Quiz"}
