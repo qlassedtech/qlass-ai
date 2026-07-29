@@ -84,6 +84,37 @@ export default function Analytics() {
         </div>
       </div>
 
+      {data.at_risk_students.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h3>Students At Risk of Falling Behind</h3>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            Poor recent accuracy or currently stuck on hints without solving — worth a check-in.
+          </p>
+          <table className="data-table" style={{ boxShadow: "none", border: "none" }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Accuracy</th>
+                <th>Consecutive Unresolved Hints</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.at_risk_students.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <Link to={`/students/${s.id}`}>{s.name}</Link>
+                  </td>
+                  <td>{s.phone}</td>
+                  <td>{s.accuracy_pct !== null ? `${s.accuracy_pct}%` : "—"}</td>
+                  <td>{s.consecutive_unresolved_hints}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {data.upsell_candidates.length > 0 && (
         <div className="card" style={{ marginBottom: 24 }}>
           <h3>Unlimited-Plan Upsell Candidates</h3>

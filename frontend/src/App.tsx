@@ -13,6 +13,7 @@ import Analytics from "./pages/Analytics";
 import Schools from "./pages/Schools";
 import Workbook from "./pages/Workbook";
 import Presentations from "./pages/Presentations";
+import AssignQuiz from "./pages/AssignQuiz";
 import MyTutor from "./pages/MyTutor";
 import Chat from "./pages/Chat";
 import ParentDashboard from "./pages/ParentDashboard";
@@ -64,6 +65,7 @@ export default function App() {
           <Route path="/schools" element={<Schools />} />
           <Route path="/workbook" element={<Workbook />} />
           <Route path="/presentations" element={<Presentations />} />
+          <Route path="/assign-quiz" element={<AssignQuiz />} />
           <Route path="/my-tutor" element={<MyTutor />} />
           <Route path="/" element={<Navigate to="/students" replace />} />
         </Route>

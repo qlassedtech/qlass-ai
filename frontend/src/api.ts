@@ -200,6 +200,13 @@ export interface Analytics {
   workbook_generations_this_month: number;
   presentation_generations_this_month: number;
   upsell_candidates: { id: number; name: string; phone: string; spend_this_month: number }[];
+  at_risk_students: {
+    id: number;
+    name: string;
+    phone: string;
+    accuracy_pct: number | null;
+    consecutive_unresolved_hints: number;
+  }[];
 }
 
 export interface DeletionRequest {
@@ -324,6 +331,12 @@ export const api = {
   },
   generateWorkbook: (data: { topic: string; class_?: string; num_questions: number; include_answer_key: boolean }) =>
     requestBlob("/admin/workbook/generate", { method: "POST", body: JSON.stringify(data) }),
+  assignQuiz: (data: { topic: string; class_?: string; board?: string; phone_numbers?: string[] }) =>
+    request("/admin/quizzes/assign", { method: "POST", body: JSON.stringify(data) }) as Promise<{
+      assigned_count: number;
+      assigned: string[];
+      skipped_already_in_quiz: string[];
+    }>,
   generatePresentation: (data: { topic: string; num_cards: number }) =>
     request("/admin/presentation/generate", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       generation_id: string;

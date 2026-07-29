@@ -55,6 +55,9 @@ export default function Layout() {
               <NavLink to="/presentations" className={({ isActive }) => (isActive ? "active" : "")}>
                 Presentation Generator
               </NavLink>
+              <NavLink to="/assign-quiz" className={({ isActive }) => (isActive ? "active" : "")}>
+                Assign Quiz
+              </NavLink>
             </>
           )}
           <NavLink to="/my-tutor" className={({ isActive }) => (isActive ? "active" : "")}>
