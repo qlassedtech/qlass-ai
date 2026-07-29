@@ -193,6 +193,30 @@ def format_progress_message(stats: dict, activity: dict | None = None, coverage:
     return "\n".join(lines)
 
 
+def format_parent_digest(student_name: str, stats: dict, activity: dict) -> str:
+    """
+    Weekly digest sent directly to a parent's own WhatsApp (see
+    scripts/send_parent_digests.py) — warmer, "your child" framing, and
+    deliberately omits the hint-vs-direct-solve academic-integrity signal
+    from format_teacher_digest, which is meaningful to a teacher but not to
+    a parent unfamiliar with the underlying pedagogy.
+    """
+    if stats["messages_sent"] == 0:
+        return (
+            f"Hi! This week, {student_name} didn't chat with their Qlass AI tutor at all. "
+            f"A gentle nudge to check in with them might help. 📚"
+        )
+    lines = [f"📊 {student_name}'s week with the Qlass AI Tutor:", f"- {stats['messages_sent']} messages exchanged"]
+    if stats["total_evaluated"] > 0:
+        lines.append(f"- {stats['correct']}/{stats['total_evaluated']} check questions correct ({stats['accuracy_pct']}%)")
+    if stats["weak_topics"]:
+        lines.append(f"- Could use more practice on: {', '.join(stats['weak_topics'])}")
+    if activity["streak_days"] >= 2:
+        lines.append(f"- 🔥 {activity['streak_days']}-day streak — keep encouraging them!")
+    lines.append("\nThe more they chat with their AI tutor, the more this can help them.")
+    return "\n".join(lines)
+
+
 def format_teacher_digest(student_name: str, stats: dict, hints_given: int = 0, direct_solutions: int = 0) -> str:
     if stats["messages_sent"] == 0:
         return f"*{student_name}* — no activity this week."

@@ -1,5 +1,6 @@
 import logging
 from contextlib import nullcontext
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
@@ -13,11 +14,13 @@ from app.services.whatsapp_client import (
     parse_incoming_audio,
     parse_incoming_image,
     parse_incoming_document,
+    parse_incoming_button_reply,
     guess_filename_from_media_url,
     download_media,
     send_whatsapp_message,
     send_whatsapp_audio,
     send_whatsapp_image,
+    send_whatsapp_buttons,
     verify_webhook_auth,
 )
 from app.services.profile_builder import (
@@ -35,6 +38,12 @@ from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
 from app.services.youtube_client import find_best_video
 from app.services import cost_tracker
+from app.services.escalation import (
+    record_hint_outcome,
+    get_escalation_recipients,
+    format_escalation_message,
+    format_student_requested_help_message,
+)
 from app.services.habit import evaluate_habit_milestones
 from app.services.rate_limit import is_rate_limited, student_lock
 from app.services.tenancy import get_qlass_direct_centre_id
@@ -63,11 +72,15 @@ from app.services.progress_report import (
 )
 from app.services.quiz_service import (
     extract_quiz_topic,
+    extract_mock_test_topic,
+    is_vague_quiz_topic,
+    looks_like_mock_test_request,
     looks_like_quiz_stop,
     looks_like_quiz_skip,
     generate_quiz_questions,
     grade_answer,
     QUIZ_QUESTION_COUNT,
+    MOCK_TEST_QUESTION_COUNT,
 )
 from app.agents.tutor_agent import TutorAgent
 
@@ -94,6 +107,29 @@ ACTIVE_DOCUMENT_MIN_CHARS = 400
 ACTIVE_DOCUMENT_MAX_CHARS = 8000
 
 _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
+
+# Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
+# in whatsapp_client.py) — each button maps to the same canonical phrase its
+# corresponding typed command already matches, so a button tap is routed
+# through the exact same existing detection logic as if the student had
+# typed it (looks_like_progress_request, looks_like_referral_request,
+# _looks_like_teacher_help_request below) rather than needing its own path.
+MENU_BUTTONS = ["📊 My Progress", "🎁 Refer a Friend", "🆘 Talk to Teacher"]
+MENU_BUTTON_TO_COMMAND = {
+    "📊 My Progress": "my progress",
+    "🎁 Refer a Friend": "refer a friend",
+    "🆘 Talk to Teacher": "talk to teacher",
+}
+_MENU_REQUEST_PHRASES = {"menu", "help", "options"}
+_TEACHER_HELP_PHRASES = {"talk to teacher", "talk to my teacher", "contact my teacher", "help from teacher", "need my teacher"}
+
+
+def _looks_like_menu_request(text: str) -> bool:
+    return text.strip().lower() in _MENU_REQUEST_PHRASES
+
+
+def _looks_like_teacher_help_request(text: str) -> bool:
+    return text.strip().lower() in _TEACHER_HELP_PHRASES
 
 # Numbers with full feature access during this demo phase (per-account
 # feature configuration at real onboarding is still TODO — see
@@ -214,8 +250,19 @@ def _monthly_threshold_notice(spent_before: float, spent_after: float) -> str | 
     )
 
 
+_NEGATIVE_WORDS = {"no", "nah", "nope", "never", "don't", "dont", "not"}
+
+
 def _looks_affirmative(text: str) -> bool:
+    """
+    A bare set-intersection against _AFFIRMATIVE_WORDS used to treat any
+    message containing the word "please" (e.g. "No please provide me quiz
+    on the same") as a yes, since "please" is itself in _AFFIRMATIVE_WORDS —
+    an explicit negative word anywhere in the message now wins regardless.
+    """
     words = set(text.strip().lower().split())
+    if words & _NEGATIVE_WORDS:
+        return False
     return bool(words & _AFFIRMATIVE_WORDS)
 
 
@@ -422,7 +469,12 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # applies to plain text messages — that's an acceptable gap: someone on
     # an ambiguous shared phone would still get asked "who's this?" before
     # a voice/photo message is processed.
-    parsed = parse_incoming_message(payload)
+    button_reply = parse_incoming_button_reply(payload)
+    if button_reply:
+        button_from_phone, button_text = button_reply
+        parsed = (button_from_phone, MENU_BUTTON_TO_COMMAND.get(button_text, button_text))
+    else:
+        parsed = parse_incoming_message(payload)
     probe_text = parsed[1] if parsed else ""
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
@@ -551,6 +603,45 @@ async def _handle_message(db: Session, payload: dict) -> None:
     did_answer_via_llm = False
     monthly_spend_before = _monthly_spend_status(db, student)
     quiz_topic_request = extract_quiz_topic(message_text)
+    if quiz_topic_request and is_vague_quiz_topic(quiz_topic_request):
+        # "quiz on the same"/"quiz on this" etc. captures the referential
+        # phrase itself as the "topic" — resolve it to whatever topic was
+        # actually last discussed instead of literally quizzing on "the
+        # same". Falls back to None (treated as a normal tutoring message)
+        # if nothing's been recorded yet for this student.
+        last_topic_row = (
+            db.query(TopicProgress.topic)
+            .filter(TopicProgress.student_id == student.id)
+            .order_by(TopicProgress.created_at.desc())
+            .first()
+        )
+        quiz_topic_request = last_topic_row[0] if last_topic_row else None
+
+    mock_test_request = looks_like_mock_test_request(message_text)
+
+    if _looks_like_menu_request(message_text):
+        # Free, zero-cost UI affordance — returns immediately without
+        # touching chat_history/credits, same as the progress/referral
+        # checks below but even earlier since it doesn't depend on any
+        # student state.
+        button_result = await send_whatsapp_buttons(from_phone, "Hi! What would you like to do?", MENU_BUTTONS)
+        if not button_result.get("sent"):
+            await send_whatsapp_message(
+                from_phone,
+                "Reply with 'my progress', 'refer a friend', or 'talk to teacher' — or just ask me a question!",
+            )
+        return
+
+    if student.pending_profile_field == "class_confirm" and quiz_topic_request:
+        # An explicit new request in the same message (e.g. "No, quiz me on
+        # circular motion") should win over resolving the pending class-
+        # update nudge, rather than being silently discarded because
+        # _looks_affirmative matched an incidental "please" — treat it as an
+        # implicit decline (leave the class as-is) and let quiz_topic_request
+        # start the quiz further down in this same if/elif ladder.
+        student.pending_profile_field = None
+        student.suggested_class = None
+        db.commit()
 
     if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
         # Special case, not a normal profile field — confirming (or declining)
@@ -604,6 +695,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
             f"Tell them to just message me and mention this code in their first message."
         )
         detected_lang = student.preferred_language or "en-IN"
+    elif _looks_like_teacher_help_request(message_text):
+        # Free — no LLM call, and checked before the monthly credit-limit
+        # gate below (same reasoning as progress/referral): asking for a
+        # human teacher shouldn't be blocked just because AI credits ran
+        # out. Distinct from the automatic hint-streak escalation in
+        # app.services.escalation — this is the student explicitly asking,
+        # not a system-detected struggle pattern.
+        for recipient in get_escalation_recipients(db, student.centre_id):
+            await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
+        reply_text = "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. What else can I help you with in the meantime?"
+        detected_lang = student.preferred_language or "en-IN"
     elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
         # Monthly ₹ credit limit reached — hard stop before the paid LLM
         # call, since this is the core metered feature the subscription
@@ -630,6 +732,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
         return
     elif student.active_quiz_id:
         # Treat this message as the answer to the current quiz question.
+        current_quiz = db.query(Quiz).filter(Quiz.id == student.active_quiz_id).first()
         quiz_questions = db.query(Question).filter(Question.quiz_id == student.active_quiz_id).order_by(Question.id).all()
         answered_count = (
             db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).count()
@@ -675,7 +778,49 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 student.active_quiz_id = None
                 db.commit()
                 skip_note = f" ({skipped} skipped)" if skipped else ""
-                reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{attempted}*{skip_note}."
+                if current_quiz is not None and current_quiz.is_mock_test and current_quiz.created_at:
+                    started_at = current_quiz.created_at
+                    if started_at.tzinfo is None:
+                        started_at = started_at.replace(tzinfo=timezone.utc)
+                    elapsed = datetime.now(timezone.utc) - started_at
+                    minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+                    reply_text = (
+                        f"{feedback}\n\n🎓 Mock test complete! You scored *{score}/{attempted}*{skip_note} "
+                        f"in {minutes}m {seconds}s."
+                    )
+                else:
+                    reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{attempted}*{skip_note}."
+        detected_lang = student.preferred_language or "en-IN"
+    elif mock_test_request:
+        mock_topic = extract_mock_test_topic(message_text) or "a mixed review covering everything we've discussed so far"
+        questions_data, gen_result = await generate_quiz_questions(mock_topic, student.class_, num_questions=MOCK_TEST_QUESTION_COUNT)
+        cost_tracker.record_claude_usage(
+            db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
+            cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
+        )
+        if not questions_data:
+            reply_text = (
+                "Sorry, I couldn't put together a mock test right now — want to try a specific topic, "
+                "or just ask me questions directly?"
+            )
+        else:
+            quiz = Quiz(student_id=student.id, is_mock_test=True)
+            db.add(quiz)
+            db.commit()
+            db.refresh(quiz)
+            for q in questions_data:
+                db.add(Question(
+                    quiz_id=quiz.id, question_type="short_answer",
+                    question_text=q["question"], correct_answer=q["answer"],
+                ))
+            db.commit()
+            student.active_quiz_id = quiz.id
+            db.commit()
+            reply_text = (
+                f"🎓 Let's do a {len(questions_data)}-question mock test! Take your time, but I'll note "
+                f"how long it takes so you get a sense of your exam pace.\n\n"
+                f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
+            )
         detected_lang = student.preferred_language or "en-IN"
     elif quiz_topic_request:
         questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_)
@@ -804,6 +949,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
         elif result["solved_directly"] is False:
             student.hints_given_count = (student.hints_given_count or 0) + 1
             db.commit()
+
+        should_escalate = record_hint_outcome(student, result["solved_directly"])
+        if should_escalate:
+            student.consecutive_unresolved_hints = 0  # reset so we don't re-notify every single turn past threshold
+            db.commit()
+            escalation_message = format_escalation_message(student.name, result["topic"])
+            for recipient in get_escalation_recipients(db, student.centre_id):
+                await send_whatsapp_message(recipient.phone, escalation_message)
 
         if result["evaluated"]:
             # The check question being evaluated was asked in the *previous*

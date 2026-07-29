@@ -12,11 +12,12 @@ from sqlalchemy.orm.query import Query
 
 from app.config import settings
 from app.database import get_db
-from app.models.core import Centre, ChatHistory, Parent, Student, Teacher
+from app.models.core import Centre, ChatHistory, Parent, Question, Quiz, Student, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request, list_pending_deletion_requests
 from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
 from app.services.school_statement import generate_school_statement_pdf
 from app.services.rate_limit import is_otp_rate_limited
@@ -676,6 +677,78 @@ async def generate_workbook(
         io.BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+class AssignQuizRequest(BaseModel):
+    topic: str
+    class_: str | None = None
+    board: str | None = None
+    phone_numbers: list[str] | None = None  # bypass class_/board filters, target these students directly
+
+
+@router.post("/admin/quizzes/assign")
+async def assign_quiz(
+    body: AssignQuizRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
+):
+    """
+    Teacher-authored quiz, broadcast to a whole class at once over WhatsApp.
+    Generates ONE question set — billed once to the school's own credit
+    ledger, same pattern as generate_workbook above — then clones it into an
+    independent Quiz+Question set per targeted student, so each student
+    progresses through their copy via the exact same per-student
+    active_quiz_id turn-by-turn flow as an ad-hoc "quiz me on X" request
+    (see whatsapp.py's active_quiz_id branch) — no changes needed there,
+    grading is already automatic.
+    """
+    if teacher.role == "super_admin":
+        raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to assign a quiz")
+    if not school_billing.has_credits(db, teacher.centre_id):
+        raise HTTPException(status_code=402, detail="Your school is out of credits for quiz generation")
+
+    if body.phone_numbers:
+        query = db.query(Student).filter(Student.phone.in_(body.phone_numbers), Student.centre_id == teacher.centre_id)
+    else:
+        query = db.query(Student).filter(Student.centre_id == teacher.centre_id)
+        if body.class_:
+            query = query.filter(Student.class_ == body.class_)
+        if body.board:
+            query = query.filter(Student.board == body.board)
+    targets = query.filter(Student.is_staff_profile.is_(False), Student.is_deleted.is_(False)).all()
+    if not targets:
+        raise HTTPException(status_code=400, detail="No matching students found")
+
+    questions_data, gen_result = await generate_quiz_questions(body.topic, body.class_)
+    school_billing.record_claude_usage(
+        db, teacher.centre_id, "quiz_assignment", gen_result.input_tokens, gen_result.output_tokens
+    )
+    if not questions_data:
+        raise HTTPException(status_code=502, detail="Couldn't generate questions for that topic — try again")
+
+    assigned, skipped = [], []
+    for student in targets:
+        if student.active_quiz_id:
+            skipped.append(student.name)  # already mid-quiz — don't interrupt it with a new one
+            continue
+        quiz = Quiz(student_id=student.id, created_by_teacher_id=teacher.id, title=body.topic)
+        db.add(quiz)
+        db.commit()
+        db.refresh(quiz)
+        for q in questions_data:
+            db.add(Question(
+                quiz_id=quiz.id, question_type="short_answer",
+                question_text=q["question"], correct_answer=q["answer"],
+            ))
+        db.commit()
+        student.active_quiz_id = quiz.id
+        db.commit()
+        intro = (
+            f"📝 Your teacher assigned a {len(questions_data)}-question quiz on *{body.topic}*!\n\n"
+            f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
+        )
+        await send_whatsapp_message(student.phone, intro)
+        assigned.append(student.name)
+
+    return {"assigned_count": len(assigned), "assigned": assigned, "skipped_already_in_quiz": skipped}
 
 
 class SchoolCreateOrderRequest(BaseModel):

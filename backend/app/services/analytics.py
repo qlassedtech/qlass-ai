@@ -4,10 +4,19 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, CreditEvent, SchoolCreditEvent, Student, TopicProgress
+from app.services.escalation import ESCALATION_THRESHOLD
 
 WEAK_TOPIC_LIMIT = 5
 INACTIVE_STUDENT_LIMIT = 10
 INACTIVE_THRESHOLD_DAYS = 7
+
+# A student is "at risk" (falling behind, distinct from "inactive" above —
+# this is about struggling while still engaged) if either their recent
+# accuracy is poor on a real sample, or they're currently mid-struggle
+# (one hint-only turn away from actually triggering app.services.escalation).
+STRUGGLING_ACCURACY_THRESHOLD_PCT = 50
+MIN_EVALUATED_FOR_RISK = 3
+AT_RISK_STUDENT_LIMIT = 10
 
 # Mirrors whatsapp.MONTHLY_STUDENT_CREDIT_LIMIT — duplicated rather than
 # imported since that constant lives in a router module and analytics is a
@@ -34,7 +43,7 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
             "total_students": 0, "active_this_week": 0, "inactive_students": [],
             "avg_accuracy_pct": None, "top_weak_topics": [], "total_credit_spend_this_month": 0.0,
             "workbook_generations_this_month": 0, "presentation_generations_this_month": 0,
-            "upsell_candidates": [],
+            "upsell_candidates": [], "at_risk_students": [],
         }
 
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -56,7 +65,9 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
 
     now = datetime.now(timezone.utc)
     inactive = []
+    students_by_id: dict[int, Student] = {}
     for student in db.query(Student).filter(Student.id.in_(student_ids)).all():
+        students_by_id[student.id] = student
         last_at = last_message_by_student.get(student.id)
         if last_at is None:
             days_since = None
@@ -90,6 +101,34 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
         if total:
             accuracies.append(counts["correct"] / total * 100)
     avg_accuracy_pct = round(sum(accuracies) / len(accuracies)) if accuracies else None
+
+    at_risk_by_id: dict[int, dict] = {}
+    for student_id, counts in per_student_topics.items():
+        total = counts["correct"] + counts["incorrect"]
+        if total < MIN_EVALUATED_FOR_RISK:
+            continue
+        accuracy_pct = round(counts["correct"] / total * 100)
+        if accuracy_pct < STRUGGLING_ACCURACY_THRESHOLD_PCT:
+            student = students_by_id.get(student_id)
+            if student is not None:
+                at_risk_by_id[student_id] = {
+                    "id": student.id, "name": student.name, "phone": student.phone,
+                    "accuracy_pct": accuracy_pct, "consecutive_unresolved_hints": student.consecutive_unresolved_hints or 0,
+                }
+    for student in students_by_id.values():
+        hint_streak = student.consecutive_unresolved_hints or 0
+        if hint_streak >= ESCALATION_THRESHOLD - 1 and student.id not in at_risk_by_id:
+            counts = per_student_topics.get(student.id)
+            total = (counts["correct"] + counts["incorrect"]) if counts else 0
+            accuracy_pct = round(counts["correct"] / total * 100) if total else None
+            at_risk_by_id[student.id] = {
+                "id": student.id, "name": student.name, "phone": student.phone,
+                "accuracy_pct": accuracy_pct, "consecutive_unresolved_hints": hint_streak,
+            }
+    at_risk_students = sorted(
+        at_risk_by_id.values(),
+        key=lambda s: (-s["consecutive_unresolved_hints"], s["accuracy_pct"] if s["accuracy_pct"] is not None else 999),
+    )[:AT_RISK_STUDENT_LIMIT]
 
     weak_topics = sorted(
         ((topic, c["incorrect"]) for topic, c in topic_tally.items() if c["incorrect"] > c["correct"]),
@@ -151,4 +190,5 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
         "workbook_generations_this_month": workbook_count or 0,
         "presentation_generations_this_month": presentation_count or 0,
         "upsell_candidates": upsell_candidates,
+        "at_risk_students": at_risk_students,
     }

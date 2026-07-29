@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS students (
     consent_given_at TIMESTAMPTZ,
     deletion_requested_at TIMESTAMPTZ,
     is_deleted BOOLEAN DEFAULT FALSE,
+    consecutive_unresolved_hints INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);
@@ -115,6 +116,9 @@ CREATE TABLE IF NOT EXISTS quizzes (
     id SERIAL PRIMARY KEY,
     student_id INTEGER REFERENCES students(id),
     chapter_id INTEGER REFERENCES chapters(id),
+    created_by_teacher_id INTEGER REFERENCES teachers(id),
+    title TEXT,
+    is_mock_test BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 -- Added here (not in the students CREATE TABLE above) since it references

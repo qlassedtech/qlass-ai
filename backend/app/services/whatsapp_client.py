@@ -188,6 +188,72 @@ async def send_whatsapp_message(to_phone: str, body: str) -> dict:
         return {"sent": False, "reason": f"Wati request failed: {exc}"}
 
 
+async def send_whatsapp_buttons(to_phone: str, body: str, buttons: list[str], footer: str | None = None) -> dict:
+    """
+    Sends an interactive message with 1-3 tappable reply buttons, via Wati's
+    documented sendInteractiveButtonsMessage endpoint (docs.wati.io/reference/
+    post_api-v1-sendinteractivebuttonsmessage). Each button's text is capped
+    at 20 chars per Wati's own limit — truncated rather than rejected, since
+    a slightly-cut label beats a hard failure on a menu send.
+    """
+    if not settings.whatsapp_token or not settings.wati_api_endpoint:
+        return {"sent": False, "reason": "Wati credentials not configured in .env"}
+    if not 1 <= len(buttons) <= 3:
+        return {"sent": False, "reason": "WhatsApp interactive buttons must be 1-3 options"}
+
+    url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v1/sendInteractiveButtonsMessage"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_token}", "Content-Type": "application/json"}
+    payload: dict = {"body": body, "buttons": [{"text": b[:20]} for b in buttons]}
+    if footer:
+        payload["footer"] = footer[:60]
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, headers=headers, params={"whatsappNumber": to_phone}, json=payload)
+            resp.raise_for_status()
+            return {"sent": True, "response": resp.json()}
+    except httpx.HTTPStatusError as exc:
+        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+    except httpx.HTTPError as exc:
+        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
+def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
+    """
+    Returns (from_phone, button_text) when an inbound webhook payload is a
+    tap on an interactive button/list reply sent by send_whatsapp_buttons,
+    or None otherwise.
+
+    UNVERIFIED AGAINST A LIVE WATI WEBHOOK — Wati's public docs describe the
+    *send* endpoint precisely but don't document the exact reply payload
+    shape for a button tap. This checks several plausible field paths
+    (interactiveButtonReply/listReply objects, or a "button"-typed message
+    with the button text directly in "text") defensively, so a shape this
+    doesn't anticipate just falls through to None (treated as an unhandled
+    message type) rather than raising. Confirm the real shape against one
+    live button tap once deployed, and tighten this if it doesn't match.
+    """
+    if payload.get("owner") is True:
+        return None
+
+    from_phone = payload.get("waId")
+    if not from_phone:
+        return None
+
+    button_reply = payload.get("interactiveButtonReply") or payload.get("listReply")
+    if isinstance(button_reply, dict):
+        text = button_reply.get("title") or button_reply.get("text") or button_reply.get("id")
+        if text:
+            return from_phone, text
+
+    if payload.get("type") == "button":
+        text = payload.get("text") or payload.get("button", {}).get("text")
+        if text:
+            return from_phone, text
+
+    return None
+
+
 async def send_broadcast_template(
     template_name: str, broadcast_name: str, receivers: list[dict]
 ) -> dict:

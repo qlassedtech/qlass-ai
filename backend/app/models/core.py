@@ -68,6 +68,12 @@ class Student(Base):
     focus_topic = Column(Text)
     hints_given_count = Column(Integer, default=0)
     direct_solutions_count = Column(Integer, default=0)
+    # Consecutive hint-only turns (solved_directly is False) since the last
+    # time a problem was actually solved — reset to 0 on a direct solve or
+    # right after an escalation fires. See app.services.escalation: once
+    # this crosses ESCALATION_THRESHOLD, the student's teacher gets a
+    # WhatsApp nudge that this student may need in-person help.
+    consecutive_unresolved_hints = Column(Integer, default=0)
     # Manually uploaded from the portal — WhatsApp's Business API doesn't
     # expose a contact's profile photo to a business account (Meta blocks
     # this for user privacy), so there's no way to pull it in automatically.
@@ -233,6 +239,18 @@ class Quiz(Base):
     id = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id"))
     chapter_id = Column(Integer, ForeignKey("chapters.id"))
+    # Set only for a quiz a teacher explicitly assigned to a class (see
+    # app.routers.admin's /admin/quizzes/assign) — null for a student's own
+    # ad-hoc "quiz me on X" request. `title` is the topic string shown in
+    # the assignment UI; ad-hoc quizzes don't need one (the topic already
+    # appears inline in the WhatsApp quiz-start message).
+    created_by_teacher_id = Column(Integer, ForeignKey("teachers.id"))
+    title = Column(Text)
+    # A longer (see quiz_service.MOCK_TEST_QUESTION_COUNT), timed board-exam
+    # style practice test rather than the usual 5-question ad-hoc quiz —
+    # only changes how the completion message is formatted (score + elapsed
+    # time vs just score), the turn-by-turn answer/grade flow is identical.
+    is_mock_test = Column(Boolean, default=False)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     questions = relationship("Question", back_populates="quiz")
