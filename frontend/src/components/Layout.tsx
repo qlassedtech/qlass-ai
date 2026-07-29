@@ -77,6 +77,11 @@ export default function Layout() {
             <NavLink to="/school-profile" className={({ isActive }) => (isActive ? "active" : "")}>
               School Profile
             </NavLink>
+            {teacher?.role === "super_admin" && (
+              <NavLink to="/schools" className={({ isActive }) => (isActive ? "active" : "")}>
+                Schools & Sales
+              </NavLink>
+            )}
           </div>
         )}
 

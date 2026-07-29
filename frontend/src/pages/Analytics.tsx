@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type Analytics as AnalyticsData } from "../api";
+import { api, type Analytics as AnalyticsData, type DeletionRequest } from "../api";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -13,11 +13,34 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
 
 export default function Analytics() {
   const [data, setData] = useState<AnalyticsData | null>(null);
+  const [deletionRequests, setDeletionRequests] = useState<DeletionRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [statementDownloading, setStatementDownloading] = useState(false);
 
   useEffect(() => {
     api.getAnalytics().then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+    api.getDeletionRequests().then(setDeletionRequests).catch(() => {});
   }, []);
+
+  async function handleDownloadStatement() {
+    setStatementDownloading(true);
+    try {
+      const now = new Date();
+      const blob = await api.downloadSchoolStatement(now.getFullYear(), now.getMonth() + 1);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "school_statement.pdf";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to download statement");
+    } finally {
+      setStatementDownloading(false);
+    }
+  }
 
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p>Loading...</p>;
@@ -29,6 +52,9 @@ export default function Analytics() {
           <h1>School Analytics</h1>
           <p>Engagement, progress, and usage across your whole school</p>
         </div>
+        <button type="button" onClick={handleDownloadStatement} disabled={statementDownloading}>
+          {statementDownloading ? "Downloading..." : "Download This Month's Statement"}
+        </button>
       </div>
 
       <div className="grid-2" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: 24 }}>
@@ -57,6 +83,62 @@ export default function Analytics() {
           )}
         </div>
       </div>
+
+      {data.upsell_candidates.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h3>Unlimited-Plan Upsell Candidates</h3>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            These students have hit (or nearly hit) their monthly credit cap — worth pitching the ₹1800/yr unlimited plan.
+          </p>
+          <table className="data-table" style={{ boxShadow: "none", border: "none" }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Spend This Month</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.upsell_candidates.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <Link to={`/students/${s.id}`}>{s.name}</Link>
+                  </td>
+                  <td>{s.phone}</td>
+                  <td>₹{s.spend_this_month.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {deletionRequests.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h3>Pending Data Deletion Requests</h3>
+          <table className="data-table" style={{ boxShadow: "none", border: "none" }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Requested</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deletionRequests.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.name}</td>
+                  <td>{r.phone}</td>
+                  <td>{new Date(r.requested_at).toLocaleDateString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted" style={{ marginTop: 8 }}>
+            Contact Qlass support to fulfill a pending deletion request — it's an irreversible action handled by Qlass staff.
+          </p>
+        </div>
+      )}
 
       <div className="card">
         <h3>Students Needing a Nudge</h3>

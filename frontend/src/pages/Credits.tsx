@@ -6,6 +6,7 @@ export default function Credits() {
   const [students, setStudents] = useState<Student[]>([]);
   const [teacher, setTeacher] = useState<Teacher | null>(null);
   const [amounts, setAmounts] = useState<Record<number, string>>({});
+  const [reasons, setReasons] = useState<Record<number, "refund" | "goodwill" | "correction">>({});
   const [status, setStatus] = useState<string | null>(null);
 
   function load() {
@@ -19,8 +20,9 @@ export default function Credits() {
     setStatus(null);
     const amount = Number(amounts[id]);
     if (!amount) return;
+    const reason = reasons[id] || "goodwill";
     try {
-      await api.addStudentCredits(id, amount, "Qlass goodwill credit");
+      await api.addStudentCredits(id, amount, `Qlass ${reason} credit`, reason);
       setAmounts((prev) => ({ ...prev, [id]: "" }));
       setStatus("Credits added!");
       load();
@@ -83,6 +85,16 @@ export default function Credits() {
                         value={amounts[s.id] || ""}
                         onChange={(e) => setAmounts((prev) => ({ ...prev, [s.id]: e.target.value }))}
                       />
+                      <select
+                        value={reasons[s.id] || "goodwill"}
+                        onChange={(e) =>
+                          setReasons((prev) => ({ ...prev, [s.id]: e.target.value as "refund" | "goodwill" | "correction" }))
+                        }
+                      >
+                        <option value="goodwill">Goodwill</option>
+                        <option value="refund">Refund</option>
+                        <option value="correction">Correction</option>
+                      </select>
                       <button type="button" onClick={() => handleGrant(s.id)}>
                         Grant
                       </button>

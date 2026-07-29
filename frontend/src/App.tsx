@@ -10,6 +10,7 @@ import Credits from "./pages/Credits";
 import Teachers from "./pages/Teachers";
 import SchoolProfile from "./pages/SchoolProfile";
 import Analytics from "./pages/Analytics";
+import Schools from "./pages/Schools";
 import Workbook from "./pages/Workbook";
 import Presentations from "./pages/Presentations";
 import MyTutor from "./pages/MyTutor";
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/teachers" element={<Teachers />} />
           <Route path="/school-profile" element={<SchoolProfile />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/schools" element={<Schools />} />
           <Route path="/workbook" element={<Workbook />} />
           <Route path="/presentations" element={<Presentations />} />
           <Route path="/my-tutor" element={<MyTutor />} />

@@ -5,11 +5,26 @@ import { parentApi, type ParentProfile, type ParentProgress } from "../api";
 export default function ParentDashboard() {
   const [profile, setProfile] = useState<ParentProfile | null>(null);
   const [progress, setProgress] = useState<ParentProgress | null>(null);
+  const [consent, setConsent] = useState<{ statement: string; given: boolean; given_at: string | null } | null>(null);
+  const [deletionRequested, setDeletionRequested] = useState(false);
+  const [showDeletionConfirm, setShowDeletionConfirm] = useState(false);
 
   useEffect(() => {
     parentApi.me().then(setProfile);
     parentApi.progress().then(setProgress);
+    parentApi.getConsent().then(setConsent);
   }, []);
+
+  async function handleGiveConsent() {
+    const result = await parentApi.giveConsent();
+    setConsent((prev) => (prev ? { ...prev, given: result.given, given_at: result.given_at } : prev));
+  }
+
+  async function handleRequestDeletion() {
+    await parentApi.requestDeletion();
+    setDeletionRequested(true);
+    setShowDeletionConfirm(false);
+  }
 
   if (!profile) {
     return (
@@ -23,6 +38,15 @@ export default function ParentDashboard() {
 
   return (
     <ParentLayout>
+      {consent && !consent.given && (
+        <div className="card" style={{ marginBottom: 20, background: "rgba(43, 62, 196, 0.06)" }}>
+          <p style={{ marginBottom: 12 }}>{consent.statement}</p>
+          <button type="button" onClick={handleGiveConsent}>
+            I Confirm & Consent
+          </button>
+        </div>
+      )}
+
       <h1 style={{ marginBottom: 4 }}>{profile.student_name}</h1>
       <p className="muted" style={{ marginBottom: 20 }}>
         {profile.class ? `Class ${profile.class} · ` : ""}Hi {profile.parent_name || "there"}, here's how they're doing
@@ -57,6 +81,31 @@ export default function ParentDashboard() {
       >
         Top Up AI Credits
       </button>
+
+      <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--rule, #e8e9f3)" }}>
+        <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>Privacy & Data</p>
+        {deletionRequested ? (
+          <p className="muted" style={{ fontSize: 13 }}>
+            Deletion request submitted — Qlass will review and confirm once processed.
+          </p>
+        ) : showDeletionConfirm ? (
+          <div>
+            <p style={{ fontSize: 13, marginBottom: 8 }}>
+              This permanently erases your child's name, phone, and chat history from Qlass. Are you sure?
+            </p>
+            <button type="button" onClick={handleRequestDeletion} style={{ marginRight: 8 }}>
+              Yes, Request Deletion
+            </button>
+            <button type="button" onClick={() => setShowDeletionConfirm(false)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setShowDeletionConfirm(true)} style={{ fontSize: 12 }}>
+            Request Data Deletion
+          </button>
+        )}
+      </div>
     </ParentLayout>
   );
 }

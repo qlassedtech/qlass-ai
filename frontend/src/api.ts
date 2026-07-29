@@ -149,6 +149,7 @@ export interface Teacher {
   name: string;
   role: string;
   phone: string;
+  photo_url: string | null;
 }
 
 export interface Student {
@@ -186,6 +187,7 @@ export interface School {
   name: string;
   city: string | null;
   logo_url: string | null;
+  credit_balance: number;
 }
 
 export interface Analytics {
@@ -197,6 +199,28 @@ export interface Analytics {
   total_credit_spend_this_month: number;
   workbook_generations_this_month: number;
   presentation_generations_this_month: number;
+  upsell_candidates: { id: number; name: string; phone: string; spend_this_month: number }[];
+}
+
+export interface DeletionRequest {
+  id: number;
+  name: string;
+  phone: string;
+  requested_at: string;
+}
+
+export interface SchoolOverview {
+  id: number;
+  name: string;
+  city: string | null;
+  sales_status: string;
+  sales_notes: string | null;
+  contract_notes: string | null;
+  student_count: number;
+  school_credit_balance: number;
+  last_activity: string | null;
+  days_inactive: number | null;
+  is_churn_risk: boolean;
 }
 
 export function absoluteUrl(path: string | null): string | null {
@@ -252,10 +276,10 @@ export const api = {
       body: JSON.stringify({ to_phone: toPhone }),
     }) as Promise<{ sent: boolean }>,
   getStudentCredits: (id: number) => request(`/admin/students/${id}/credits`) as Promise<{ balance: number }>,
-  addStudentCredits: (id: number, amount: number, note?: string) =>
+  addStudentCredits: (id: number, amount: number, note?: string, reason: "refund" | "goodwill" | "correction" = "goodwill") =>
     request(`/admin/students/${id}/credits/add`, {
       method: "POST",
-      body: JSON.stringify({ amount, note }),
+      body: JSON.stringify({ amount, note, reason }),
     }) as Promise<{ balance: number }>,
   registerSchool: (data: { school_name: string; city?: string; admin_name: string; admin_phone: string; password: string }) =>
     request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{
@@ -273,6 +297,16 @@ export const api = {
     request("/admin/teachers", { method: "POST", body: JSON.stringify(data) }) as Promise<TeacherAccount>,
   getSchool: () => request("/admin/school") as Promise<School>,
   getAnalytics: () => request("/admin/analytics") as Promise<Analytics>,
+  downloadSchoolStatement: (year: number, month: number) =>
+    requestBlob(`/admin/school/statement?year=${year}&month=${month}`),
+  getDeletionRequests: () => request("/admin/deletion-requests") as Promise<DeletionRequest[]>,
+  fulfillDeletion: (id: number) =>
+    request(`/admin/students/${id}/fulfill-deletion`, { method: "POST" }) as Promise<{ deleted: boolean }>,
+  getSchoolsOverview: () => request("/admin/schools") as Promise<SchoolOverview[]>,
+  updateSchoolSales: (
+    id: number,
+    data: { sales_status?: string; sales_notes?: string; contract_notes?: string },
+  ) => request(`/admin/schools/${id}/sales`, { method: "PATCH", body: JSON.stringify(data) }) as Promise<SchoolOverview>,
   uploadSchoolLogo: (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -403,4 +437,13 @@ export const parentApi = {
     }>,
   me: () => requestParent("/parent-app/me") as Promise<ParentProfile>,
   progress: () => requestParent("/parent-app/progress") as Promise<ParentProgress>,
+  getConsent: () =>
+    requestParent("/parent-app/consent") as Promise<{ statement: string; given: boolean; given_at: string | null }>,
+  giveConsent: () =>
+    requestParent("/parent-app/consent", { method: "POST" }) as Promise<{ given: boolean; given_at: string }>,
+  requestDeletion: () =>
+    requestParent("/parent-app/request-deletion", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }) as Promise<{ requested: boolean; requested_at: string }>,
 };
