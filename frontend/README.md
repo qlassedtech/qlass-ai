@@ -37,14 +37,17 @@ npm run dev       # http://localhost:5173, proxies API calls to API_BASE
 The backend must be running separately (see `../backend/README.md` or the
 repo root README) — the frontend does not proxy or mock the API.
 
-`API_BASE` (in `src/api.ts`) is currently hardcoded to
-`http://localhost:8000`. There's no `.env`-driven API URL yet — update that
-constant (and rebuild) when pointing at a deployed backend.
+`API_BASE` (in `src/api.ts`) reads from the `VITE_API_BASE` env var, falling
+back to `http://localhost:8000` if unset. Copy `.env.example` to `.env.local`
+(gitignored) and set it when pointing at a deployed backend — Vite bakes it
+in at build time, so a new build is needed after changing it.
 
 ```bash
 npm run build      # tsc -b && vite build -> dist/
 npm run preview    # serve the production build locally
 npm run lint       # oxlint
+npm run test        # vitest run — Vitest + React Testing Library
+npm run test:watch  # vitest, watch mode
 ```
 
 ## Structure
@@ -95,10 +98,37 @@ signed in in the same browser via separate tabs, in principle).
 the backend, which reports back whether this is a teacher (password),
 parent (OTP), or student (OTP) login, and the form adapts accordingly.
 
+## Theming
+
+Every color in `src/index.css` is a CSS custom property (`--text`, `--bg`,
+`--card-bg`, `--accent`, etc.), redefined inside a single
+`@media (prefers-color-scheme: dark)` block — the whole app follows the
+OS/browser light-vs-dark preference automatically, with no manual toggle or
+persisted preference (yet). `color-scheme: light`/`dark` is set alongside so
+native controls (`<select>`, scrollbars) adapt too. The `.login-logo`/
+`.sidebar-logo` images are framed with a small white "badge" background,
+since the source logo file is a JPEG with a baked-in white background
+(not transparent) — without it, dark mode would show a stray white
+rectangle behind the logo.
+
+## Testing
+
+Vitest + React Testing Library (`npm run test`). Coverage so far is
+intentionally focused rather than exhaustive:
+
+- `src/api.test.ts` — the three independent auth-token helpers (teacher/
+  student/parent), confirming they're stored under separate keys and don't
+  interfere with each other.
+- `src/pages/Login.test.tsx` — the unified login flow's branching (phone →
+  password/OTP/parent-OTP step, based on a mocked `api.checkPhone`), plus
+  the error path.
+
+Nowhere near full coverage of every page — this is a starting point to
+build from, not a completed suite. `src/test-setup.ts` wires up
+`@testing-library/jest-dom` matchers and clears `localStorage` between
+tests.
+
 ## Known gaps
 
-- No automated frontend tests (Vitest/RTL etc.) — correctness is currently
-  verified by manually driving the app in a browser plus the backend's own
-  test suite.
-- `API_BASE` isn't environment-driven (see above).
-- No dark mode / theming beyond the single light design system.
+- Test coverage is minimal (see above) — most pages have no tests yet.
+- No persisted/manual dark-mode toggle — it only follows the OS preference.

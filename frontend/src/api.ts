@@ -1,4 +1,6 @@
-export const API_BASE = "http://localhost:8000";
+// Set VITE_API_BASE in a .env(.local) file to point at a deployed backend —
+// see .env.example. Falls back to localhost for local dev with no .env.
+export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 function getToken(): string | null {
   return localStorage.getItem("token");
