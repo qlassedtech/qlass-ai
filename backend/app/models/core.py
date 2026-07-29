@@ -20,6 +20,18 @@ class Centre(Base):
     # generated on their behalf (e.g. practice-set PDFs) alongside the
     # "Powered by Qlass Learning" mark.
     logo_url = Column(Text)
+    # Lightweight sales-pipeline tracking — "prospect" (being sold to, no
+    # real usage yet) | "trial" | "active" | "churned". Self-registered
+    # schools (see /auth/register-school) start as "active" since they've
+    # already begun using the product; Qlass-side pipeline entries created
+    # ahead of an actual signup would start as "prospect".
+    sales_status = Column(Text, default="active")
+    sales_notes = Column(Text)
+    # Free-text record of a negotiated contract (e.g. "₹50,000/year
+    # unlimited, signed 2026-04-01") — not automated billing, just so a
+    # custom deal is represented somewhere instead of purely in someone's
+    # inbox.
+    contract_notes = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     students = relationship("Student", back_populates="centre")
@@ -78,6 +90,26 @@ class Student(Base):
     # specifically on lookup so it can never collide with a real student
     # who happens to share the same phone number.
     is_staff_profile = Column(Boolean, default=False)
+    # "credits" (default, pay-as-you-go wallet) or "unlimited" (flat-fee
+    # subscription — see app.services.cost_tracker for the actual gating).
+    # A staff profile's own subscription is the ₹3500/month personal-tutor
+    # plan; a real student's is the ₹1800/year plan — same two columns
+    # serve both since the mechanism (bypass the wallet check while active)
+    # is identical, just the price/duration differ.
+    subscription_plan = Column(Text, default="credits")
+    subscription_expires_at = Column(TIMESTAMP(timezone=True))
+    # School-controller attestation that parental consent was obtained for
+    # this minor's data (chat history, academic performance, phone number)
+    # — captured at enrollment time. See app.services.consent.
+    consent_given_at = Column(TIMESTAMP(timezone=True))
+    # Data deletion/retention request (a parent or the student asked Qlass
+    # to erase this profile's PII) — see app.services.deletion. is_deleted
+    # marks it as actually fulfilled; deletion_requested_at alone means
+    # still pending review, since a request shouldn't erase data instantly
+    # without a Qlass staff member confirming it (e.g. against a live fee
+    # dispute or an ongoing school investigation).
+    deletion_requested_at = Column(TIMESTAMP(timezone=True))
+    is_deleted = Column(Boolean, default=False)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:

@@ -1,0 +1,7 @@
+ALTER TABLE students ADD COLUMN IF NOT EXISTS subscription_plan TEXT DEFAULT 'credits';
+ALTER TABLE students ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS consent_given_at TIMESTAMPTZ;
+
+ALTER TABLE centres ADD COLUMN IF NOT EXISTS sales_status TEXT DEFAULT 'active';
+ALTER TABLE centres ADD COLUMN IF NOT EXISTS sales_notes TEXT;
+ALTER TABLE centres ADD COLUMN IF NOT EXISTS contract_notes TEXT;

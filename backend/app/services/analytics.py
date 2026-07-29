@@ -9,6 +9,12 @@ WEAK_TOPIC_LIMIT = 5
 INACTIVE_STUDENT_LIMIT = 10
 INACTIVE_THRESHOLD_DAYS = 7
 
+# Mirrors whatsapp.MONTHLY_STUDENT_CREDIT_LIMIT — duplicated rather than
+# imported since that constant lives in a router module and analytics is a
+# service (importing router->service->router would be circular).
+MONTHLY_STUDENT_CREDIT_LIMIT = 100.0
+UPSELL_CANDIDATE_LIMIT = 10
+
 
 def _month_start() -> datetime:
     now = datetime.now(timezone.utc)
@@ -28,6 +34,7 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
             "total_students": 0, "active_this_week": 0, "inactive_students": [],
             "avg_accuracy_pct": None, "top_weak_topics": [], "total_credit_spend_this_month": 0.0,
             "workbook_generations_this_month": 0, "presentation_generations_this_month": 0,
+            "upsell_candidates": [],
         }
 
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -96,6 +103,29 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
         .scalar()
     )
 
+    # Students who've hit (or nearly hit) their monthly ₹ cap are the
+    # clearest usage-based signal that the flat-fee unlimited plan (see
+    # cost_tracker._is_unlimited_active) would suit them better than
+    # topping up piecemeal — surfaced here so a teacher/admin can pitch it.
+    spend_rows = (
+        db.query(CreditEvent.student_id, func.sum(-CreditEvent.amount))
+        .filter(CreditEvent.student_id.in_(student_ids), CreditEvent.amount < 0, CreditEvent.created_at >= month_start)
+        .group_by(CreditEvent.student_id)
+        .having(func.sum(-CreditEvent.amount) >= MONTHLY_STUDENT_CREDIT_LIMIT)
+        .all()
+    )
+    spend_by_student = {student_id: float(spend) for student_id, spend in spend_rows}
+    upsell_candidates = []
+    if spend_by_student:
+        students_by_id = {s.id: s for s in db.query(Student).filter(Student.id.in_(spend_by_student.keys())).all()}
+        for student_id, spend in spend_by_student.items():
+            student = students_by_id.get(student_id)
+            if student is None or student.subscription_plan == "unlimited":
+                continue  # already on the flat-fee plan, or a race with a since-deleted student
+            upsell_candidates.append({"id": student.id, "name": student.name, "phone": student.phone, "spend_this_month": spend})
+        upsell_candidates.sort(key=lambda s: s["spend_this_month"], reverse=True)
+        upsell_candidates = upsell_candidates[:UPSELL_CANDIDATE_LIMIT]
+
     workbook_count = presentation_count = 0
     if centre_id is not None:
         workbook_count = (
@@ -120,4 +150,5 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
         "total_credit_spend_this_month": float(total_spend),
         "workbook_generations_this_month": workbook_count or 0,
         "presentation_generations_this_month": presentation_count or 0,
+        "upsell_candidates": upsell_candidates,
     }

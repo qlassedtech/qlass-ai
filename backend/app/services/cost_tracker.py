@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.core import CreditEvent
+from app.models.core import CreditEvent, Student
 
 # Every deduction is charged at (actual provider cost) x MARKUP_MULTIPLIER —
 # covers overhead/margin rather than passing through raw provider cost 1:1.
@@ -25,8 +25,10 @@ YOUTUBE_FREE_SEARCHES_PER_DAY = 100
 
 # Every new student wallet starts with this much free trial credit — Qlass
 # covers it (not a real charge to anyone), so a school can try the product
-# before a parent/student ever has to pay. See add_trial_credits.
-TRIAL_CREDITS = 20.0
+# before a parent/student ever has to pay. See add_trial_credits. Demo/
+# testing numbers (FULL_ACCESS_PHONES in whatsapp.py) get unlimited credits
+# instead, bypassing this wallet check entirely.
+TRIAL_CREDITS = 50.0
 
 # Referral credits are milestone-based (signup + day1-3 activity + week2/3
 # activity — see app.services.referral) and deliberately uncapped: Qlass
@@ -76,14 +78,33 @@ def get_balance(db: Session, student_id: int) -> float:
     return float(total)
 
 
+def _is_unlimited_active(student: Student) -> bool:
+    """
+    True while a student is on the flat-fee unlimited plan (₹1800/yr for a
+    real student, ₹3500/mo for a teacher's own "My AI Tutor" profile — same
+    two columns serve both, since a teacher's personal profile is just a
+    Student row with is_staff_profile=True) and that plan hasn't expired.
+    """
+    if student.subscription_plan != "unlimited" or student.subscription_expires_at is None:
+        return False
+    expires_at = student.subscription_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > datetime.now(timezone.utc)
+
+
 def has_credits(db: Session, student_id: int) -> bool:
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if student is not None and _is_unlimited_active(student):
+        return True
     return get_balance(db, student_id) > 0
 
 
 def add_credits(
-    db: Session, student_id: int, amount: float, note: str | None = None, external_ref: str | None = None
+    db: Session, student_id: int, amount: float, note: str | None = None, external_ref: str | None = None,
+    service: str | None = None,
 ) -> float:
-    db.add(CreditEvent(amount=amount, student_id=student_id, note=note, external_ref=external_ref))
+    db.add(CreditEvent(amount=amount, service=service, student_id=student_id, note=note, external_ref=external_ref))
     db.commit()
     return get_balance(db, student_id)
 
@@ -137,7 +158,14 @@ def grant_habit_credit(db: Session, student_id: int, amount: float, note: str) -
 def _deduct(db: Session, service: str, raw_cost: float, student_id: int) -> float:
     if raw_cost <= 0:
         return get_balance(db, student_id)  # nothing actually billed (e.g. a failed/no-op call) — no ledger noise
-    db.add(CreditEvent(amount=-raw_cost * MARKUP_MULTIPLIER, service=service, raw_cost=raw_cost, student_id=student_id))
+    student = db.query(Student).filter(Student.id == student_id).first()
+    # Unlimited-plan students (flat ₹1800/yr or ₹3500/mo) never have their
+    # wallet drawn down (amount=0 below) — but raw_cost is always the real,
+    # un-marked-up provider cost regardless of plan, so SUM(raw_cost) per
+    # student is real COGS Qlass can check against the flat fee later, even
+    # though amount alone would show zero spend for these students.
+    amount = 0.0 if (student is not None and _is_unlimited_active(student)) else -raw_cost * MARKUP_MULTIPLIER
+    db.add(CreditEvent(amount=amount, service=service, raw_cost=raw_cost, student_id=student_id))
     db.commit()
     return get_balance(db, student_id)
 

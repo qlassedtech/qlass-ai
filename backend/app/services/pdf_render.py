@@ -5,7 +5,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, HRFlowable, PageBreak, NextPageTemplate,
+    BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, HRFlowable, PageBreak, NextPageTemplate, Table, TableStyle,
 )
 
 from app.config import REPO_ROOT
@@ -137,6 +137,97 @@ def render_workbook_pdf(
         elements.append(PageBreak())
         for i, q in enumerate(questions, start=1):
             elements.append(Paragraph(f"{i}.  {q['answer']}", _answer_style))
+
+    doc.build(elements)
+    return buffer.getvalue()
+
+
+def render_school_statement_pdf(
+    school_name: str,
+    school_logo_url: str | None,
+    period_label: str,
+    opening_balance: float,
+    closing_balance: float,
+    total_topped_up: float,
+    total_spent: float,
+    spend_by_service: list[tuple[str, float]],
+) -> bytes:
+    """
+    One-page monthly billing statement for a school's own credit_events
+    ledger — opening/closing balance plus a per-service spend breakdown, so
+    a school admin (or Qlass finance) can see where a month's spend went
+    without querying the ledger directly.
+
+    Amounts are prefixed "Rs." rather than "₹" — the base-14 Helvetica font
+    has no Rupee glyph, so ₹ renders as a broken/substitute character in the
+    actual PDF (confirmed by extracting text from a generated statement).
+    Bundling a Unicode TTF font would fix it but isn't portable across the
+    dev machine and the eventual OVH deployment target without shipping a
+    font file, so plain ASCII is the safer choice here.
+    """
+    logo_path = _resolve_logo_path(school_logo_url)
+
+    def statement_page(canvas, _doc):
+        _draw_header(canvas, school_name, "Monthly Statement", period_label, logo_path)
+        _draw_footer(canvas, canvas.getPageNumber())
+
+    buffer = io.BytesIO()
+    doc = BaseDocTemplate(buffer, pagesize=A4)
+    frame_top = PAGE_H - HEADER_H - BODY_GAP
+    frame_bottom = FOOTER_H + BODY_GAP
+    frame = Frame(MARGIN, frame_bottom, PAGE_W - 2 * MARGIN, frame_top - frame_bottom, id="body")
+    doc.addPageTemplates([PageTemplate(id="statement", frames=[frame], onPage=statement_page)])
+
+    summary_style = ParagraphStyle(
+        "Summary", parent=_styles["Normal"], fontName="Helvetica", fontSize=11, textColor=TEXT, leading=16,
+    )
+    label_style = ParagraphStyle(
+        "SectionLabel", parent=_styles["Normal"], fontName="Helvetica-Bold", fontSize=12.5, textColor=ACCENT_DARK,
+        spaceBefore=6 * mm, spaceAfter=3 * mm,
+    )
+
+    elements = [
+        Paragraph("Account Summary", label_style),
+        Table(
+            [
+                ["Opening balance", f"Rs. {opening_balance:,.2f}"],
+                ["Credits topped up this period", f"Rs. {total_topped_up:,.2f}"],
+                ["Credits spent this period", f"Rs. {total_spent:,.2f}"],
+                ["Closing balance", f"Rs. {closing_balance:,.2f}"],
+            ],
+            colWidths=[100 * mm, 60 * mm],
+            style=TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10.5),
+                ("TEXTCOLOR", (0, 0), (-1, -1), TEXT),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+                ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT_DARK),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]),
+        ),
+        Paragraph("Spend by Service", label_style),
+    ]
+
+    if spend_by_service:
+        rows = [["Service", "Amount"]] + [[svc, f"Rs. {amt:,.2f}"] for svc, amt in spend_by_service]
+        elements.append(Table(
+            rows,
+            colWidths=[100 * mm, 60 * mm],
+            style=TableStyle([
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("TEXTCOLOR", (0, 0), (-1, -1), TEXT),
+                ("BACKGROUND", (0, 0), (-1, 0), RULE),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.4, RULE),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]),
+        ))
+    else:
+        elements.append(Paragraph("No usage this period.", summary_style))
 
     doc.build(elements)
     return buffer.getvalue()

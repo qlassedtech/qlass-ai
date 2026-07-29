@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from datetime import datetime, timedelta, timezone
 
 import razorpay
 from pydantic import BaseModel
@@ -14,7 +15,10 @@ from app.database import get_db
 from app.models.core import Centre, ChatHistory, Parent, Student, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.analytics import get_school_analytics
+from app.services.deletion import fulfill_deletion_request, list_pending_deletion_requests
 from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.sales import get_schools_overview
+from app.services.school_statement import generate_school_statement_pdf
 from app.services.rate_limit import is_otp_rate_limited
 from app.services.pdf_render import render_workbook_pdf
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage, format_teacher_digest
@@ -87,9 +91,12 @@ def _scoped_students(db: Session, teacher: Teacher) -> Query:
     another school's. Only "super_admin" (Qlass's own staff) sees across
     every school. Also excludes teachers' own personal "My AI Tutor"
     profiles (see tenancy.get_or_create_linked_student) — those aren't
-    real students and shouldn't appear in any student-facing list.
+    real students and shouldn't appear in any student-facing list. And
+    excludes students whose data-deletion request has been fulfilled (see
+    app.services.deletion) — that row is kept (anonymized) only for the
+    credit_events audit trail, not to be shown as a live student.
     """
-    query = db.query(Student).filter(Student.is_staff_profile.is_(False))
+    query = db.query(Student).filter(Student.is_staff_profile.is_(False), Student.is_deleted.is_(False))
     if teacher.role != "super_admin":
         query = query.filter(Student.centre_id == teacher.centre_id)
     return query
@@ -192,7 +199,10 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
 
 @router.get("/admin/me")
 def me(teacher: Teacher = Depends(get_current_teacher)):
-    return {"id": teacher.id, "name": teacher.name, "role": teacher.role, "phone": teacher.phone}
+    return {
+        "id": teacher.id, "name": teacher.name, "role": teacher.role, "phone": teacher.phone,
+        "photo_url": teacher.photo_url,
+    }
 
 
 @router.get("/admin/students")
@@ -384,6 +394,13 @@ def get_student_credits(
 class AddCreditsRequest(BaseModel):
     amount: float
     note: str | None = None
+    # Distinguishes a genuine refund (money actually returned/owed to this
+    # school or student) from a goodwill/trial top-up or a manual ledger
+    # correction — tagged on the CreditEvent's `service` field (reusing the
+    # existing column rather than a new one) since a positive amount with
+    # one of these tags is unambiguous against real usage deductions, which
+    # are always negative amounts under a provider-service name.
+    reason: str = "goodwill"  # "refund" | "goodwill" | "correction"
 
 
 @router.post("/admin/students/{student_id}/credits/add")
@@ -399,9 +416,49 @@ def add_student_credits(
     """
     if teacher.role != "super_admin":
         raise HTTPException(status_code=403, detail="Only Qlass staff can manually grant credits")
+    if body.reason not in ("refund", "goodwill", "correction"):
+        raise HTTPException(status_code=400, detail="reason must be 'refund', 'goodwill', or 'correction'")
     student = _get_scoped_student_or_404(db, teacher, student_id)
-    new_balance = cost_tracker.add_credits(db, student.id, body.amount, body.note)
+    new_balance = cost_tracker.add_credits(db, student.id, body.amount, body.note, service=body.reason)
     return {"balance": new_balance}
+
+
+class SetSubscriptionRequest(BaseModel):
+    plan: str  # "credits" | "unlimited"
+    duration_days: int | None = None  # required when plan == "unlimited"
+    note: str | None = None
+
+
+@router.post("/admin/students/{student_id}/subscription")
+def set_student_subscription(
+    student_id: int, body: SetSubscriptionRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Manually activates the flat-fee unlimited plan (₹1800/yr student,
+    ₹3500/mo for a teacher's own "My AI Tutor" profile) or reverts a student
+    back to the normal wallet. There's no recurring billing integration yet
+    (Razorpay Subscriptions/UPI Autopay is a separate follow-up) — this is
+    the manual activation Qlass staff use after collecting a one-time
+    payment, mirroring how add_student_credits is a manual goodwill action.
+    """
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can manage subscription plans")
+    if body.plan not in ("credits", "unlimited"):
+        raise HTTPException(status_code=400, detail="plan must be 'credits' or 'unlimited'")
+    if body.plan == "unlimited" and not body.duration_days:
+        raise HTTPException(status_code=400, detail="duration_days is required to activate the unlimited plan")
+    student = _get_scoped_student_or_404(db, teacher, student_id)
+    student.subscription_plan = body.plan
+    if body.plan == "unlimited":
+        student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=body.duration_days)
+    else:
+        student.subscription_expires_at = None
+    db.commit()
+    return {
+        "subscription_plan": student.subscription_plan,
+        "subscription_expires_at": student.subscription_expires_at,
+    }
 
 
 def _teacher_to_dict(t: Teacher) -> dict:
@@ -506,6 +563,7 @@ class AddSchoolCreditsRequest(BaseModel):
     amount: float
     note: str | None = None
     centre_id: int | None = None
+    reason: str = "goodwill"  # "refund" | "goodwill" | "correction" — see AddCreditsRequest
 
 
 @router.post("/admin/school/credits/add")
@@ -519,8 +577,10 @@ def add_school_credits(
     """
     if teacher.role != "super_admin":
         raise HTTPException(status_code=403, detail="Only Qlass staff can manually grant school credits")
+    if body.reason not in ("refund", "goodwill", "correction"):
+        raise HTTPException(status_code=400, detail="reason must be 'refund', 'goodwill', or 'correction'")
     centre = _resolve_centre_for_write(db, teacher, body.centre_id)
-    new_balance = school_billing.add_credits(db, centre.id, body.amount, body.note)
+    new_balance = school_billing.add_credits(db, centre.id, body.amount, body.note, service=body.reason)
     return {"balance": new_balance}
 
 
@@ -779,6 +839,31 @@ async def send_my_tutor_message(
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 
 
+@router.post("/admin/teachers/{teacher_id}/my-tutor-subscription/activate")
+def activate_teacher_tutor_subscription(
+    teacher_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Activates a teacher's own personal-tutor unlimited plan (₹3500/mo, paid
+    outside this app for now — no recurring billing integration yet). Only
+    Qlass's super_admin can call this (same manual-activation pattern as
+    set_student_subscription) — targets teacher_id explicitly rather than
+    the caller's own profile, since it's Qlass staff activating it for a
+    teacher after that teacher's payment lands, not a self-serve action.
+    Always grants a 30-day window from the call time — re-run each month.
+    """
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can activate the personal tutor plan")
+    target_teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
+    if target_teacher is None:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    student = _my_tutor_student(db, target_teacher)
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    db.commit()
+    return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
+
+
 @router.get("/admin/analytics")
 def get_analytics(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
     if teacher.role not in ("admin", "super_admin"):
@@ -787,3 +872,98 @@ def get_analytics(db: Session = Depends(get_db), teacher: Teacher = Depends(get_
         raise HTTPException(status_code=400, detail="Sign in as a school's own admin to view analytics")
     student_ids = [s.id for s in _scoped_students(db, teacher).all()]
     return get_school_analytics(db, student_ids, teacher.centre_id)
+
+
+@router.get("/admin/school/statement")
+def get_school_statement(
+    year: int, month: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Monthly billing statement PDF for the school's own credit_events ledger
+    (teacher-tool spend, not per-student wallets — see school_billing).
+    """
+    if teacher.role == "super_admin":
+        raise HTTPException(status_code=400, detail="Sign in as a school's own admin to download its statement")
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="month must be 1-12")
+    centre = db.query(Centre).filter(Centre.id == teacher.centre_id).first()
+    pdf_bytes = generate_school_statement_pdf(db, centre, year, month)
+    filename = f"{centre.name.replace(' ', '_')}_statement_{year}_{month:02d}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/admin/deletion-requests")
+def get_deletion_requests(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    """
+    Pending data-erasure requests a parent submitted via the parent app
+    (see /parent-app/request-deletion) — a school's own admin sees their
+    school's requests, super_admin sees all, matching the usual scoping.
+    """
+    if teacher.role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can view deletion requests")
+    centre_id = None if teacher.role == "super_admin" else teacher.centre_id
+    students = list_pending_deletion_requests(db, centre_id)
+    return [
+        {"id": s.id, "name": s.name, "phone": s.phone, "requested_at": s.deletion_requested_at}
+        for s in students
+    ]
+
+
+@router.post("/admin/students/{student_id}/fulfill-deletion")
+def fulfill_deletion(student_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    """
+    Irreversibly erases a student's PII/content per a pending deletion
+    request. Restricted to super_admin — same reasoning as manual credit
+    grants (see add_student_credits): a destructive, hard-to-reverse action
+    shouldn't be self-serve for a school's own admin.
+    """
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can fulfill a deletion request")
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if student.deletion_requested_at is None:
+        raise HTTPException(status_code=400, detail="No pending deletion request for this student")
+    fulfill_deletion_request(db, student_id)
+    return {"deleted": True}
+
+
+@router.get("/admin/schools")
+def get_schools(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can view the schools/sales pipeline")
+    return get_schools_overview(db)
+
+
+class UpdateSalesInfoRequest(BaseModel):
+    sales_status: str | None = None  # "prospect" | "trial" | "active" | "churned"
+    sales_notes: str | None = None
+    contract_notes: str | None = None
+
+
+@router.patch("/admin/schools/{centre_id}/sales")
+def update_school_sales_info(
+    centre_id: int, body: UpdateSalesInfoRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can edit the schools/sales pipeline")
+    if body.sales_status is not None and body.sales_status not in ("prospect", "trial", "active", "churned"):
+        raise HTTPException(status_code=400, detail="sales_status must be prospect, trial, active, or churned")
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    if centre is None:
+        raise HTTPException(status_code=404, detail="School not found")
+    if body.sales_status is not None:
+        centre.sales_status = body.sales_status
+    if body.sales_notes is not None:
+        centre.sales_notes = body.sales_notes
+    if body.contract_notes is not None:
+        centre.contract_notes = body.contract_notes
+    db.commit()
+    return {
+        "id": centre.id, "sales_status": centre.sales_status,
+        "sales_notes": centre.sales_notes, "contract_notes": centre.contract_notes,
+    }

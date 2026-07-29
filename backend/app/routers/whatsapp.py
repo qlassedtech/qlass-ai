@@ -100,7 +100,7 @@ _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "
 # _get_or_create_student). Everyone else gets a plain-text-only tutor: no
 # voice/OCR/image-generation/document costs until they're actually
 # provisioned, so a random or leaked number can't run up paid API spend.
-FULL_ACCESS_PHONES = {"918789674434", "918460184666", "918252345266"}
+FULL_ACCESS_PHONES = {"918789674434", "918460184666", "918252345266", "917978046402"}
 
 # Opposite-gender voice: a female voice for a detected-male student, a male
 # voice for a detected-female student. Speaker names are from Sarvam's
@@ -431,8 +431,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     # Each student has their own wallet now (see cost_tracker) — checked
     # here, after resolving which student this actually is, rather than
-    # against one shared account-wide balance.
-    if not cost_tracker.has_credits(db, student.id):
+    # against one shared account-wide balance. Demo/testing numbers get
+    # unlimited credits (see FULL_ACCESS_PHONES) — they're never metered.
+    if from_phone not in FULL_ACCESS_PHONES and not cost_tracker.has_credits(db, student.id):
         await send_whatsapp_message(
             from_phone, "You're out of AI credits — ask your school to top up your account to keep chatting with me!"
         )

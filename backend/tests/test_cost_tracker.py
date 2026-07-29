@@ -81,6 +81,45 @@ def test_payment_idempotency_guard(db_session):
     assert cost_tracker.get_balance(db_session, student.id) == 100.0  # unchanged, not 200
 
 
+def test_unlimited_plan_bypasses_empty_wallet(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    student = _make_student(db_session)
+    assert cost_tracker.has_credits(db_session, student.id) is False  # empty wallet, normal plan
+
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    db_session.commit()
+    assert cost_tracker.has_credits(db_session, student.id) is True
+
+
+def test_expired_unlimited_plan_falls_back_to_wallet(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    student = _make_student(db_session)
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) - timedelta(days=1)  # expired yesterday
+    db_session.commit()
+    assert cost_tracker.has_credits(db_session, student.id) is False
+
+
+def test_unlimited_plan_usage_does_not_deduct_wallet(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    student = _make_student(db_session)
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    db_session.commit()
+
+    balance = cost_tracker.record_claude_usage(db_session, "claude-sonnet-4-6", 1000, 500, student.id)
+    assert balance == 0.0  # wallet untouched, but a $0 CreditEvent is still logged with real raw_cost
+
+    from app.models.core import CreditEvent
+    event = db_session.query(CreditEvent).filter(CreditEvent.student_id == student.id).first()
+    assert event.amount == 0
+    assert event.raw_cost > 0
+
+
 def test_duplicate_external_ref_rejected_at_db_level(db_session):
     """Defense in depth — even bypassing the app-level check, the unique
     constraint on external_ref must prevent a literal duplicate row."""

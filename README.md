@@ -69,8 +69,12 @@ since a laptop cron won't fire reliably). Add to that server's crontab:
 
 # Weekly referral nudge to active + over-engaged students — Sunday: more free time to actually message a friend
 0 10 * * SUN cd /path/to/qlass-ai && venv/bin/python3 scripts/send_referral_nudges.py >> logs/referral_nudges.log 2>&1
+
+# Weekly Razorpay reconciliation report — read-only, flags any captured
+# payment with no matching internal ledger credit for manual review
+0 7  * * MON cd /path/to/qlass-ai && venv/bin/python3 scripts/reconcile_razorpay.py --days 7 >> logs/reconcile_razorpay.log 2>&1
 ```
-Each script supports `--dry-run` (except send_teacher_digest.py) to preview without sending. `logs/` is gitignored — create it on the server (`mkdir -p logs`) before the first cron run.
+Each script supports `--dry-run` (except send_teacher_digest.py and reconcile_razorpay.py, which are already read-only/reporting-only) to preview without sending. `logs/` is gitignored — create it on the server (`mkdir -p logs`) before the first cron run.
 
 ## Roadmap
 See `docs/roadmap.md` for the full 20-phase plan. Currently scaffolded:

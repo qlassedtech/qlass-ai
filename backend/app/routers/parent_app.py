@@ -2,9 +2,12 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from datetime import datetime, timezone
+
 from app.database import get_db
 from app.models.core import Parent, Student
 from app.services import cost_tracker
+from app.services.consent import CONSENT_STATEMENT, has_given_consent, record_consent
 from app.services.otp import generate_and_store_otp, verify_otp
 from app.services.parent_auth import create_parent_access_token, get_current_parent
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage
@@ -84,3 +87,46 @@ def get_progress(db: Session = Depends(get_db), parent: Parent = Depends(get_cur
     activity = get_activity_stats(db, student.id)
     coverage = get_chapter_coverage(db, student)
     return {"stats": stats, "activity": activity, "coverage": coverage}
+
+
+@router.get("/parent-app/consent")
+def get_consent_status(db: Session = Depends(get_db), parent: Parent = Depends(get_current_parent)):
+    student = _linked_student(db, parent)
+    return {"statement": CONSENT_STATEMENT, "given": has_given_consent(student), "given_at": student.consent_given_at}
+
+
+@router.post("/parent-app/consent")
+def give_consent(db: Session = Depends(get_db), parent: Parent = Depends(get_current_parent)):
+    """
+    The parent (this student's legal guardian for a minor) confirms the
+    data-processing consent statement — see app.services.consent. Idempotent:
+    re-confirming just no-ops rather than overwriting the original timestamp,
+    so the record always reflects when consent was FIRST given.
+    """
+    student = _linked_student(db, parent)
+    if not has_given_consent(student):
+        student = record_consent(db, student.id)
+    return {"given": True, "given_at": student.consent_given_at}
+
+
+class DeletionRequest(BaseModel):
+    confirm: bool
+
+
+@router.post("/parent-app/request-deletion")
+def request_deletion(body: DeletionRequest, db: Session = Depends(get_db), parent: Parent = Depends(get_current_parent)):
+    """
+    Lets a parent request erasure of their child's data (name, phone, chat
+    history, academic records) under data-protection rules (e.g. India's
+    DPDP Act). Doesn't erase anything immediately — Qlass staff review and
+    fulfill it (see app.services.deletion.fulfill_deletion_request), since an
+    instant self-serve wipe could be misused to dodge an active fee dispute
+    or an ongoing school investigation involving that student.
+    """
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="confirm must be true to submit a deletion request")
+    student = _linked_student(db, parent)
+    if student.deletion_requested_at is None:
+        student.deletion_requested_at = datetime.now(timezone.utc)
+        db.commit()
+    return {"requested": True, "requested_at": student.deletion_requested_at}

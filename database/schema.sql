@@ -7,6 +7,9 @@ CREATE TABLE IF NOT EXISTS centres (
     name TEXT NOT NULL,
     city TEXT,
     logo_url TEXT,
+    sales_status TEXT DEFAULT 'active',
+    sales_notes TEXT,
+    contract_notes TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -38,6 +41,11 @@ CREATE TABLE IF NOT EXISTS students (
     referral_milestones_paid JSONB DEFAULT '[]',
     habit_milestones_paid JSONB DEFAULT '[]',
     is_staff_profile BOOLEAN DEFAULT FALSE,
+    subscription_plan TEXT DEFAULT 'credits',
+    subscription_expires_at TIMESTAMPTZ,
+    consent_given_at TIMESTAMPTZ,
+    deletion_requested_at TIMESTAMPTZ,
+    is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);

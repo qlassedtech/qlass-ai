@@ -43,9 +43,10 @@ def has_credits(db: Session, centre_id: int) -> bool:
 
 
 def add_credits(
-    db: Session, centre_id: int, amount: float, note: str | None = None, external_ref: str | None = None
+    db: Session, centre_id: int, amount: float, note: str | None = None, external_ref: str | None = None,
+    service: str | None = None,
 ) -> float:
-    db.add(SchoolCreditEvent(amount=amount, centre_id=centre_id, note=note, external_ref=external_ref))
+    db.add(SchoolCreditEvent(amount=amount, service=service, centre_id=centre_id, note=note, external_ref=external_ref))
     db.commit()
     return get_balance(db, centre_id)
 
