@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { setStudentToken, studentApi, type StudentProfile } from "../api";
+import ThemeToggle from "./ThemeToggle";
 
 export default function StudentLayout() {
   const navigate = useNavigate();
@@ -18,7 +19,10 @@ export default function StudentLayout() {
   return (
     <div className="app-shell">
       <nav className="sidebar">
-        <img src="/logo.jpeg" alt="Qlass Learning" className="sidebar-logo" />
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+          <img src="/logo.jpeg" alt="Qlass Learning" className="sidebar-logo" />
+          <ThemeToggle />
+        </div>
         {student && (
           <div className="sidebar-user">
             <div className="photo-preview" style={{ width: 36, height: 36 }}>

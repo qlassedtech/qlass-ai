@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { setParentToken } from "../api";
+import ThemeToggle from "./ThemeToggle";
 
 export default function ParentLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
@@ -12,7 +13,10 @@ export default function ParentLayout({ children }: { children: React.ReactNode }
   return (
     <div className="center-page" style={{ alignItems: "flex-start", paddingTop: 60 }}>
       <div className="card" style={{ width: 480 }}>
-        <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: 0 }} />
+          <ThemeToggle />
+        </div>
         {children}
         <button className="logout" onClick={logout} style={{ marginTop: 20, width: "100%" }}>
           Sign Out

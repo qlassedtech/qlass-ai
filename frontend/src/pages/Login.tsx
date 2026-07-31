@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, parentApi, setParentToken, setStudentToken, setToken } from "../api";
+import ThemeToggle from "../components/ThemeToggle";
 
 type Step = "phone" | "password" | "otp" | "parent_otp";
 
@@ -90,6 +91,9 @@ export default function Login() {
 
   return (
     <div className="center-page">
+      <div style={{ position: "absolute", top: 20, right: 20, zIndex: 2 }}>
+        <ThemeToggle />
+      </div>
       <form className="card" onSubmit={submitHandlers[step]}>
         <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
         <h1>Welcome to Qlass</h1>
