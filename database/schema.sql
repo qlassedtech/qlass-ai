@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS centres (
     sales_status TEXT DEFAULT 'active',
     sales_notes TEXT,
     contract_notes TEXT,
+    pilot_status TEXT DEFAULT 'none',
+    pilot_started_at TIMESTAMPTZ,
+    pilot_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -48,6 +51,7 @@ CREATE TABLE IF NOT EXISTS students (
     is_deleted BOOLEAN DEFAULT FALSE,
     consecutive_unresolved_hints INTEGER DEFAULT 0,
     last_discussed_topic TEXT,
+    razorpay_subscription_id TEXT UNIQUE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);
@@ -142,25 +146,6 @@ CREATE TABLE IF NOT EXISTS answers (
     is_correct BOOLEAN
 );
 
-CREATE TABLE IF NOT EXISTS homework (
-    id SERIAL PRIMARY KEY,
-    student_id INTEGER REFERENCES students(id),
-    chapter_id INTEGER REFERENCES chapters(id),
-    assigned_at TIMESTAMPTZ DEFAULT now(),
-    due_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS homework_submission (
-    id SERIAL PRIMARY KEY,
-    homework_id INTEGER REFERENCES homework(id),
-    student_id INTEGER REFERENCES students(id),
-    file_url TEXT,
-    ocr_text TEXT,
-    marks_awarded NUMERIC,
-    feedback TEXT,
-    submitted_at TIMESTAMPTZ DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS attendance (
     id SERIAL PRIMARY KEY,
     student_id INTEGER REFERENCES students(id),
@@ -231,8 +216,15 @@ CREATE INDEX IF NOT EXISTS idx_topic_progress_student_correct_created ON topic_p
 -- webhook call for a message we already handled.
 CREATE TABLE IF NOT EXISTS processed_webhook_messages (
     message_id TEXT PRIMARY KEY,
+    payload JSONB,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    lease_expires_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_processed_webhook_messages_pending
+    ON processed_webhook_messages(status, lease_expires_at);
 
 -- Credit/cost ledger: append-only top-ups (positive amount) and per-request
 -- deductions (negative amount, tagged by service). Current balance =
@@ -262,3 +254,13 @@ CREATE TABLE IF NOT EXISTS school_credit_events (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_school_credit_events_centre ON school_credit_events(centre_id);
+
+CREATE TABLE IF NOT EXISTS school_pilot_grants (
+    id SERIAL PRIMARY KEY,
+    centre_id INTEGER NOT NULL REFERENCES centres(id),
+    student_id INTEGER NOT NULL REFERENCES students(id),
+    pilot_started_at TIMESTAMPTZ NOT NULL,
+    amount NUMERIC NOT NULL CHECK (amount > 0),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (centre_id, student_id, pilot_started_at)
+);

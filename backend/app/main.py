@@ -1,7 +1,9 @@
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.routers import whatsapp, health, broadcast, admin, payments, student_app, parent_app
+from app.routers import whatsapp, health, broadcast, admin, payments, student_app, parent_app, razorpay_webhook
 from app.database import Base, engine
 from app.config import settings, REPO_ROOT
 from app.logging_config import setup_logging
@@ -22,10 +24,7 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 # since this API issues auth tokens.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", "http://127.0.0.1:5173",
-        "http://localhost:5174", "http://127.0.0.1:5174",
-    ],
+    allow_origins=settings.cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,14 +37,23 @@ app.include_router(admin.router, tags=["admin"])
 app.include_router(payments.router, tags=["payments"])
 app.include_router(student_app.router, tags=["student-app"])
 app.include_router(parent_app.router, tags=["parent-app"])
+app.include_router(razorpay_webhook.router, tags=["razorpay-webhook"])
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     # Convenience for local dev only. In staging/prod, use Alembic migrations
     # (database/migrations/) against database/schema.sql instead.
     if settings.environment == "development":
         Base.metadata.create_all(bind=engine)
+    app.state.webhook_retry_task = asyncio.create_task(whatsapp.retry_pending_webhooks())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    task = getattr(app.state, "webhook_retry_task", None)
+    if task:
+        task.cancel()
 
 
 @app.get("/")

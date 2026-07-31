@@ -27,6 +27,9 @@ class Centre(Base):
     # ahead of an actual signup would start as "prospect".
     sales_status = Column(Text, default="active")
     sales_notes = Column(Text)
+    pilot_status = Column(Text, default="none")
+    pilot_started_at = Column(TIMESTAMP(timezone=True))
+    pilot_expires_at = Column(TIMESTAMP(timezone=True))
     # Free-text record of a negotiated contract (e.g. "₹50,000/year
     # unlimited, signed 2026-04-01") — not automated billing, just so a
     # custom deal is represented somewhere instead of purely in someone's
@@ -114,6 +117,13 @@ class Student(Base):
     # is identical, just the price/duration differ.
     subscription_plan = Column(Text, default="credits")
     subscription_expires_at = Column(TIMESTAMP(timezone=True))
+    # Set only when the unlimited plan was activated through Razorpay's
+    # recurring Subscriptions API (see app.routers.payments' subscription
+    # endpoints and app.routers.razorpay_webhook) rather than a manual
+    # super_admin activation/trial grant — lets the webhook look up which
+    # student a subscription.charged/cancelled event belongs to, and lets a
+    # self-serve cancel action target the right Razorpay subscription.
+    razorpay_subscription_id = Column(Text, unique=True)
     # School-controller attestation that parental consent was obtained for
     # this minor's data (chat history, academic performance, phone number)
     # — captured at enrollment time. See app.services.consent.
@@ -288,33 +298,6 @@ class Answer(Base):
     is_correct = Column(Boolean)
 
 
-class Homework(Base):
-    __tablename__ = "homework"
-
-    id = Column(Integer, primary_key=True)
-    student_id = Column(Integer, ForeignKey("students.id"))
-    chapter_id = Column(Integer, ForeignKey("chapters.id"))
-    assigned_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    due_at = Column(TIMESTAMP(timezone=True))
-
-    submissions = relationship("HomeworkSubmission", back_populates="homework")
-
-
-class HomeworkSubmission(Base):
-    __tablename__ = "homework_submission"
-
-    id = Column(Integer, primary_key=True)
-    homework_id = Column(Integer, ForeignKey("homework.id"))
-    student_id = Column(Integer, ForeignKey("students.id"))
-    file_url = Column(Text)
-    ocr_text = Column(Text)
-    marks_awarded = Column(Numeric)
-    feedback = Column(Text)
-    submitted_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-
-    homework = relationship("Homework", back_populates="submissions")
-
-
 class Attendance(Base):
     __tablename__ = "attendance"
 
@@ -399,6 +382,11 @@ class ProcessedWebhookMessage(Base):
     __tablename__ = "processed_webhook_messages"
 
     message_id = Column(Text, primary_key=True)
+    payload = Column(JSONType)
+    status = Column(Text, nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text)
+    lease_expires_at = Column(TIMESTAMP(timezone=True))
     processed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
@@ -436,4 +424,16 @@ class SchoolCreditEvent(Base):
     # Same idempotency purpose as CreditEvent.external_ref — a Razorpay
     # payment_id, unique so the same payment can never be credited twice.
     external_ref = Column(Text, unique=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class SchoolPilotGrant(Base):
+    __tablename__ = "school_pilot_grants"
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_school_pilot_grant_amount"),)
+
+    id = Column(Integer, primary_key=True)
+    centre_id = Column(Integer, ForeignKey("centres.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    pilot_started_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    amount = Column(Numeric, nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

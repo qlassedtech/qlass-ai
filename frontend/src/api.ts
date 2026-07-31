@@ -173,6 +173,8 @@ export interface Student {
   photo_url: string | null;
   parent_phone: string | null;
   parent_name: string | null;
+  subscription_plan: string;
+  subscription_expires_at: string | null;
 }
 
 export interface TeacherAccount {
@@ -230,6 +232,9 @@ export interface SchoolOverview {
   last_activity: string | null;
   days_inactive: number | null;
   is_churn_risk: boolean;
+  pilot_status: string;
+  pilot_started_at: string | null;
+  pilot_expires_at: string | null;
 }
 
 export function absoluteUrl(path: string | null): string | null {
@@ -290,6 +295,47 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ amount, note, reason }),
     }) as Promise<{ balance: number }>,
+  setStudentSubscription: (
+    id: number,
+    data: {
+      plan: "credits" | "unlimited";
+      duration_days?: number;
+      is_trial?: boolean;
+      payment_reference?: string;
+      note?: string;
+    },
+  ) =>
+    request(`/admin/students/${id}/subscription`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }) as Promise<{ subscription_plan: string; subscription_expires_at: string | null }>,
+  activateTeacherTutorSubscription: (
+    teacherId: number,
+    data: { duration_days?: number; is_trial?: boolean; payment_reference?: string; note?: string } = {},
+  ) =>
+    request(`/admin/teachers/${teacherId}/my-tutor-subscription/activate`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }) as Promise<{
+      subscription_plan: string;
+      subscription_expires_at: string | null;
+    }>,
+  activateSchoolTrialSubscriptions: (
+    centreId: number,
+    data: { duration_days: number; student_ids?: number[]; teacher_ids?: number[]; note?: string },
+  ) =>
+    request(`/admin/schools/${centreId}/trial-subscriptions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }) as Promise<{ activated_count: number; activated: string[] }>,
+  launchSchoolPilot: (
+    centreId: number,
+    data: { duration_days: number; credits_per_student: number; teacher_tool_credits?: number; student_ids: number[]; note?: string },
+  ) =>
+    request(`/admin/schools/${centreId}/pilot`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }) as Promise<{ pilot_status: string; pilot_expires_at: string; credits_per_student: number; teacher_tool_credits: number; enabled_features: string[]; granted_count: number; granted: string[] }>,
   registerSchool: (data: { school_name: string; city?: string; admin_name: string; admin_phone: string; password: string }) =>
     request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       access_token: string;
@@ -333,12 +379,22 @@ export const api = {
   },
   generateWorkbook: (data: { topic: string; class_?: string; num_questions: number; include_answer_key: boolean }) =>
     requestBlob("/admin/workbook/generate", { method: "POST", body: JSON.stringify(data) }),
-  assignQuiz: (data: { topic: string; class_?: string; board?: string; phone_numbers?: string[] }) =>
+  assignQuiz: (data: {
+    topic?: string;
+    chapter_id?: number;
+    class_?: string;
+    board?: string;
+    phone_numbers?: string[];
+  }) =>
     request("/admin/quizzes/assign", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       assigned_count: number;
       assigned: string[];
       skipped_already_in_quiz: string[];
     }>,
+  getCurriculumChapters: (classNum: string) =>
+    request(`/admin/curriculum/chapters?class_=${encodeURIComponent(classNum)}`) as Promise<
+      { id: number; name: string; chapter_no: number | null; subject: string }[]
+    >,
   generatePresentation: (data: { topic: string; num_cards: number }) =>
     request("/admin/presentation/generate", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       generation_id: string;
@@ -357,7 +413,31 @@ export const api = {
     request("/student-app/auth/verify-otp", {
       method: "POST", body: JSON.stringify({ phone, otp, name, referral_code }),
     }) as Promise<{ access_token: string; student: StudentProfile }>,
-  getMyTutor: () => request("/admin/my-tutor") as Promise<{ id: number; credit_balance: number; referral_code: string }>,
+  getMyTutor: () =>
+    request("/admin/my-tutor") as Promise<{
+      id: number;
+      credit_balance: number;
+      referral_code: string;
+      subscription_plan: string;
+      subscription_expires_at: string | null;
+      auto_renewing: boolean;
+    }>,
+  createMyTutorSubscription: () =>
+    request("/admin/my-tutor/subscription/create", { method: "POST" }) as Promise<CreateSubscriptionResponse>,
+  verifyMyTutorSubscription: (data: {
+    razorpay_subscription_id: string;
+    razorpay_payment_id: string;
+    razorpay_signature: string;
+  }) =>
+    request("/admin/my-tutor/subscription/verify", { method: "POST", body: JSON.stringify(data) }) as Promise<{
+      subscription_plan: string;
+      subscription_expires_at: string | null;
+    }>,
+  cancelMyTutorSubscription: () =>
+    request("/admin/my-tutor/subscription/cancel", { method: "POST" }) as Promise<{
+      cancelled: boolean;
+      access_until: string | null;
+    }>,
   getMyTutorHistory: () => request("/admin/my-tutor/history") as Promise<ChatMessage[]>,
   sendMyTutorMessage: (message: string) =>
     request("/admin/my-tutor/chat/send", { method: "POST", body: JSON.stringify({ message }) }) as Promise<{
@@ -401,6 +481,11 @@ export interface CreateOrderResponse {
   currency: string;
 }
 
+export interface CreateSubscriptionResponse {
+  subscription_id: string;
+  key_id: string;
+}
+
 // Public — no teacher/admin login involved, parents/students pay directly.
 export const payApi = {
   createOrder: (phone: string, amount: number) =>
@@ -411,6 +496,21 @@ export const payApi = {
     razorpay_signature: string;
     phone: string;
   }) => request("/pay/verify", { method: "POST", body: JSON.stringify(data) }) as Promise<{ credited: number; balance: number }>,
+  createSubscription: (phone: string) =>
+    request("/pay/create-subscription", {
+      method: "POST",
+      body: JSON.stringify({ phone }),
+    }) as Promise<CreateSubscriptionResponse>,
+  verifySubscription: (data: {
+    razorpay_subscription_id: string;
+    razorpay_payment_id: string;
+    razorpay_signature: string;
+    phone: string;
+  }) =>
+    request("/pay/verify-subscription", { method: "POST", body: JSON.stringify(data) }) as Promise<{
+      subscription_plan: string;
+      subscription_expires_at: string | null;
+    }>,
 };
 
 export interface ParentProfile {

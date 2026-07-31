@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -43,6 +43,12 @@ PG_TEST_DATABASE_URL = "postgresql://qlass:qlass@localhost:5433/qlass_ai_test"
 @pytest.fixture()
 def pg_db_session():
     engine = create_engine(PG_TEST_DATABASE_URL)
+    # This database is dedicated to tests only. Rebuild its schema so a
+    # model/migration change cannot silently run tests against stale tables.
+    # DROP SCHEMA avoids the intentional students<->quizzes FK cycle.
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
     Base.metadata.create_all(bind=engine)
     connection = engine.connect()
     transaction = connection.begin()

@@ -1,8 +1,9 @@
+import asyncio
 import logging
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Request, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,8 +27,7 @@ from app.services.whatsapp_client import (
 from app.services.profile_builder import (
     next_missing_field,
     should_ask_this_turn,
-    clean_answer,
-    looks_like_answer,
+    extract_profile_answer,
     looks_like_confirmation_reply,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
@@ -37,7 +37,7 @@ from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
 from app.services.youtube_client import find_best_video
-from app.services import cost_tracker
+from app.services import cost_tracker, school_billing
 from app.services.escalation import (
     record_hint_outcome,
     get_escalation_recipients,
@@ -89,6 +89,9 @@ router = APIRouter()
 tutor_agent = TutorAgent()
 
 HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
+WEBHOOK_LEASE_SECONDS = 5 * 60
+WEBHOOK_RETRY_INTERVAL_SECONDS = 30
+WEBHOOK_RETRY_BATCH_SIZE = 100
 WEAK_TOPICS_LIMIT = 5
 OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
 
@@ -130,12 +133,10 @@ def _looks_like_menu_request(text: str) -> bool:
 def _looks_like_teacher_help_request(text: str) -> bool:
     return text.strip().lower() in _TEACHER_HELP_PHRASES
 
-# Numbers with full feature access during this demo phase (per-account
-# feature configuration at real onboarding is still TODO — see
-# _get_or_create_student). Everyone else gets a plain-text-only tutor: no
-# voice/OCR/image-generation/document costs until they're actually
-# provisioned, so a random or leaked number can't run up paid API spend.
-FULL_ACCESS_PHONES = {"918789674434", "918460184666", "918252345266", "917978046402"}
+# Never keep production-cost bypasses for particular phone numbers. Feature
+# access is provisioned per learner (including by launch_pilot), and every
+# account remains subject to the same spend controls.
+FULL_ACCESS_PHONES: frozenset[str] = frozenset()
 
 # Opposite-gender voice: a female voice for a detected-male student, a male
 # voice for a detected-female student. Speaker names are from Sarvam's
@@ -266,11 +267,7 @@ def _looks_affirmative(text: str) -> bool:
 
 
 def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
-    features = (
-        {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
-        if from_phone in FULL_ACCESS_PHONES
-        else {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
-    )
+    features = {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
 
     referred_by_id = None
     referral_code = extract_referral_code(message_text)
@@ -363,7 +360,7 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
 
 
 @router.post("/webhook")
-async def receive_message(request: Request, background_tasks: BackgroundTasks):
+async def receive_message(request: Request):
     """
     Wati -> ack immediately -> process in the background (parse text/voice/
     image/document -> find/create Student -> TutorAgent -> save chat_history
@@ -395,51 +392,114 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         # request, and this previously fell through as an unhandled 500.
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Guard against Wati redelivering/retrying a webhook call for a message
-    # we already processed — mark it seen as early as possible, before any
-    # real work, so a duplicate delivery is a no-op rather than a second
-    # confusing reply to the student. This is a fast, single-insert check,
-    # safe to do before acknowledging.
+    # Persist the work before acknowledging Wati. The old implementation
+    # marked a message as processed before its background task ran, so a
+    # process crash made Wati retries a no-op and permanently lost a student
+    # message. The persisted payload is claimed with a lease below and is
+    # retried on startup/periodically after a failure or worker crash.
     webhook_message_id = payload.get("whatsappMessageId") or payload.get("id")
-    if webhook_message_id:
-        db = SessionLocal()
-        try:
-            db.add(ProcessedWebhookMessage(message_id=webhook_message_id))
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            return {"received": True, "handled": False, "reason": "duplicate webhook delivery, already processed"}
-        finally:
-            db.close()
+    if not webhook_message_id:
+        raise HTTPException(status_code=400, detail="Webhook message id is required")
 
-    background_tasks.add_task(_process_webhook_payload, payload)
+    db = SessionLocal()
+    try:
+        db.add(ProcessedWebhookMessage(message_id=webhook_message_id, payload=payload, status="pending"))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(ProcessedWebhookMessage).filter(
+            ProcessedWebhookMessage.message_id == webhook_message_id
+        ).first()
+        if existing and existing.status == "completed":
+            return {"received": True, "handled": False, "reason": "duplicate webhook delivery, already processed"}
+    finally:
+        db.close()
+
+    # Return the Wati acknowledgement independently of tutor processing.
+    # The job is already persisted above and the retry worker recovers it if
+    # this process exits after the acknowledgement.
+    asyncio.create_task(_process_queued_webhook(webhook_message_id))
     return {"received": True, "handled": "processing"}
 
 
-async def _process_webhook_payload(payload: dict) -> None:
+async def _process_queued_webhook(message_id: str) -> None:
     """
-    The actual work, run after the webhook response has already been sent.
-    Opens its own DB session since the request-scoped one from Depends(get_db)
-    would already be closed by the time a background task runs.
+    Claim and process one persisted webhook job. The conditional lease means
+    concurrent API workers can safely see the same job without sending a
+    duplicate reply.
     """
-    phone = payload.get("waId")
+    db = SessionLocal()
+    payload = None
     try:
+        job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
+        if job is None or job.status == "completed":
+            return
+        now = datetime.now(timezone.utc)
+        lease = job.lease_expires_at
+        if job.status == "processing" and lease is not None:
+            if lease.tzinfo is None:
+                lease = lease.replace(tzinfo=timezone.utc)
+            if lease > now:
+                return
+        payload = job.payload
+        if payload is None:
+            # A row from before the payload column existed (migration 0033)
+            # — it was already handled under the old dedupe-only scheme and
+            # has nothing left to replay. Close it out instead of retrying
+            # forever.
+            job.status = "completed"
+            job.lease_expires_at = None
+            db.commit()
+            return
+        job.status = "processing"
+        job.attempts += 1
+        job.lease_expires_at = now + timedelta(seconds=WEBHOOK_LEASE_SECONDS)
+        job.last_error = None
+        db.commit()
+
+        phone = payload.get("waId")
         async with (student_lock(phone) if phone else nullcontext()):
-            db = SessionLocal()
-            try:
-                await _handle_message(db, payload)
-            finally:
-                db.close()
-    except Exception:
-        # An uncaught exception here (including failing to even acquire the
-        # per-student lock) previously meant the student got no reply at all
-        # and we had no record of why — log the full traceback and let them
-        # know something broke instead of leaving them hanging.
-        logger.exception("Unhandled error processing webhook payload for %s", phone)
-        if phone:
-            await send_whatsapp_message(
-                phone, "Sorry, something went wrong on my end — please try sending that again."
+            await _handle_message(db, payload)
+
+        job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
+        if job:
+            job.status = "completed"
+            job.lease_expires_at = None
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
+        if job:
+            job.status = "pending"
+            job.lease_expires_at = None
+            job.last_error = str(exc)[:1000]
+            db.commit()
+        logger.exception("Webhook job %s failed and will be retried", message_id)
+    finally:
+        db.close()
+
+
+async def retry_pending_webhooks() -> None:
+    """Continuously recover persisted jobs left pending by failed workers."""
+    while True:
+        db = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            jobs = (
+                db.query(ProcessedWebhookMessage.message_id)
+                .filter(
+                    (ProcessedWebhookMessage.status == "pending")
+                    | ((ProcessedWebhookMessage.status == "processing") & (ProcessedWebhookMessage.lease_expires_at < now))
+                )
+                .order_by(ProcessedWebhookMessage.processed_at)
+                .limit(WEBHOOK_RETRY_BATCH_SIZE)
+                .all()
             )
+        finally:
+            db.close()
+        for (message_id,) in jobs:
+            await _process_queued_webhook(message_id)
+        await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
 
 
 async def _handle_message(db: Session, payload: dict) -> None:
@@ -478,6 +538,30 @@ async def _handle_message(db: Session, payload: dict) -> None:
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
         await send_whatsapp_message(from_phone, early_reply)
+        return
+
+    # A school marked "churned" in the sales pipeline (see
+    # app.services.sales) is no longer a paying customer — its students
+    # only keep getting service if THEY personally paid Qlass directly at
+    # some point (a real Razorpay payment, not school-funded trial/
+    # referral/habit credit or a manual grant). Checked before the credit
+    # check below and before FULL_ACCESS_PHONES, since a churned school's
+    # own demo numbers shouldn't get free service either.
+    if from_phone not in FULL_ACCESS_PHONES and school_billing.is_centre_churned(db, student.centre_id) \
+            and not cost_tracker.has_independent_payment(db, student.id):
+        await send_whatsapp_message(
+            from_phone,
+            "Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
+            "or top up your own AI credits directly to keep chatting with me!",
+        )
+        return
+
+    if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
+        await send_whatsapp_message(
+            from_phone,
+            "Your school's Qlass pilot has ended. Ask your school to continue the programme, "
+            "or top up your own AI credits to keep learning!",
+        )
         return
 
     # Each student has their own wallet now (see cost_tracker) — checked
@@ -669,6 +753,23 @@ async def _handle_message(db: Session, payload: dict) -> None:
         student.suggested_class = None
         db.commit()
 
+    # Extracted (and saved) up front, independent of the branch ladder below —
+    # a pending profile question can be answered inside a message that ALSO
+    # has real tutoring content (e.g. "I don't know. Nikhil" answering both
+    # the tutor's own question and "what's your name?"). Saving the field
+    # here doesn't decide how the rest of the message gets handled; a
+    # non-empty remainder means there's still something to actually answer,
+    # so processing continues into the normal branch ladder below instead of
+    # being short-circuited into a content-free "Got it, thanks!".
+    profile_answer = None
+    if student.pending_profile_field and student.pending_profile_field != "class_confirm":
+        profile_answer = extract_profile_answer(student.pending_profile_field, message_text)
+        if profile_answer:
+            value, _remaining = profile_answer
+            setattr(student, student.pending_profile_field, value)
+            student.pending_profile_field = None
+            db.commit()
+
     if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
         # Special case, not a normal profile field — confirming (or declining)
         # the class-update suggestion triggered by a run of off-level questions.
@@ -681,13 +782,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
         student.suggested_class = None
         db.commit()
         detected_lang = student.preferred_language or "en-IN"
-    elif student.pending_profile_field and looks_like_answer(student.pending_profile_field, message_text):
-        # This message is the answer to a profile question we asked last turn,
-        # not a new tutoring question — no LLM call, so just keep whatever
-        # language this student was already using.
-        setattr(student, student.pending_profile_field, clean_answer(student.pending_profile_field, message_text))
-        student.pending_profile_field = None
-        db.commit()
+    elif profile_answer and not profile_answer[1]:
+        # The whole message was purely the profile answer (already saved
+        # above) — nothing else in it to give a real tutoring reply to, so
+        # skip the LLM call same as before.
         reply_text = "Got it, thanks! 👍 What else can I help you with?"
         detected_lang = student.preferred_language or "en-IN"
     elif student.active_quiz_id and looks_like_quiz_stop(message_text):

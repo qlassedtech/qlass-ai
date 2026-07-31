@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.core import SchoolCreditEvent
+from app.models.core import Centre, SchoolCreditEvent
 
 # Same "actual provider cost x markup" policy as the per-student ledger
 # (see app.services.cost_tracker), applied to teacher-facing generation
@@ -96,3 +98,28 @@ def record_gamma_usage(db: Session, centre_id: int, generation_id: str, credits_
     ))
     db.commit()
     return get_balance(db, centre_id)
+
+
+def is_centre_churned(db: Session, centre_id: int | None) -> bool:
+    """
+    True only when the school is explicitly marked "churned" in the sales
+    pipeline (see app.services.sales) — a "prospect"/"trial"/"active"
+    school (or a student with no centre at all) is never gated by this.
+    """
+    if centre_id is None:
+        return False
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    return centre is not None and centre.sales_status == "churned"
+
+
+def is_centre_pilot_expired(db: Session, centre_id: int | None) -> bool:
+    """Whether a school-funded pilot has ended (direct paid users are exempt)."""
+    if centre_id is None:
+        return False
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    if centre is None or centre.pilot_status != "active" or centre.pilot_expires_at is None:
+        return False
+    expires_at = centre.pilot_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.core import ChatHistory, Parent, Student, Teacher
-from app.services import cost_tracker
+from app.services import cost_tracker, school_billing
 from app.services.otp import generate_and_store_otp, verify_otp
 from app.services.rate_limit import is_otp_rate_limited
 from app.services.referral import REFERRAL_SIGNUP_BONUS
@@ -125,6 +125,12 @@ class SendMessageRequest(BaseModel):
 async def send_message(
     body: SendMessageRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student)
 ):
+    if school_billing.is_centre_churned(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
+        raise HTTPException(
+            status_code=402,
+            detail="Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
+                   "or top up your own AI credits directly",
+        )
     if not cost_tracker.has_credits(db, student.id):
         raise HTTPException(status_code=402, detail="You're out of AI credits — ask your school to top up your account")
     reply = await process_web_message(db, student, body.message)

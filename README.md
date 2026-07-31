@@ -73,6 +73,14 @@ since a laptop cron won't fire reliably). Add to that server's crontab:
 # Weekly Razorpay reconciliation report — read-only, flags any captured
 # payment with no matching internal ledger credit for manual review
 0 7  * * MON cd /path/to/qlass-ai && venv/bin/python3 scripts/reconcile_razorpay.py --days 7 >> logs/reconcile_razorpay.log 2>&1
+
+# Weekly progress digest sent directly to every linked parent's own WhatsApp
+0 18 * * FRI cd /path/to/qlass-ai && venv/bin/python3 scripts/send_parent_digests.py >> logs/parent_digests.log 2>&1
+
+# Daily check for unlimited-plan subscriptions expiring within a week — reminds the
+# student/parent (or the teacher, for a personal "My AI Tutor" plan) to renew,
+# since activation is still a manual one-time flag with no auto-renewal yet
+0 9  * * *   cd /path/to/qlass-ai && venv/bin/python3 scripts/send_subscription_expiry_reminders.py >> logs/subscription_reminders.log 2>&1
 ```
 Each script supports `--dry-run` (except send_teacher_digest.py and reconcile_razorpay.py, which are already read-only/reporting-only) to preview without sending. `logs/` is gitignored — create it on the server (`mkdir -p logs`) before the first cron run.
 

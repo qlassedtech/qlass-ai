@@ -4,18 +4,105 @@ import re
 from app.agents.base import BaseAgent
 from app.services.llm_client import call_llm, classify
 
-# Not anchored to the end of the string ($) — the model doesn't reliably
-# keep IMAGE_PROMPT/OFF_LEVEL_CLASS positioned exactly before TRACK as
-# instructed, and an end-anchored regex simply fails to match (and lets every
-# tag leak into the visible reply) the moment the order varies. Instead, find
-# each tag wherever it appears and strip all of them.
-_TRACK_TAG = re.compile(
-    r'\n?\[\[TRACK topic="([^"]*)" evaluated=(true|false) correct=(true|false|null) '
-    r"image=(true|false) audio=(true|false) off_level=(true|false) video=(true|false) solved=(true|false|na)\]\]"
-)
+# Matches the [[TRACK ...]] block by its outer brackets only, not by a fixed
+# field order/set — the model doesn't reliably keep every field in the
+# exact position or even present (off_level in particular is often omitted
+# entirely rather than written as "off_level=false"). A regex anchored to
+# one exact field sequence simply fails to match the moment the model
+# varies it, which both lets the raw tag leak into the visible reply AND
+# silently drops topic/evaluated/correct/solved for that turn (confirmed
+# live: a reply ended with the literal "[[TRACK topic=... video=true
+# solved=na]]" text visible to the student, because off_level had been
+# appended at the end instead of its documented position). Individual
+# fields are pulled out of the matched block by name via _track_field
+# instead, so their order and presence no longer matter.
+_TRACK_TAG = re.compile(r"\n?\[\[TRACK\s+(.*?)\]\]", re.DOTALL)
 _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
 _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
 _VIDEO_QUERY_TAG = re.compile(r"\n?\[\[VIDEO_QUERY: (.*?)\]\]")
+
+
+def _track_field(block: str, name: str) -> str | None:
+    match = re.search(rf'\b{re.escape(name)}=("[^"]*"|[A-Za-z]+)', block)
+    if not match:
+        return None
+    value = match.group(1)
+    return value[1:-1] if value.startswith('"') else value
+
+
+def parse_track_reply(raw_reply: str) -> dict:
+    """
+    Strips the hidden TRACK/IMAGE_PROMPT/OFF_LEVEL_CLASS/VIDEO_QUERY tags
+    from a raw LLM reply and extracts their fields. Pulled out of
+    TutorAgent.respond as a pure function (no lang/usage) so this parsing
+    can be tested directly without a real LLM call.
+    """
+    match = _TRACK_TAG.search(raw_reply)
+    if not match:
+        # LLM didn't include the tag (fallback message, or model slipped) —
+        # degrade gracefully rather than losing the reply. Still strip any
+        # stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't leak into
+        # the visible reply even without a TRACK match.
+        cleaned = _IMAGE_PROMPT_TAG.sub("", raw_reply)
+        cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned)
+        cleaned = _VIDEO_QUERY_TAG.sub("", cleaned).rstrip()
+        return {
+            "reply": cleaned,
+            "topic": None,
+            "evaluated": False,
+            "correct": None,
+            "image_prompt": None,
+            "wants_audio_reply": False,
+            "off_level_class": None,
+            "video_query": None,
+            "solved_directly": None,
+        }
+
+    block = match.group(1)
+    topic = _track_field(block, "topic")
+    evaluated = _track_field(block, "evaluated") == "true"
+    correct_raw = _track_field(block, "correct")
+    wants_image = _track_field(block, "image") == "true"
+    wants_audio = _track_field(block, "audio") == "true"
+    # Absent entirely (rather than the documented "off_level=false")
+    # correctly falls back to not-off-level here, same as a real "false".
+    off_level = _track_field(block, "off_level") == "true"
+    wants_video = _track_field(block, "video") == "true"
+    solved = _track_field(block, "solved")
+
+    image_prompt = None
+    image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
+    if wants_image and image_match:
+        image_prompt = image_match.group(1).strip()
+
+    off_level_class = None
+    off_level_match = _OFF_LEVEL_CLASS_TAG.search(raw_reply)
+    if off_level and off_level_match:
+        off_level_class = off_level_match.group(1).strip()
+
+    video_query = None
+    video_match = _VIDEO_QUERY_TAG.search(raw_reply)
+    if wants_video and video_match:
+        video_query = video_match.group(1).strip()
+
+    # Strip every tag, wherever it landed, regardless of order — leaves
+    # only the actual student-facing content.
+    reply_text = _TRACK_TAG.sub("", raw_reply)
+    reply_text = _IMAGE_PROMPT_TAG.sub("", reply_text)
+    reply_text = _OFF_LEVEL_CLASS_TAG.sub("", reply_text)
+    reply_text = _VIDEO_QUERY_TAG.sub("", reply_text).rstrip()
+
+    return {
+        "reply": reply_text,
+        "topic": topic or None,
+        "evaluated": evaluated,
+        "wants_audio_reply": wants_audio,
+        "correct": {"true": True, "false": False, "null": None}.get(correct_raw),
+        "image_prompt": image_prompt,
+        "off_level_class": off_level_class,
+        "video_query": video_query,
+        "solved_directly": {"true": True, "false": False, "na": None}.get(solved),
+    }
 
 
 class TutorAgent(BaseAgent):
@@ -301,63 +388,7 @@ class TutorAgent(BaseAgent):
             "classify_cache_read_tokens": classify_result.cache_read_tokens,
         }
 
-        match = _TRACK_TAG.search(raw_reply)
-        if not match:
-            # LLM didn't include the tag (fallback message, or model slipped) —
-            # degrade gracefully rather than losing the reply. Still strip any
-            # stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't leak into
-            # the visible reply even without a TRACK match.
-            cleaned = _IMAGE_PROMPT_TAG.sub("", raw_reply)
-            cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned)
-            cleaned = _VIDEO_QUERY_TAG.sub("", cleaned).rstrip()
-            return {
-                "reply": cleaned,
-                "topic": None,
-                "evaluated": False,
-                "correct": None,
-                "lang": lang,
-                "image_prompt": None,
-                "wants_audio_reply": False,
-                "off_level_class": None,
-                "video_query": None,
-                "solved_directly": None,
-                "usage": usage,
-            }
-
-        topic, evaluated, correct, wants_image, wants_audio, off_level, wants_video, solved = match.groups()
-
-        image_prompt = None
-        image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
-        if wants_image == "true" and image_match:
-            image_prompt = image_match.group(1).strip()
-
-        off_level_class = None
-        off_level_match = _OFF_LEVEL_CLASS_TAG.search(raw_reply)
-        if off_level == "true" and off_level_match:
-            off_level_class = off_level_match.group(1).strip()
-
-        video_query = None
-        video_match = _VIDEO_QUERY_TAG.search(raw_reply)
-        if wants_video == "true" and video_match:
-            video_query = video_match.group(1).strip()
-
-        # Strip every tag, wherever it landed, regardless of order — leaves
-        # only the actual student-facing content.
-        reply_text = _TRACK_TAG.sub("", raw_reply)
-        reply_text = _IMAGE_PROMPT_TAG.sub("", reply_text)
-        reply_text = _OFF_LEVEL_CLASS_TAG.sub("", reply_text)
-        reply_text = _VIDEO_QUERY_TAG.sub("", reply_text).rstrip()
-
-        return {
-            "reply": reply_text,
-            "topic": topic or None,
-            "evaluated": evaluated == "true",
-            "wants_audio_reply": wants_audio == "true",
-            "correct": {"true": True, "false": False, "null": None}[correct],
-            "lang": lang,
-            "image_prompt": image_prompt,
-            "off_level_class": off_level_class,
-            "video_query": video_query,
-            "solved_directly": {"true": True, "false": False, "na": None}[solved],
-            "usage": usage,
-        }
+        parsed = parse_track_reply(raw_reply)
+        parsed["lang"] = lang
+        parsed["usage"] = usage
+        return parsed

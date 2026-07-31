@@ -30,6 +30,16 @@ YOUTUBE_FREE_SEARCHES_PER_DAY = 100
 # instead, bypassing this wallet check entirely.
 TRIAL_CREDITS = 50.0
 
+# Flat-fee unlimited plan pricing (see _is_unlimited_active) — a real
+# student's ₹1800/yr, and a teacher's own "My AI Tutor" profile's ₹3500/mo.
+# Used both to price a manual super_admin activation (see admin.py's
+# set_student_subscription/activate_teacher_tutor_subscription) and to
+# prorate it if a shorter/longer duration is granted than the standard term.
+UNLIMITED_STUDENT_ANNUAL_PRICE = 1800.0  # for the standard 365-day term
+UNLIMITED_STUDENT_ANNUAL_DAYS = 365
+UNLIMITED_TEACHER_MONTHLY_PRICE = 3500.0  # for the standard 30-day term
+UNLIMITED_TEACHER_MONTHLY_DAYS = 30
+
 # Referral credits are milestone-based (signup + day1-3 activity + week2/3
 # activity — see app.services.referral) and deliberately uncapped: Qlass
 # wants to maximize referral volume, so a student who refers many friends
@@ -93,6 +103,12 @@ def _is_unlimited_active(student: Student) -> bool:
     return expires_at > datetime.now(timezone.utc)
 
 
+# Public alias — routers outside this module (e.g. payments.py's
+# subscription-creation endpoint) need this check too, without reaching
+# into a name-mangled "private" function.
+is_unlimited_active = _is_unlimited_active
+
+
 def has_credits(db: Session, student_id: int) -> bool:
     student = db.query(Student).filter(Student.id == student_id).first()
     if student is not None and _is_unlimited_active(student):
@@ -116,6 +132,19 @@ def has_processed_external_ref(db: Session, external_ref: str) -> bool:
     double-crediting the same payment on a client retry or replay.
     """
     return db.query(CreditEvent).filter(CreditEvent.external_ref == external_ref).first() is not None
+
+
+def has_independent_payment(db: Session, student_id: int) -> bool:
+    """
+    True if this student has ever paid Qlass directly for AI credits (a
+    real Razorpay payment via /pay/verify, which is the only code path
+    that ever sets external_ref) — as opposed to only ever having received
+    school-funded trial credit, referral/habit bonuses, or a manual admin
+    grant, none of which set external_ref. Used to decide whether a
+    student at a "churned" school should keep getting service on their own
+    dime (see app.services.school_billing.is_centre_churned).
+    """
+    return db.query(CreditEvent).filter(CreditEvent.student_id == student_id, CreditEvent.external_ref.isnot(None)).first() is not None
 
 
 def add_trial_credits(db: Session, student_id: int) -> float:

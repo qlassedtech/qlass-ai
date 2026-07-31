@@ -74,3 +74,41 @@ def clean_answer(field: str, raw_text: str) -> str:
         if match:
             return match.group(0)
     return raw_text
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def extract_profile_answer(field: str, raw_text: str) -> tuple[str, str] | None:
+    """
+    Finds a profile-field answer even when it's tacked onto the end of a
+    longer message (e.g. "I don't know. Nikhil" answering both an in-
+    progress academic question and a pending "what's your name?" prompt).
+
+    looks_like_answer/clean_answer alone only handle a message that IS
+    the answer — anything else (any other content before it) made them
+    reject the whole message, so the field was silently never saved and
+    the same question kept resurfacing turn after turn, while whatever
+    academic content came before it was dropped entirely rather than
+    reaching the tutor (confirmed live: "I don't know. Nikhil" produced
+    only a canned "Got it, thanks!" — the actual "I don't know" answer to
+    the tutor's own question was never seen).
+
+    Returns (cleaned_value, remaining_text) if the LAST sentence-like
+    segment of the message looks like a valid answer, where remaining_text
+    is everything before that segment (empty if the whole message was
+    just the answer) — the caller uses that to decide whether there's
+    still real content worth a tutoring reply. Returns None if no segment
+    looks like a valid answer.
+    """
+    raw_text = raw_text.strip()
+    if not raw_text:
+        return None
+    segments = [s.strip() for s in _SENTENCE_SPLIT.split(raw_text) if s.strip()]
+    if not segments:
+        return None
+    last = segments[-1]
+    if not looks_like_answer(field, last):
+        return None
+    remaining = " ".join(segments[:-1]).strip()
+    return clean_answer(field, last), remaining

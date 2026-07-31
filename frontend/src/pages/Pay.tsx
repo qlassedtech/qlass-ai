@@ -27,6 +27,54 @@ export default function Pay() {
   const [status, setStatus] = useState<{ kind: "error" | "success"; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
 
+  async function handleSubscribe() {
+    if (!phone) {
+      setStatus({ kind: "error", message: "Enter the student's WhatsApp number first" });
+      return;
+    }
+    setStatus(null);
+    setLoading(true);
+    try {
+      await loadRazorpayScript();
+      const subscription = await payApi.createSubscription(phone);
+
+      const razorpay = new window.Razorpay({
+        key: subscription.key_id,
+        subscription_id: subscription.subscription_id,
+        name: "Qlass Learning",
+        description: "Unlimited AI Tutor plan — ₹1800/year, auto-renews",
+        handler: async (response: {
+          razorpay_subscription_id: string;
+          razorpay_payment_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const result = await payApi.verifySubscription({ ...response, phone });
+            const expires = result.subscription_expires_at
+              ? new Date(result.subscription_expires_at).toLocaleDateString()
+              : "";
+            setStatus({
+              kind: "success",
+              message: `Unlimited plan activated! Auto-renews — active until ${expires}.`,
+            });
+          } catch (err) {
+            setStatus({
+              kind: "error",
+              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Qlass support",
+            });
+          }
+        },
+        modal: { ondismiss: () => setLoading(false) },
+        theme: { color: "#2b3ec4" },
+      });
+      razorpay.open();
+    } catch (err) {
+      setStatus({ kind: "error", message: err instanceof Error ? err.message : "Something went wrong" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handlePay(e: React.FormEvent) {
     e.preventDefault();
     setStatus(null);
@@ -105,6 +153,15 @@ export default function Pay() {
             {loading ? "Please wait…" : "Pay & Add Credits"}
           </button>
         </form>
+
+        <div style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--border)", textAlign: "center" }}>
+          <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
+            Or go unlimited — ₹1800/year, auto-renews, no more topping up.
+          </p>
+          <button type="button" onClick={handleSubscribe} disabled={loading} style={{ width: "100%" }}>
+            Subscribe for ₹1800/year
+          </button>
+        </div>
 
         {status && (
           <p className="status" style={{ color: status.kind === "error" ? "var(--error)" : "var(--success)" }}>

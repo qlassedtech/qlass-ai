@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 
+interface Chapter {
+  id: number;
+  name: string;
+  chapter_no: number | null;
+  subject: string;
+}
+
 export default function AssignQuiz() {
   const [topic, setTopic] = useState("");
   const [classNum, setClassNum] = useState("");
   const [board, setBoard] = useState("");
   const [classOptions, setClassOptions] = useState<string[]>([]);
   const [boardOptions, setBoardOptions] = useState<string[]>([]);
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [chapterId, setChapterId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ assigned_count: number; assigned: string[]; skipped_already_in_quiz: string[] } | null>(
@@ -24,6 +33,17 @@ export default function AssignQuiz() {
     });
   }, []);
 
+  useEffect(() => {
+    // The seeded NCERT curriculum is keyed by class — only fetch once a
+    // specific class is picked (chapters don't make sense for "all classes").
+    setChapterId("");
+    if (!classNum) {
+      setChapters([]);
+      return;
+    }
+    api.getCurriculumChapters(classNum).then(setChapters);
+  }, [classNum]);
+
   async function handleAssign(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -31,7 +51,8 @@ export default function AssignQuiz() {
     setLoading(true);
     try {
       const response = await api.assignQuiz({
-        topic,
+        topic: chapterId ? undefined : topic,
+        chapter_id: chapterId ? Number(chapterId) : undefined,
         class_: classNum || undefined,
         board: board || undefined,
       });
@@ -55,10 +76,6 @@ export default function AssignQuiz() {
       <div className="card" style={{ maxWidth: 480 }}>
         <form onSubmit={handleAssign}>
           <label>
-            Topic
-            <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g. circular motion" required />
-          </label>
-          <label>
             Class
             <select value={classNum} onChange={(e) => setClassNum(e.target.value)}>
               <option value="">All classes</option>
@@ -68,6 +85,32 @@ export default function AssignQuiz() {
                 </option>
               ))}
             </select>
+          </label>
+
+          {chapters.length > 0 && (
+            <label>
+              Chapter (optional — from the NCERT curriculum for this class)
+              <select value={chapterId} onChange={(e) => setChapterId(e.target.value)}>
+                <option value="">— pick a chapter, or type a topic below —</option>
+                {chapters.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.subject}: {c.chapter_no ? `Ch. ${c.chapter_no} — ` : ""}
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <label>
+            Topic {chapterId && <span className="muted">(ignored — a chapter is selected above)</span>}
+            <input
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="e.g. circular motion"
+              disabled={!!chapterId}
+              required={!chapterId}
+            />
           </label>
           <label>
             Board

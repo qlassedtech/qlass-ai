@@ -5,15 +5,16 @@ from datetime import datetime, timedelta, timezone
 
 import razorpay
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query as QueryParam
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.query import Query
 
 from app.config import settings
 from app.database import get_db
-from app.models.core import Centre, ChatHistory, Parent, Question, Quiz, Student, Teacher
+from app.models.core import Centre, Chapter, ChatHistory, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import cost_tracker, school_billing
+from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request, list_pending_deletion_requests
 from app.services.otp import generate_and_store_otp, verify_otp
@@ -24,6 +25,7 @@ from app.services.rate_limit import is_otp_rate_limited
 from app.services.pdf_render import render_workbook_pdf
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage, format_teacher_digest
 from app.services.gamma_service import create_presentation_generation, get_generation_status
+from app.services import razorpay_client
 from app.services.razorpay_client import client as _razorpay_client, MIN_TOPUP_AMOUNT
 from app.services.student_chat import process_web_message
 from app.services.teacher_auth import get_current_teacher, hash_password, verify_password, create_access_token
@@ -82,6 +84,8 @@ def _student_to_dict(db: Session, student: Student) -> dict:
         "photo_url": student.photo_url,
         "parent_phone": parent.phone if parent else None,
         "parent_name": parent.name if parent else None,
+        "subscription_plan": student.subscription_plan,
+        "subscription_expires_at": student.subscription_expires_at,
     }
 
 
@@ -207,8 +211,13 @@ def me(teacher: Teacher = Depends(get_current_teacher)):
 
 
 @router.get("/admin/students")
-def list_students(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
-    students = _scoped_students(db, teacher).order_by(Student.id).all()
+def list_students(
+    limit: int = QueryParam(default=100, ge=1, le=500),
+    offset: int = QueryParam(default=0, ge=0),
+    db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    students = _scoped_students(db, teacher).order_by(Student.id).offset(offset).limit(limit).all()
     return [_student_to_dict(db, s) for s in students]
 
 
@@ -424,9 +433,53 @@ def add_student_credits(
     return {"balance": new_balance}
 
 
+TRIAL_UNLIMITED_SERVICE = "unlimited_plan_trial"
+PAID_UNLIMITED_SERVICE = "unlimited_plan_activation"
+
+
+def _activate_unlimited(
+    db: Session, student: Student, duration_days: int, is_trial: bool,
+    payment_reference: str | None, note: str | None, full_term_price: float, full_term_days: int,
+) -> None:
+    """
+    Shared by the single-student/single-teacher activation endpoints and
+    the bulk school-level trial endpoint below. A trial grant records a $0
+    CreditEvent tagged TRIAL_UNLIMITED_SERVICE with no external_ref — it
+    must NOT satisfy cost_tracker.has_independent_payment, since nothing
+    was actually paid. A real (non-trial) activation requires a
+    payment_reference and records the real (possibly prorated) price with
+    that reference as external_ref, so it both shows up in
+    reconciliation/statements and correctly counts as an independent
+    payment for churn-gating purposes.
+    """
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=duration_days)
+    if is_trial:
+        cost_tracker.add_credits(
+            db, student.id, 0.0, note=note or f"Unlimited plan TRIAL ({duration_days} days)",
+            external_ref=None, service=TRIAL_UNLIMITED_SERVICE,
+        )
+    else:
+        price = round(full_term_price * duration_days / full_term_days, 2)
+        cost_tracker.add_credits(
+            db, student.id, price, note=note or f"Unlimited plan activation ({duration_days} days)",
+            external_ref=payment_reference, service=PAID_UNLIMITED_SERVICE,
+        )
+
+
 class SetSubscriptionRequest(BaseModel):
     plan: str  # "credits" | "unlimited"
     duration_days: int | None = None  # required when plan == "unlimited"
+    is_trial: bool = False  # a free trial grant — no payment_reference needed, but see _activate_unlimited
+    # Required when plan == "unlimited" and not is_trial — a Razorpay
+    # payment_id if collected through this app's own checkout, or a
+    # free-text reference (e.g. "cash received by admin, receipt #42") if
+    # the school collected it off-platform. Recorded as external_ref on the
+    # payment CreditEvent, which is also what
+    # cost_tracker.has_independent_payment checks — so this student is
+    # correctly recognized as having paid directly even if their school
+    # later gets marked "churned" (see school_billing.is_centre_churned).
+    payment_reference: str | None = None
     note: str | None = None
 
 
@@ -436,24 +489,47 @@ def set_student_subscription(
     teacher: Teacher = Depends(get_current_teacher),
 ):
     """
-    Manually activates the flat-fee unlimited plan (₹1800/yr student,
-    ₹3500/mo for a teacher's own "My AI Tutor" profile) or reverts a student
-    back to the normal wallet. There's no recurring billing integration yet
+    Manually activates the flat-fee unlimited plan (₹1800/yr, prorated if
+    duration_days differs from the standard 365) or reverts a student back
+    to the normal wallet. There's no recurring billing integration yet
     (Razorpay Subscriptions/UPI Autopay is a separate follow-up) — this is
-    the manual activation Qlass staff use after collecting a one-time
-    payment, mirroring how add_student_credits is a manual goodwill action.
+    the manual activation Qlass staff use after collecting a payment,
+    recording it as a real ledger entry (not just a bare flag flip) so it
+    shows up in reconciliation/statements and satisfies the churn-gating
+    "has this student paid independently" check. A trial grant (is_trial)
+    skips the payment requirement entirely — see _activate_unlimited.
+
+    GRANTING the plan (plan == "unlimited") is super_admin-only, since it
+    involves payment tracking Qlass staff need to oversee. REVERTING it
+    (plan == "credits") is open to the school's own teacher/admin too —
+    since payment is taken upfront (or the trial is free) with no partial
+    refund/mid-term churn, the only real reason to revert is a student
+    leaving the school/organization, which the school's own staff are best
+    placed to flag; they just no longer get the org-sponsored plan and
+    would need to pay independently to keep using AI credits going forward
+    (their existing wallet balance, if any, is untouched).
     """
-    if teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can manage subscription plans")
+    if body.plan == "unlimited" and teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can grant the unlimited plan")
     if body.plan not in ("credits", "unlimited"):
         raise HTTPException(status_code=400, detail="plan must be 'credits' or 'unlimited'")
-    if body.plan == "unlimited" and not body.duration_days:
-        raise HTTPException(status_code=400, detail="duration_days is required to activate the unlimited plan")
-    student = _get_scoped_student_or_404(db, teacher, student_id)
-    student.subscription_plan = body.plan
     if body.plan == "unlimited":
-        student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=body.duration_days)
+        if not body.duration_days:
+            raise HTTPException(status_code=400, detail="duration_days is required to activate the unlimited plan")
+        if not body.is_trial:
+            if not body.payment_reference:
+                raise HTTPException(status_code=400, detail="payment_reference is required for a paid activation")
+            if cost_tracker.has_processed_external_ref(db, body.payment_reference):
+                raise HTTPException(status_code=409, detail="This payment reference has already been used")
+
+    student = _get_scoped_student_or_404(db, teacher, student_id)
+    if body.plan == "unlimited":
+        _activate_unlimited(
+            db, student, body.duration_days, body.is_trial, body.payment_reference, body.note,
+            cost_tracker.UNLIMITED_STUDENT_ANNUAL_PRICE, cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS,
+        )
     else:
+        student.subscription_plan = "credits"
         student.subscription_expires_at = None
     db.commit()
     return {
@@ -462,18 +538,124 @@ def set_student_subscription(
     }
 
 
+class BulkTrialActivationRequest(BaseModel):
+    duration_days: int
+    student_ids: list[int] = []
+    teacher_ids: list[int] = []  # activates each teacher's own "My AI Tutor" profile
+    note: str | None = None
+
+
+@router.post("/admin/schools/{centre_id}/trial-subscriptions")
+def activate_school_trial_subscriptions(
+    centre_id: int, body: BulkTrialActivationRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Grants a free trial of the unlimited plan to a hand-picked set of
+    students/teachers at one school in a single call — the sales-side
+    counterpart to a school negotiating trial access for a subset of its
+    people before committing to paying for everyone. Super_admin-only, and
+    always a trial (see _activate_unlimited) — no payment_reference, and
+    tagged so it correctly does NOT count as an independent payment for
+    churn-gating purposes.
+    """
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can grant trial subscriptions")
+    if not body.student_ids and not body.teacher_ids:
+        raise HTTPException(status_code=400, detail="Select at least one student or teacher")
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    if centre is None:
+        raise HTTPException(status_code=404, detail="School not found")
+
+    activated = []
+    for student in (
+        db.query(Student)
+        .filter(Student.id.in_(body.student_ids), Student.centre_id == centre_id, Student.is_staff_profile.is_(False))
+        .all()
+    ):
+        _activate_unlimited(
+            db, student, body.duration_days, True, None, body.note,
+            cost_tracker.UNLIMITED_STUDENT_ANNUAL_PRICE, cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS,
+        )
+        activated.append(student.name)
+
+    for target_teacher in db.query(Teacher).filter(Teacher.id.in_(body.teacher_ids), Teacher.centre_id == centre_id).all():
+        my_tutor_student = _my_tutor_student(db, target_teacher)
+        _activate_unlimited(
+            db, my_tutor_student, body.duration_days, True, None, body.note,
+            cost_tracker.UNLIMITED_TEACHER_MONTHLY_PRICE, cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS,
+        )
+        activated.append(target_teacher.name)
+
+    db.commit()
+    return {"activated_count": len(activated), "activated": activated}
+
+
+class LaunchSchoolPilotRequest(BaseModel):
+    duration_days: int
+    credits_per_student: float
+    student_ids: list[int]
+    teacher_tool_credits: float = 500.0
+    note: str | None = None
+
+
+@router.post("/admin/schools/{centre_id}/pilot")
+def launch_school_pilot(
+    centre_id: int, body: LaunchSchoolPilotRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    """Fund a bounded, no-charge school pilot with student wallet credits."""
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can launch school pilots")
+    if not body.student_ids:
+        raise HTTPException(status_code=400, detail="Select at least one student for the pilot")
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    if centre is None:
+        raise HTTPException(status_code=404, detail="School not found")
+    try:
+        students = launch_pilot(
+            db, centre, body.student_ids, body.credits_per_student, body.duration_days,
+            body.teacher_tool_credits, body.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "pilot_status": centre.pilot_status,
+        "pilot_expires_at": centre.pilot_expires_at,
+        "credits_per_student": body.credits_per_student,
+        "teacher_tool_credits": body.teacher_tool_credits,
+        "enabled_features": [name for name, enabled in PILOT_STUDENT_FEATURES.items() if enabled],
+        "granted_count": len(students),
+        "granted": [student.name for student in students],
+    }
+
+
+@router.get("/admin/schools/{centre_id}/pilot/report")
+def get_school_pilot_report(
+    centre_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """Principal/government decision report; scoped to the caller's school."""
+    centre = _resolve_centre_for_read(db, teacher, centre_id)
+    return pilot_outcome_report(db, centre)
+
+
 def _teacher_to_dict(t: Teacher) -> dict:
     return {"id": t.id, "name": t.name, "phone": t.phone, "role": t.role, "centre_id": t.centre_id, "photo_url": t.photo_url}
 
 
 @router.get("/admin/teachers")
-def list_teachers(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+def list_teachers(
+    limit: int = QueryParam(default=100, ge=1, le=500),
+    offset: int = QueryParam(default=0, ge=0),
+    db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
     if teacher.role not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can view teacher accounts")
     query = db.query(Teacher)
     if teacher.role != "super_admin":
         query = query.filter(Teacher.centre_id == teacher.centre_id)
-    return [_teacher_to_dict(t) for t in query.order_by(Teacher.id).all()]
+    return [_teacher_to_dict(t) for t in query.order_by(Teacher.id).offset(offset).limit(limit).all()]
 
 
 class TeacherCreateRequest(BaseModel):
@@ -679,8 +861,33 @@ async def generate_workbook(
     )
 
 
+@router.get("/admin/curriculum/chapters")
+def list_curriculum_chapters(
+    class_: str, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
+):
+    """
+    Chapters for the seeded NCERT curriculum (see scripts/seed_ncert_curriculum.py),
+    grouped by subject — lets a teacher assign a quiz tied to an actual
+    chapter instead of a free-text topic prone to typos/ambiguity.
+    Curriculum data isn't centre-scoped (it's the shared national syllabus),
+    so any authenticated teacher/admin can browse it.
+    """
+    rows = (
+        db.query(Chapter, Subject)
+        .join(Subject, Chapter.subject_id == Subject.id)
+        .filter(Subject.class_ == class_)
+        .order_by(Subject.name, Chapter.chapter_no)
+        .all()
+    )
+    return [
+        {"id": chapter.id, "name": chapter.name, "chapter_no": chapter.chapter_no, "subject": subject.name}
+        for chapter, subject in rows
+    ]
+
+
 class AssignQuizRequest(BaseModel):
-    topic: str
+    topic: str | None = None
+    chapter_id: int | None = None  # takes priority over topic when both are given
     class_: str | None = None
     board: str | None = None
     phone_numbers: list[str] | None = None  # bypass class_/board filters, target these students directly
@@ -705,6 +912,15 @@ async def assign_quiz(
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for quiz generation")
 
+    chapter = None
+    if body.chapter_id:
+        chapter = db.query(Chapter).filter(Chapter.id == body.chapter_id).first()
+        if chapter is None:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+    topic = chapter.name if chapter else body.topic
+    if not topic:
+        raise HTTPException(status_code=400, detail="Either topic or chapter_id is required")
+
     if body.phone_numbers:
         query = db.query(Student).filter(Student.phone.in_(body.phone_numbers), Student.centre_id == teacher.centre_id)
     else:
@@ -717,7 +933,7 @@ async def assign_quiz(
     if not targets:
         raise HTTPException(status_code=400, detail="No matching students found")
 
-    questions_data, gen_result = await generate_quiz_questions(body.topic, body.class_)
+    questions_data, gen_result = await generate_quiz_questions(topic, body.class_)
     school_billing.record_claude_usage(
         db, teacher.centre_id, "quiz_assignment", gen_result.input_tokens, gen_result.output_tokens
     )
@@ -729,7 +945,10 @@ async def assign_quiz(
         if student.active_quiz_id:
             skipped.append(student.name)  # already mid-quiz — don't interrupt it with a new one
             continue
-        quiz = Quiz(student_id=student.id, created_by_teacher_id=teacher.id, title=body.topic)
+        quiz = Quiz(
+            student_id=student.id, created_by_teacher_id=teacher.id, title=topic,
+            chapter_id=chapter.id if chapter else None,
+        )
         db.add(quiz)
         db.commit()
         db.refresh(quiz)
@@ -742,7 +961,7 @@ async def assign_quiz(
         student.active_quiz_id = quiz.id
         db.commit()
         intro = (
-            f"📝 Your teacher assigned a {len(questions_data)}-question quiz on *{body.topic}*!\n\n"
+            f"📝 Your teacher assigned a {len(questions_data)}-question quiz on *{topic}*!\n\n"
             f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
         )
         await send_whatsapp_message(student.phone, intro)
@@ -803,15 +1022,19 @@ def verify_school_payment(
     except razorpay.errors.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Payment could not be verified")
 
-    # Guards against crediting the same payment twice — see the matching
-    # check in payments.py's /pay/verify.
+    # Re-fetch the order from Razorpay itself rather than trusting any
+    # client-supplied amount, and bind it to the authenticated teacher's
+    # school so another school's signed payment cannot be replayed here.
+    order = _razorpay_client.order.fetch(body.razorpay_order_id)
+    payment = _razorpay_client.payment.fetch(body.razorpay_payment_id)
+    try:
+        razorpay_client.require_paid_order(
+            order, payment, {"centre_id": str(teacher.centre_id), "teacher_id": str(teacher.id)}
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Payment does not match this school") from exc
     if school_billing.has_processed_external_ref(db, body.razorpay_payment_id):
         return {"credited": 0.0, "balance": school_billing.get_balance(db, teacher.centre_id)}
-
-    # Re-fetch the order from Razorpay itself rather than trusting any
-    # client-supplied amount, so a tampered request can't credit more than
-    # was actually paid.
-    order = _razorpay_client.order.fetch(body.razorpay_order_id)
     amount_inr = order["amount"] / 100
     new_balance = school_billing.add_credits(
         db, teacher.centre_id, amount_inr, note=f"Razorpay payment by {teacher.name} ({body.razorpay_payment_id})",
@@ -882,7 +1105,98 @@ def get_my_tutor_profile(db: Session = Depends(get_db), teacher: Teacher = Depen
     return {
         "id": student.id, "credit_balance": cost_tracker.get_balance(db, student.id),
         "referral_code": student.referral_code,
+        "subscription_plan": student.subscription_plan,
+        "subscription_expires_at": student.subscription_expires_at,
+        "auto_renewing": student.razorpay_subscription_id is not None,
     }
+
+
+@router.post("/admin/my-tutor/subscription/create")
+def create_my_tutor_subscription(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    """
+    Self-serve recurring auto-renewal for a teacher's own ₹3500/mo personal
+    tutor plan — the teacher pays for themselves via Razorpay's
+    Subscriptions API, rather than needing a super_admin to manually
+    activate/collect payment for it (see
+    /admin/teachers/{id}/my-tutor-subscription/activate, still available
+    for Qlass staff to activate on a teacher's behalf).
+    """
+    if _razorpay_client is None or not settings.razorpay_teacher_plan_id:
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+    student = _my_tutor_student(db, teacher)
+    if cost_tracker.is_unlimited_active(student):
+        raise HTTPException(status_code=400, detail="You're already on the unlimited plan")
+    subscription = razorpay_client.create_subscription(
+        settings.razorpay_teacher_plan_id, razorpay_client.TEACHER_SUBSCRIPTION_TOTAL_CYCLES,
+        notes={"student_id": str(student.id), "teacher_id": str(teacher.id), "kind": "teacher_monthly"},
+    )
+    return {"subscription_id": subscription["id"], "key_id": settings.razorpay_key_id}
+
+
+class VerifyMyTutorSubscriptionRequest(BaseModel):
+    razorpay_subscription_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@router.post("/admin/my-tutor/subscription/verify")
+def verify_my_tutor_subscription(
+    body: VerifyMyTutorSubscriptionRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
+):
+    """Confirms the FIRST payment on a new subscription mandate — see create_my_tutor_subscription."""
+    if _razorpay_client is None:
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+    try:
+        _razorpay_client.utility.verify_subscription_payment_signature({
+            "razorpay_subscription_id": body.razorpay_subscription_id,
+            "razorpay_payment_id": body.razorpay_payment_id,
+            "razorpay_signature": body.razorpay_signature,
+        })
+    except razorpay.errors.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Payment could not be verified")
+
+    student = _my_tutor_student(db, teacher)
+    subscription = razorpay_client.fetch_subscription(body.razorpay_subscription_id)
+    payment = _razorpay_client.payment.fetch(body.razorpay_payment_id)
+    try:
+        razorpay_client.require_active_subscription(
+            subscription,
+            payment,
+            {"student_id": str(student.id), "teacher_id": str(teacher.id), "kind": "teacher_monthly"},
+            settings.razorpay_teacher_plan_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Subscription does not match this teacher") from exc
+
+    if cost_tracker.has_processed_external_ref(db, body.razorpay_payment_id):
+        return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
+
+    student.subscription_plan = "unlimited"
+    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(
+        days=cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS
+    )
+    student.razorpay_subscription_id = body.razorpay_subscription_id
+    cost_tracker.add_credits(
+        db, student.id, cost_tracker.UNLIMITED_TEACHER_MONTHLY_PRICE,
+        note="Razorpay subscription — first payment", external_ref=body.razorpay_payment_id,
+        service="unlimited_plan_recurring",
+    )
+    db.commit()
+    return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
+
+
+@router.post("/admin/my-tutor/subscription/cancel")
+def cancel_my_tutor_subscription(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    """Self-serve cancellation — see payments.cancel_student_subscription for the same behavior/reasoning."""
+    if _razorpay_client is None:
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+    student = _my_tutor_student(db, teacher)
+    if not student.razorpay_subscription_id:
+        raise HTTPException(status_code=400, detail="No active auto-renewing subscription found")
+    razorpay_client.cancel_subscription(student.razorpay_subscription_id)
+    student.razorpay_subscription_id = None
+    db.commit()
+    return {"cancelled": True, "access_until": student.subscription_expires_at}
 
 
 @router.get("/admin/my-tutor/history")
@@ -912,27 +1226,43 @@ async def send_my_tutor_message(
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 
 
+class ActivateTutorSubscriptionRequest(BaseModel):
+    duration_days: int = cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS
+    is_trial: bool = False
+    payment_reference: str | None = None  # required unless is_trial — see SetSubscriptionRequest
+    note: str | None = None
+
+
 @router.post("/admin/teachers/{teacher_id}/my-tutor-subscription/activate")
 def activate_teacher_tutor_subscription(
-    teacher_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+    teacher_id: int, body: ActivateTutorSubscriptionRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
 ):
     """
-    Activates a teacher's own personal-tutor unlimited plan (₹3500/mo, paid
-    outside this app for now — no recurring billing integration yet). Only
-    Qlass's super_admin can call this (same manual-activation pattern as
+    Activates a teacher's own personal-tutor unlimited plan (₹3500/mo,
+    prorated if duration_days differs from the standard 30). Only Qlass's
+    super_admin can call this (same manual-activation pattern as
     set_student_subscription) — targets teacher_id explicitly rather than
     the caller's own profile, since it's Qlass staff activating it for a
     teacher after that teacher's payment lands, not a self-serve action.
-    Always grants a 30-day window from the call time — re-run each month.
+    Records a real ledger entry the same way set_student_subscription does
+    — see _activate_unlimited.
     """
     if teacher.role != "super_admin":
         raise HTTPException(status_code=403, detail="Only Qlass staff can activate the personal tutor plan")
+    if not body.is_trial:
+        if not body.payment_reference:
+            raise HTTPException(status_code=400, detail="payment_reference is required for a paid activation")
+        if cost_tracker.has_processed_external_ref(db, body.payment_reference):
+            raise HTTPException(status_code=409, detail="This payment reference has already been used")
     target_teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
     if target_teacher is None:
         raise HTTPException(status_code=404, detail="Teacher not found")
     student = _my_tutor_student(db, target_teacher)
-    student.subscription_plan = "unlimited"
-    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    _activate_unlimited(
+        db, student, body.duration_days, body.is_trial, body.payment_reference, body.note,
+        cost_tracker.UNLIMITED_TEACHER_MONTHLY_PRICE, cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS,
+    )
     db.commit()
     return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
 

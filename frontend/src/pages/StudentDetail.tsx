@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { api, absoluteUrl, type Student, type ProgressResponse } from "../api";
+import { api, absoluteUrl, type Student, type ProgressResponse, type Teacher } from "../api";
 
 const FEATURE_KEYS = ["voice", "ocr", "image_generation", "documents", "youtube_videos"] as const;
 
@@ -19,6 +19,12 @@ export default function StudentDetail() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [sendingLink, setSendingLink] = useState(false);
   const [linkStatus, setLinkStatus] = useState<string | null>(null);
+  const [teacher, setTeacher] = useState<Teacher | null>(null);
+  const [subDuration, setSubDuration] = useState("365");
+  const [subIsTrial, setSubIsTrial] = useState(false);
+  const [subPaymentRef, setSubPaymentRef] = useState("");
+  const [subStatus, setSubStatus] = useState<string | null>(null);
+  const [subLoading, setSubLoading] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
@@ -34,9 +40,48 @@ export default function StudentDetail() {
       }
     });
     api.getProgress(studentId).then(setProgress);
+    api.me().then(setTeacher);
   }
 
   useEffect(load, [studentId]);
+
+  async function handleActivateUnlimited() {
+    setSubStatus(null);
+    if (!subIsTrial && !subPaymentRef.trim()) {
+      setSubStatus("A payment reference is required for a paid activation (or check \"Free trial\").");
+      return;
+    }
+    setSubLoading(true);
+    try {
+      await api.setStudentSubscription(studentId, {
+        plan: "unlimited",
+        duration_days: Number(subDuration),
+        is_trial: subIsTrial,
+        payment_reference: subIsTrial ? undefined : subPaymentRef.trim(),
+      });
+      setSubStatus(subIsTrial ? "Trial activated!" : "Unlimited plan activated!");
+      setSubPaymentRef("");
+      load();
+    } catch (err) {
+      setSubStatus(err instanceof Error ? err.message : "Failed to activate");
+    } finally {
+      setSubLoading(false);
+    }
+  }
+
+  async function handleRevertToCredits() {
+    setSubStatus(null);
+    setSubLoading(true);
+    try {
+      await api.setStudentSubscription(studentId, { plan: "credits" });
+      setSubStatus("Reverted to the normal credit wallet.");
+      load();
+    } catch (err) {
+      setSubStatus(err instanceof Error ? err.message : "Failed to revert");
+    } finally {
+      setSubLoading(false);
+    }
+  }
 
   async function handleSave() {
     setStatus(null);
@@ -160,6 +205,58 @@ export default function StudentDetail() {
         </button>
       </div>
       {linkStatus && <p className="status" style={{ marginBottom: 16 }}>{linkStatus}</p>}
+
+      {(teacher?.role === "admin" || teacher?.role === "super_admin" || teacher?.role === "teacher") && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h3>Subscription Plan</h3>
+          <p style={{ marginBottom: 12 }}>
+            Current plan: <strong>{student.subscription_plan === "unlimited" ? "Unlimited" : "Credits (pay-as-you-go)"}</strong>
+            {student.subscription_plan === "unlimited" && student.subscription_expires_at && (
+              <> — expires {new Date(student.subscription_expires_at).toLocaleDateString()}</>
+            )}
+          </p>
+
+          {teacher?.role === "super_admin" && (
+            <div className="inline-form" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+              <label style={{ margin: 0 }}>
+                Duration (days)
+                <input
+                  type="number"
+                  min="1"
+                  value={subDuration}
+                  onChange={(e) => setSubDuration(e.target.value)}
+                  style={{ width: 100 }}
+                />
+              </label>
+              <label className="toggle-row" style={{ margin: 0 }}>
+                <input type="checkbox" checked={subIsTrial} onChange={(e) => setSubIsTrial(e.target.checked)} />
+                Free trial (no payment)
+              </label>
+              {!subIsTrial && (
+                <label style={{ margin: 0 }}>
+                  Payment reference
+                  <input
+                    value={subPaymentRef}
+                    onChange={(e) => setSubPaymentRef(e.target.value)}
+                    placeholder="Razorpay payment ID, or e.g. 'cash, receipt #42'"
+                    style={{ width: 220 }}
+                  />
+                </label>
+              )}
+              <button type="button" onClick={handleActivateUnlimited} disabled={subLoading}>
+                Activate Unlimited (₹1800/yr)
+              </button>
+            </div>
+          )}
+
+          {student.subscription_plan === "unlimited" && (
+            <button type="button" onClick={handleRevertToCredits} disabled={subLoading}>
+              Revert to Credits (student left school/org)
+            </button>
+          )}
+          {subStatus && <p className="status" style={{ marginTop: 8 }}>{subStatus}</p>}
+        </div>
+      )}
 
       <div className="grid-2">
         <div className="card">

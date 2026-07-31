@@ -1,8 +1,5 @@
 fastapi
 uvicorn[standard]
-langchain
-langgraph
-chromadb
 google-generativeai
 openai
 psycopg2-binary
@@ -11,13 +8,10 @@ alembic
 pydantic
 pydantic-settings
 python-dotenv
-sentence-transformers
 pymupdf
-unstructured
-pillow
-opencv-python-headless
-easyocr
-pandas
+python-docx
+librosa
+soundfile
 numpy
 reportlab
 firebase-admin
@@ -27,3 +21,6 @@ python-multipart
 aiofiles
 anthropic
 httpx
+pyjwt
+bcrypt
+razorpay
