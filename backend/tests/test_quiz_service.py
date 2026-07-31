@@ -4,7 +4,6 @@ from app.services.quiz_service import (
     is_vague_quiz_topic,
     looks_like_mock_test_request,
     looks_like_quiz_skip,
-    looks_like_quiz_stop,
 )
 
 
@@ -50,11 +49,6 @@ def test_bare_quiz_phrase_does_not_shadow_an_explicit_topic():
     # "quiz me on X" must still capture the real topic, not fall through
     # to the bare "quiz me" phrase check.
     assert extract_quiz_topic("quiz me on gravity") == "gravity"
-
-
-def test_looks_like_quiz_stop():
-    assert looks_like_quiz_stop("stop quiz please") is True
-    assert looks_like_quiz_stop("quiz me on gravity") is False
 
 
 def test_looks_like_quiz_skip():

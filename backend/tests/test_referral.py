@@ -5,7 +5,6 @@ from app.services import cost_tracker
 from app.services.referral import (
     extract_referral_code,
     generate_referral_code,
-    looks_like_referral_request,
     evaluate_referral_milestones,
     REFERRAL_MILESTONES,
 )
@@ -43,12 +42,6 @@ def test_generate_and_extract_referral_code_roundtrip():
     code = generate_referral_code(42)
     assert extract_referral_code(f"hi my code is {code}") == code
     assert extract_referral_code("no code mentioned here") is None
-
-
-def test_looks_like_referral_request():
-    assert looks_like_referral_request("refer") is True
-    assert looks_like_referral_request("Referral") is True
-    assert looks_like_referral_request("what is 2+2") is False
 
 
 def _add_question(pg_db_session, student_id, at: datetime):

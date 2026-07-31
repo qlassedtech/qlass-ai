@@ -15,17 +15,6 @@ from app.models.core import ChatHistory, TopicProgress, Subject, Chapter
 _NCERT_ALIGNED_BOARDS = {"", "cbse", "ncert"}
 _STOPWORDS = {"the", "and", "of", "in", "on", "a", "an", "to", "for", "with"}
 
-_PROGRESS_REQUEST_PHRASES = [
-    "how am i doing", "how am i doin", "my progress", "mera progress", "meri progress",
-    "progress report", "show my progress", "how is my progress", "kaisa kar raha",
-    "kaisi kar rahi", "kitna sahi", "score kya hai", "my score", "mera score",
-]
-
-
-def looks_like_progress_request(text: str) -> bool:
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in _PROGRESS_REQUEST_PHRASES)
-
 
 def get_student_stats(db: Session, student_id: int, days: int | None = None) -> dict:
     """

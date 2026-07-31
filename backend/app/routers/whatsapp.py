@@ -50,10 +50,10 @@ from app.services.tenancy import get_qlass_direct_centre_id
 from app.services.referral import (
     generate_referral_code,
     extract_referral_code,
-    looks_like_referral_request,
     evaluate_referral_milestones,
     REFERRAL_SIGNUP_BONUS,
 )
+from app.services.intent_classifier import classify_intent, parse_intent
 from app.services.active_profile import (
     looks_like_new_profile_request,
     extract_switch_target_name,
@@ -63,7 +63,6 @@ from app.services.active_profile import (
     match_student_by_name,
 )
 from app.services.progress_report import (
-    looks_like_progress_request,
     get_student_stats,
     get_activity_stats,
     get_welcome_back_note,
@@ -75,7 +74,6 @@ from app.services.quiz_service import (
     extract_mock_test_topic,
     is_vague_quiz_topic,
     looks_like_mock_test_request,
-    looks_like_quiz_stop,
     looks_like_quiz_skip,
     generate_quiz_questions,
     grade_answer,
@@ -113,25 +111,14 @@ _AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "
 # Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
 # in whatsapp_client.py) — each button maps to the same canonical phrase its
 # corresponding typed command already matches, so a button tap is routed
-# through the exact same existing detection logic as if the student had
-# typed it (looks_like_progress_request, looks_like_referral_request,
-# _looks_like_teacher_help_request below) rather than needing its own path.
+# through the exact same intent-classification path as if the student had
+# typed it (see classify_intent below) rather than needing its own path.
 MENU_BUTTONS = ["📊 My Progress", "🎁 Refer a Friend", "🆘 Talk to Teacher"]
 MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
     "🎁 Refer a Friend": "refer a friend",
     "🆘 Talk to Teacher": "talk to teacher",
 }
-_MENU_REQUEST_PHRASES = {"menu", "help", "options"}
-_TEACHER_HELP_PHRASES = {"talk to teacher", "talk to my teacher", "contact my teacher", "help from teacher", "need my teacher"}
-
-
-def _looks_like_menu_request(text: str) -> bool:
-    return text.strip().lower() in _MENU_REQUEST_PHRASES
-
-
-def _looks_like_teacher_help_request(text: str) -> bool:
-    return text.strip().lower() in _TEACHER_HELP_PHRASES
 
 # Never keep production-cost bypasses for particular phone numbers. Feature
 # access is provisioned per learner (including by launch_pilot), and every
@@ -722,15 +709,31 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     mock_test_request = looks_like_mock_test_request(message_text)
 
-    if _looks_like_menu_request(message_text) and not student.active_quiz_id:
-        # Free, zero-cost UI affordance — returns immediately without
-        # touching chat_history/credits, same as the progress/referral
-        # checks below but even earlier since it doesn't depend on any
-        # student state. Guarded against an active quiz: "help"/"menu"
-        # typed mid-quiz should stay inside the quiz's own answer/skip/stop
-        # handling below rather than being hijacked into the main menu —
-        # a stuck student typing "help" mid-quiz almost certainly means
-        # "help with this question," not "show me the main menu."
+    # A single cheap, deterministic classification call (same pattern as the
+    # tutor's own language classifier) replacing what used to be five
+    # separate hardcoded phrase-lists — one per intent below. Those only
+    # ever matched an exact fixed string (e.g. "my progress"), so any other
+    # phrasing of the same request (confirmed live: "what is my
+    # performance") silently fell through to the LLM improvising an answer
+    # instead of the real command. Run for every message that reaches this
+    # point, but only students who already passed the churn/pilot/credit
+    # gates above ever reach here, so this never spends money on a blocked
+    # account.
+    intent_result = await classify_intent(message_text)
+    cost_tracker.record_claude_usage(
+        db, intent_result.model, intent_result.input_tokens, intent_result.output_tokens, student.id,
+        cache_write_tokens=intent_result.cache_write_tokens, cache_read_tokens=intent_result.cache_read_tokens,
+    )
+    intent = parse_intent(intent_result.text)
+
+    if intent == "menu" and not student.active_quiz_id:
+        # Free UI affordance — returns immediately without touching
+        # chat_history/credits beyond the classification call above.
+        # Guarded against an active quiz: "help"/"menu" typed mid-quiz
+        # should stay inside the quiz's own answer/skip/stop handling below
+        # rather than being hijacked into the main menu — a stuck student
+        # typing "help" mid-quiz almost certainly means "help with this
+        # question," not "show me the main menu."
         button_result = await send_whatsapp_buttons(from_phone, "Hi! What would you like to do?", MENU_BUTTONS)
         if not button_result.get("sent"):
             await send_whatsapp_message(
@@ -788,26 +791,27 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # skip the LLM call same as before.
         reply_text = "Got it, thanks! 👍 What else can I help you with?"
         detected_lang = student.preferred_language or "en-IN"
-    elif student.active_quiz_id and looks_like_quiz_stop(message_text):
-        # Free — no LLM call, so available even if the monthly credit is
-        # exhausted (a student shouldn't get stuck unable to exit a quiz).
+    elif student.active_quiz_id and intent == "quiz_stop":
+        # No extra LLM call beyond the classification above, so available
+        # even if the monthly credit is exhausted (a student shouldn't get
+        # stuck unable to exit a quiz).
         student.active_quiz_id = None
         db.commit()
         reply_text = "No problem, quiz stopped! What else can I help you with?"
         detected_lang = student.preferred_language or "en-IN"
-    elif looks_like_progress_request(message_text):
-        # Computed directly from real TopicProgress rows — no LLM call, so
-        # no cost and no risk of the model inventing stats. Checked before
-        # the monthly credit-limit gate since it costs nothing either way.
+    elif intent == "progress":
+        # Computed directly from real TopicProgress rows — no risk of the
+        # model inventing stats. Checked before the monthly credit-limit
+        # gate since the classification call above already ran regardless.
         stats = get_student_stats(db, student.id)
         activity = get_activity_stats(db, student.id)
         coverage = get_chapter_coverage(db, student)
         reply_text = format_progress_message(stats, activity, coverage)
         detected_lang = student.preferred_language or "en-IN"
-    elif looks_like_referral_request(message_text):
-        # Free — no LLM call. Generated lazily here too (not just at
-        # signup) so students created before this feature shipped still get
-        # a code the first time they ask.
+    elif intent == "referral":
+        # Generated lazily here too (not just at signup) so students
+        # created before this feature shipped still get a code the first
+        # time they ask.
         if not student.referral_code:
             student.referral_code = generate_referral_code(student.id)
             db.commit()
@@ -819,13 +823,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
             f"Tell them to just message me and mention this code in their first message."
         )
         detected_lang = student.preferred_language or "en-IN"
-    elif _looks_like_teacher_help_request(message_text):
-        # Free — no LLM call, and checked before the monthly credit-limit
-        # gate below (same reasoning as progress/referral): asking for a
-        # human teacher shouldn't be blocked just because AI credits ran
-        # out. Distinct from the automatic hint-streak escalation in
-        # app.services.escalation — this is the student explicitly asking,
-        # not a system-detected struggle pattern.
+    elif intent == "teacher_help":
+        # Checked before the monthly credit-limit gate below (same
+        # reasoning as progress/referral): asking for a human teacher
+        # shouldn't be blocked just because AI credits ran out. Distinct
+        # from the automatic hint-streak escalation in app.services.
+        # escalation — this is the student explicitly asking, not a
+        # system-detected struggle pattern.
         for recipient in get_escalation_recipients(db, student.centre_id):
             await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
         reply_text = "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. What else can I help you with in the meantime?"

@@ -9,10 +9,6 @@ from app.services import cost_tracker
 REFERRAL_CODE_PREFIX = "QL"
 _CODE_PATTERN = re.compile(r"\bQL(\d{4,})\b")
 
-_REFERRAL_REQUEST_PHRASES = {
-    "refer", "referral", "invite", "invite friend", "invite a friend", "refer a friend", "my code", "referral code",
-}
-
 # Paid the moment someone signs up mentioning a referral code — see
 # whatsapp.py's _create_new_student. Not gated on any activity.
 REFERRAL_SIGNUP_BONUS = 10.0
@@ -40,10 +36,6 @@ def generate_referral_code(student_id: int) -> str:
 def extract_referral_code(text: str) -> str | None:
     match = _CODE_PATTERN.search(text.upper())
     return f"{REFERRAL_CODE_PREFIX}{match.group(1)}" if match else None
-
-
-def looks_like_referral_request(text: str) -> bool:
-    return text.strip().lower() in _REFERRAL_REQUEST_PHRASES
 
 
 def evaluate_referral_milestones(db: Session, student: Student) -> None:

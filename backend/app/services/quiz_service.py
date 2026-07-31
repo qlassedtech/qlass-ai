@@ -7,7 +7,6 @@ _QUIZ_START_PATTERNS = [
     r"quiz me on (.+)", r"quiz me about (.+)", r"quiz on (.+)", r"test me on (.+)",
     r"test me about (.+)", r"give me a quiz on (.+)", r"take a quiz on (.+)",
 ]
-_QUIZ_STOP_PHRASES = ["stop quiz", "cancel quiz", "end quiz", "quit quiz", "exit quiz"]
 _QUIZ_SKIP_PHRASES = ["skip", "pass", "next question", "i don't know", "idk", "no idea"]
 
 # "quiz on (.+)" happily captures a referential phrase like "the same" or
@@ -87,11 +86,6 @@ def extract_quiz_topic(text: str) -> str | None:
     if any(phrase in lowered for phrase in _QUIZ_BARE_PHRASES):
         return "this"  # vague marker — caller resolves via is_vague_quiz_topic + last_discussed_topic
     return None
-
-
-def looks_like_quiz_stop(text: str) -> bool:
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in _QUIZ_STOP_PHRASES)
 
 
 async def generate_quiz_questions(

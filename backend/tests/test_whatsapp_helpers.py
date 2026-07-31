@@ -1,9 +1,4 @@
-from app.routers.whatsapp import (
-    MENU_BUTTON_TO_COMMAND,
-    _looks_affirmative,
-    _looks_like_menu_request,
-    _looks_like_teacher_help_request,
-)
+from app.routers.whatsapp import MENU_BUTTON_TO_COMMAND, _looks_affirmative
 
 
 def test_plain_yes_is_affirmative():
@@ -27,18 +22,6 @@ def test_no_wins_even_with_incidental_please():
 
 def test_dont_is_negative():
     assert _looks_affirmative("don't update it") is False
-
-
-def test_menu_request_detection():
-    assert _looks_like_menu_request("menu") is True
-    assert _looks_like_menu_request("Help") is True
-    assert _looks_like_menu_request("what is photosynthesis") is False
-
-
-def test_teacher_help_request_detection():
-    assert _looks_like_teacher_help_request("talk to teacher") is True
-    assert _looks_like_teacher_help_request("talk to my teacher") is True
-    assert _looks_like_teacher_help_request("what is photosynthesis") is False
 
 
 def test_every_menu_button_has_a_command_mapping():
