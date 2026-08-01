@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, Student
 from app.services import cost_tracker
+from app.services.whatsapp_client import send_whatsapp_message
 
 # (milestone name, day-window start, day-window end [exclusive], bonus) —
 # a 21-day engagement-building schedule: the student earns a small credit
@@ -20,7 +21,7 @@ HABIT_MILESTONES: list[tuple[str, int, int, float]] = [
 ]
 
 
-def evaluate_habit_milestones(db: Session, student: Student) -> None:
+async def evaluate_habit_milestones(db: Session, student: Student) -> None:
     """
     Called on every real tutoring question (see whatsapp.py and
     student_chat.py) — pays the student a small bonus the first time they
@@ -57,6 +58,18 @@ def evaluate_habit_milestones(db: Session, student: Student) -> None:
             cost_tracker.grant_habit_credit(db, student.id, bonus, note=f"Habit milestone: {name}")
             paid.add(name)
             changed = True
+            # A bonus a student never hears about doesn't build a habit —
+            # it's just an invisible ledger entry. Best-effort: a WhatsApp
+            # send failure here shouldn't break the actual tutoring reply
+            # this was evaluated alongside.
+            try:
+                await send_whatsapp_message(
+                    student.phone,
+                    f"🔥 Nice streak! You've earned ₹{bonus:.0f} in bonus AI credits for sticking with "
+                    "it. Keep it up!",
+                )
+            except Exception:
+                pass
 
     if changed:
         student.habit_milestones_paid = list(paid)

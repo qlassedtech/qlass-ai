@@ -39,6 +39,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # Runs the scheduled maintenance/nudge scripts (see docker/cron/crontab
+  # and README.md's "Scheduled Jobs" section) inside the stack itself, so
+  # `docker compose up` is the only thing needed — no separate host
+  # crontab to remember to set up on a fresh server.
+  cron:
+    build:
+      context: ..
+      dockerfile: docker/cron/Dockerfile
+    restart: unless-stopped
+    env_file: ../.env.production
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes: [qlass_cron_logs:/app/logs]
+
 volumes:
   qlass_pg_data:
   qlass_redis_data:
+  qlass_cron_logs:

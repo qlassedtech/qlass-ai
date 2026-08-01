@@ -1,0 +1,22 @@
+# Scheduled jobs for Qlass AI OS — see README.md's "Scheduled Jobs" section
+# for what each one does. Runs inside the `cron` service defined in
+# docker-compose.ovh.yml, so these paths are container-internal (/app),
+# not the host checkout path used in the README's raw-crontab examples.
+#
+# scripts/send_teacher_digest.py is deliberately NOT here — it takes
+# required --to/--students args (a specific teacher/parent + student list)
+# rather than looping over everyone, so it stays a manual, one-off command
+# a teacher/admin runs themselves, not a blanket cron job.
+#
+# cron strips the environment for spawned jobs, so entrypoint.sh dumps the
+# container's real env (DATABASE_URL, REDIS_URL, API keys, etc. — all
+# already injected via docker-compose's env_file) into /etc/environment
+# before cron starts, and each job line below sources it explicitly.
+SHELL=/bin/sh
+
+0 9  * * *   . /etc/environment && cd /app && python3 scripts/send_habit_nudges.py >> /app/logs/habit_nudges.log 2>&1
+0 17 * * *   . /etc/environment && cd /app && python3 scripts/send_reengagement_nudges.py >> /app/logs/reengagement_nudges.log 2>&1
+0 10 * * SUN . /etc/environment && cd /app && python3 scripts/send_referral_nudges.py >> /app/logs/referral_nudges.log 2>&1
+0 7  * * MON . /etc/environment && cd /app && python3 scripts/reconcile_razorpay.py --days 7 >> /app/logs/reconcile_razorpay.log 2>&1
+0 18 * * FRI . /etc/environment && cd /app && python3 scripts/send_parent_digests.py >> /app/logs/parent_digests.log 2>&1
+5 9  * * *   . /etc/environment && cd /app && python3 scripts/send_subscription_expiry_reminders.py >> /app/logs/subscription_reminders.log 2>&1

@@ -70,6 +70,7 @@ def parse_track_reply(raw_reply: str) -> dict:
             "solved_directly": None,
             "class_confirm": None,
             "profile_answer": None,
+            "closing": False,
         }
 
     block = match.group(1)
@@ -86,6 +87,7 @@ def parse_track_reply(raw_reply: str) -> dict:
     class_confirm_raw = _track_field(block, "class_confirm")
     profile_answer_raw = _track_field(block, "profile_answer")
     profile_answer = profile_answer_raw.strip() if profile_answer_raw and profile_answer_raw.upper() != "NONE" else None
+    closing = _track_field(block, "closing") == "true"
 
     image_prompt = None
     image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
@@ -121,6 +123,7 @@ def parse_track_reply(raw_reply: str) -> dict:
         "solved_directly": {"true": True, "false": False, "na": None}.get(solved),
         "class_confirm": {"yes": True, "no": False, "na": None}.get(class_confirm_raw),
         "profile_answer": profile_answer,
+        "closing": closing,
     }
 
 
@@ -214,7 +217,18 @@ class TutorAgent(BaseAgent):
             "translate badly: no long relative clauses like \"that's a bit outside/different from "
             "what we were discussing\" — say it plainly instead, e.g. \"That's a different topic — "
             "happy to switch!\". Prefer short, simple, direct sentences over clever or idiomatic "
-            "phrasing throughout.\n\n"
+            "phrasing throughout. This also means no casual filler interjections like \"Ha\", "
+            "\"Lol\", \"Aw\", or \"Hmm\" used on their own — a translated/ESL student can genuinely "
+            "not know what an isolated \"Ha\" means (confirmed live: a student asked \"What is Ha?\" "
+            "after the tutor used it this way) and it wastes a turn clearing up confusion you caused. "
+            "Warmth comes through in plain, direct words instead.\n"
+            "- CRITICAL — if the student expresses frustration, criticism, or a negative reaction "
+            "(e.g. \"stupid app\", \"this is useless\", \"no use\", comparing you unfavorably to "
+            "something else), address that directly and briefly first — acknowledge it plainly, "
+            "don't get defensive, and don't pivot straight into a scripted sales pitch about what "
+            "makes you special. A canned \"here's why I'm different!\" reply to real frustration reads "
+            "as tone-deaf and ignoring what they just said. If they're leaving/done for now, let them "
+            "go gracefully — don't keep selling.\n\n"
             "SAFETY — you're talking with school-age children:\n"
             "- If a student mentions self-harm, suicide, or being in danger or abused, gently show "
             "you care, take it seriously, and encourage them to talk to a trusted adult (parent, "
@@ -227,7 +241,8 @@ class TutorAgent(BaseAgent):
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
             "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false> "
-            'solved=<true|false|na> class_confirm=<yes|no|na> profile_answer="<value>|NONE"]]\n'
+            'solved=<true|false|na> class_confirm=<yes|no|na> profile_answer="<value>|NONE" '
+            "closing=<true|false>]]\n"
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -235,6 +250,10 @@ class TutorAgent(BaseAgent):
             "you asked last turn (i.e. you just said whether they got it right or wrong). false for "
             "every other kind of reply (explanations, new check questions, greetings, off-topic chat).\n"
             "- correct: true/false if evaluated=true, otherwise null.\n"
+            "- closing: true ONLY if THIS reply is a goodbye/sign-off (the student said bye/gtg/thanks "
+            "I'm done, or you're wrapping up the conversation) — false for every other kind of reply. "
+            "The system won't tack on an onboarding or class-check question when this is true, so a "
+            "goodbye stays a clean goodbye instead of an odd follow-up question right after it.\n"
             "- solved: only applies when the STUDENT brought you a problem/equation/exercise to work "
             "out (per the hint-not-solve rule above) — true if you gave the full worked solution/answer "
             "this reply, false if you gave a hint or partial step instead, na for every other kind of "

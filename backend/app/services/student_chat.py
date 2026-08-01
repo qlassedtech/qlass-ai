@@ -4,6 +4,7 @@ from app.models.core import ChatHistory, Student, TopicProgress
 from app.services import cost_tracker
 from app.services.habit import evaluate_habit_milestones
 from app.services.llm_client import translate_with_claude
+from app.services.progress_report import get_welcome_back_note
 from app.services.referral import evaluate_referral_milestones
 from app.agents.tutor_agent import TutorAgent
 
@@ -22,6 +23,13 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     translation logic as WhatsApp so a student's experience/progress is
     consistent regardless of which channel they use.
     """
+    # Computed BEFORE this message is saved, so "days since last message"
+    # reflects the prior session, not this one (same reasoning as the
+    # WhatsApp path in app.routers.whatsapp — this was previously missing
+    # here entirely, so a returning web-app student never got a
+    # welcome-back acknowledgment at all).
+    welcome_back_note = get_welcome_back_note(db, student.id)
+
     prior_rows = (
         db.query(ChatHistory)
         .filter(ChatHistory.student_id == student.id)
@@ -49,6 +57,8 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
         active_document_text=student.active_document_text,
     )
     reply_text = result["reply"]
+    if welcome_back_note:
+        reply_text = f"{welcome_back_note}\n\n{reply_text}"
     detected_lang = result["lang"]
     usage = result["usage"]
     cost_tracker.record_claude_usage(
@@ -79,8 +89,8 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
         ))
         db.commit()
 
-    evaluate_referral_milestones(db, student)
-    evaluate_habit_milestones(db, student)
+    await evaluate_referral_milestones(db, student)
+    await evaluate_habit_milestones(db, student)
 
     db.add(ChatHistory(student_id=student.id, role="assistant", message=reply_text, agent="tutor"))
     db.commit()

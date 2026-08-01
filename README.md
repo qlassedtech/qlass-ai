@@ -193,14 +193,34 @@ backend replicas now) and several unbounded queries. Still true:
   Postgres offering.
 
 ## Scheduled Jobs
-No Celery/scheduler is wired up — these run via cron on the deployed
-server (a laptop cron won't fire reliably). Add to that server's crontab:
+No Celery/scheduler is wired up as an application-level dependency, but if
+you're deploying with `docker/docker-compose.ovh.yml`, cron is already
+handled for you: it defines a `cron` service (see `docker/cron/`) that
+builds a small image containing both `backend/` and `scripts/`, installs
+`docker/cron/crontab`, and runs it via real `cron(8)` inside the container
+— `docker compose -f docker/docker-compose.ovh.yml up -d --build` is all
+you need, nothing to configure on the host itself. Logs land in the
+`qlass_cron_logs` volume (`docker compose exec cron tail -f /app/logs/*.log`).
+`scripts/send_teacher_digest.py` is intentionally excluded from that
+crontab (it takes required `--to`/`--students` args for a specific
+recipient, so it stays a manual command — see below).
+
+If you're instead running the backend some other way (not this compose
+file), fall back to a real host crontab (a laptop cron won't fire
+reliably):
 ```
 # Weekly student progress digest to a teacher/parent — pick your own day/recipients
 0 8 * * MON  cd /path/to/qlass-ai && venv/bin/python3 scripts/send_teacher_digest.py --to <phone> --students <phone1> [<phone2> ...] >> logs/teacher_digest.log 2>&1
 
 # Daily nudge for students inside a 21-day habit milestone window who haven't engaged yet today
 0 9  * * *   cd /path/to/qlass-ai && venv/bin/python3 scripts/send_habit_nudges.py >> logs/habit_nudges.log 2>&1
+
+# Daily nudge for students who built a real habit (4+ active days ever) but have
+# gone quiet for 3-10 days — personalized with their last topic, opposite
+# targeting from the referral nudge below (which only targets currently-active
+# students). Redis-cooldown gated so the same student isn't pinged more than
+# once every 5 days.
+0 17 * * *   cd /path/to/qlass-ai && venv/bin/python3 scripts/send_reengagement_nudges.py >> logs/reengagement_nudges.log 2>&1
 
 # Weekly referral nudge to active + over-engaged students — Sunday: more free time to actually message a friend
 0 10 * * SUN cd /path/to/qlass-ai && venv/bin/python3 scripts/send_referral_nudges.py >> logs/referral_nudges.log 2>&1

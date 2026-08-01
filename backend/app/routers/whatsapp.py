@@ -262,8 +262,13 @@ def _monthly_threshold_notice(spent_before: float, spent_after: float) -> str | 
     )
 
 
-def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
-    features = {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
+async def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
+    # All features unlocked during the trial (spent down from TRIAL_CREDITS)
+    # rather than the conservative all-off default used for school-
+    # provisioned students — a prospective family evaluating Qlass for the
+    # first time should see the real, full product, not a stripped-down
+    # demo that undersells it and risks losing the sale before it starts.
+    features = {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
 
     referred_by_id = None
     referral_code = extract_referral_code(message_text)
@@ -291,6 +296,20 @@ def _create_new_student(db: Session, from_phone: str, message_text: str = "") ->
         cost_tracker.grant_referral_credit(
             db, referred_by_id, REFERRAL_SIGNUP_BONUS, note="Referral milestone: signup"
         )
+        # Same silent-credit gap as the day1/2/3/week2/3 milestones (see
+        # evaluate_referral_milestones) — a bonus the referrer never hears
+        # about isn't a good referral experience. Best-effort: shouldn't
+        # block the new student's own signup if this send fails.
+        referrer = db.query(Student).filter(Student.id == referred_by_id).first()
+        if referrer is not None:
+            try:
+                await send_whatsapp_message(
+                    referrer.phone,
+                    f"🎉 Your friend just joined using your referral code! You've earned "
+                    f"₹{REFERRAL_SIGNUP_BONUS:.0f} in bonus AI credits.",
+                )
+            except Exception:
+                pass
     return student
 
 
@@ -309,7 +328,7 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     students = db.query(Student).filter(Student.phone == from_phone).order_by(Student.id).all()
 
     if not students:
-        return _create_new_student(db, from_phone, message_text), None
+        return await _create_new_student(db, from_phone, message_text), None
 
     # Skipped entirely for audio/image/document messages (empty probe text
     # at this point — see _handle_message) rather than spending a call on
@@ -336,7 +355,7 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
         return student, early_reply
 
     if routing.new_profile_request:
-        new_student = _create_new_student(db, from_phone)
+        new_student = await _create_new_student(db, from_phone)
         await set_active_profile(from_phone, new_student.id)
         missing = next_missing_field(new_student)
         question = missing[1] if missing else "What's your name?"
@@ -771,8 +790,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
     history = [{"role": row.role, "content": row.message} for row in reversed(prior_rows)]
 
     # Save the incoming message
-    db.add(ChatHistory(student_id=student.id, role="user", message=message_text, agent="tutor"))
+    incoming_row = ChatHistory(student_id=student.id, role="user", message=message_text, agent="tutor")
+    db.add(incoming_row)
     db.commit()
+    db.refresh(incoming_row)
 
     image_prompt = None
     video_query = None
@@ -835,11 +856,41 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # rather than being hijacked into the main menu — a stuck student
         # typing "help" mid-quiz almost certainly means "help with this
         # question," not "show me the main menu."
-        button_result = await send_whatsapp_buttons(from_phone, "Hi! What would you like to do?", MENU_BUTTONS)
-        if not button_result.get("sent"):
+        if not prior_rows:
+            # A student's very first message ever — "My Progress" and
+            # "Refer a Friend" are dead ends with zero history behind them
+            # (confirmed live: a first-time student tapped "My Progress"
+            # and got "you haven't answered any check questions yet").
+            # Skip the returning-user menu entirely and make the first
+            # touch feel like meeting a tutor, not a support bot: greet by
+            # name if we have one, and demonstrate what's possible instead
+            # of just listing commands.
+            first_name = student.name if student.name and student.name != "New Student" else None
+            greeting = f"Hi {first_name}! 👋" if first_name else "Hi! 👋"
+            # Only advertise a capability the student actually has — a
+            # first "wow" moment that turns out broken (e.g. promising
+            # photo help to a student without the OCR feature) is worse
+            # than not mentioning it at all.
+            photo_hint = ", send a photo of a tricky homework question," if student.has_feature("ocr") else ""
             await send_whatsapp_message(
                 from_phone,
-                "Reply with 'my progress', 'refer a friend', or 'talk to teacher' — or just ask me a question!",
+                f"{greeting} I'm your AI tutor — ask me to explain any topic{photo_hint} or say "
+                "\"quiz me on <topic>\" to test yourself. What would you like to learn today?",
+            )
+            return
+        # A returning student saying "Hi" after a gap is the single most
+        # common re-entry message — previously only a real tutoring
+        # question got the welcome-back note (spliced in much further down
+        # this ladder), so this exact greeting silently skipped it.
+        menu_greeting = f"{welcome_back_note}\n\nJust ask me anything to start learning, or pick one of these:" \
+            if welcome_back_note else "Hi! Just ask me anything to start learning, or pick one of these:"
+        button_result = await send_whatsapp_buttons(from_phone, menu_greeting, MENU_BUTTONS)
+        if not button_result.get("sent"):
+            fallback_prefix = f"{welcome_back_note}\n\n" if welcome_back_note else ""
+            await send_whatsapp_message(
+                from_phone,
+                f"{fallback_prefix}Just ask me anything to start learning! Or reply with 'my progress', "
+                "'refer a friend', or 'talk to teacher'.",
             )
         return
 
@@ -1046,6 +1097,28 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
             )
         detected_lang = student.preferred_language or "en-IN"
+    elif (
+        db.query(ChatHistory.id)
+        .filter(
+            ChatHistory.student_id == student.id, ChatHistory.role == "user",
+            ChatHistory.id > incoming_row.id,
+        )
+        .first()
+        is not None
+    ):
+        # A newer message from this same student already arrived while this
+        # one was waiting on student_lock (e.g. three rapid-fire texts like
+        # "Then what will I do with theory?" / "No use" / "Bye" sent within
+        # seconds of each other) — confirmed live: each got its own
+        # independent LLM reply, producing a disjointed pile-up of answers
+        # that didn't track what the student was actually saying as one
+        # thought. Skip generating a reply for this stale message entirely;
+        # it's already in chat_history, so the newer message's own LLM call
+        # sees it as context and can respond to the whole exchange at once.
+        # Never applies to a quiz answer (that's the separate
+        # student.active_quiz_id branch above, not this one) — every quiz
+        # answer still needs its own grading feedback.
+        return
     else:
         did_answer_via_llm = True
 
@@ -1054,8 +1127,8 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # milestones are checked against (see evaluate_referral_milestones).
         # No-ops immediately for non-referred students or once every
         # milestone's already settled.
-        evaluate_referral_milestones(db, student)
-        evaluate_habit_milestones(db, student)
+        await evaluate_referral_milestones(db, student)
+        await evaluate_habit_milestones(db, student)
 
         # Whether this message actually answers a pending onboarding question
         # (name/class/board/school) or the class-update nudge is decided by
@@ -1185,13 +1258,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
             student.hints_given_count = (student.hints_given_count or 0) + 1
             db.commit()
 
-        should_escalate = record_hint_outcome(student, result["solved_directly"])
+        should_escalate = record_hint_outcome(student, result["evaluated"], result["correct"])
         if should_escalate:
             student.consecutive_unresolved_hints = 0  # reset so we don't re-notify every single turn past threshold
             db.commit()
             escalation_message = format_escalation_message(student.name, result["topic"])
             for recipient in get_escalation_recipients(db, student.centre_id):
                 await send_whatsapp_message(recipient.phone, escalation_message)
+            # The explicit "talk to teacher" command already tells the
+            # student their teacher was notified — this automatic
+            # hint-streak trigger previously didn't, so a student stuck on
+            # the same topic had no idea help was already on its way.
+            # Skipped on a goodbye turn — a farewell shouldn't get this
+            # tacked on.
+            if not result["closing"]:
+                reply_text = f"{reply_text}\n\nBy the way, I've let your teacher know you might want a hand with this — they'll reach out soon. 🙋"
 
         if result["evaluated"]:
             # The check question being evaluated was asked in the *previous*
@@ -1223,6 +1304,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             and student.off_level_count >= OFF_LEVEL_SUGGEST_THRESHOLD
             and not student.pending_profile_field
             and not reply_text.rstrip().endswith("?")
+            and not result["closing"]
         ):
             level = result["off_level_class"]
             reply_text = (
@@ -1244,7 +1326,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # or the class-update suggestion above) — a student answering both at
         # once ("Radiant and centripetal") gets entirely swallowed as the
         # profile answer, silently dropping the actual teaching evaluation.
-        if should_ask_this_turn(user_message_count) and not reply_text.rstrip().endswith("?"):
+        # Also never onto a goodbye (result["closing"]) — confirmed live: a
+        # student who said "Bye" got "Bye! Come back anytime! 👋\n\nBy the
+        # way, what's your name?" tacked on right after their own sign-off.
+        if should_ask_this_turn(user_message_count) and not reply_text.rstrip().endswith("?") and not result["closing"]:
             missing = next_missing_field(student)
             if missing:
                 field, question = missing

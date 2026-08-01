@@ -49,7 +49,7 @@ def _add_question(pg_db_session, student_id, at: datetime):
     pg_db_session.commit()
 
 
-def test_day1_milestone_requires_two_questions(pg_db_session):
+async def test_day1_milestone_requires_two_questions(pg_db_session):
     referrer, referred = _make_pair(pg_db_session)
     signup = _utcnow() - timedelta(days=1, hours=12)
     referred.created_at = signup
@@ -57,19 +57,19 @@ def test_day1_milestone_requires_two_questions(pg_db_session):
 
     # only one question in the day1 window — should NOT pay yet (day1 needs 2)
     _add_question(pg_db_session, referred.id, signup + timedelta(days=1, hours=2))
-    evaluate_referral_milestones(pg_db_session, referred)
+    await evaluate_referral_milestones(pg_db_session, referred)
     assert "day1" not in (referred.referral_milestones_paid or [])
     balance_before = cost_tracker.get_balance(pg_db_session, referrer.id)
 
     # a second question in the same window — should pay now
     _add_question(pg_db_session, referred.id, signup + timedelta(days=1, hours=3))
-    evaluate_referral_milestones(pg_db_session, referred)
+    await evaluate_referral_milestones(pg_db_session, referred)
     pg_db_session.refresh(referred)
     assert "day1" in referred.referral_milestones_paid
     assert cost_tracker.get_balance(pg_db_session, referrer.id) == balance_before + 10.0
 
 
-def test_referral_milestones_never_repay_same_milestone(pg_db_session):
+async def test_referral_milestones_never_repay_same_milestone(pg_db_session):
     referrer, referred = _make_pair(pg_db_session)
     signup = _utcnow() - timedelta(days=1, hours=12)
     referred.created_at = signup
@@ -77,15 +77,15 @@ def test_referral_milestones_never_repay_same_milestone(pg_db_session):
     _add_question(pg_db_session, referred.id, signup + timedelta(days=1, hours=2))
     _add_question(pg_db_session, referred.id, signup + timedelta(days=1, hours=3))
 
-    evaluate_referral_milestones(pg_db_session, referred)
-    evaluate_referral_milestones(pg_db_session, referred)  # simulate a second message in the same window
+    await evaluate_referral_milestones(pg_db_session, referred)
+    await evaluate_referral_milestones(pg_db_session, referred)  # simulate a second message in the same window
     pg_db_session.refresh(referred)
 
     assert referred.referral_milestones_paid.count("day1") == 1
     assert cost_tracker.get_referral_credits_earned(pg_db_session, referrer.id) == 10.0
 
 
-def test_referral_milestones_are_uncapped(pg_db_session):
+async def test_referral_milestones_are_uncapped(pg_db_session):
     """Explicit product decision: no lifetime cap on referral earnings."""
     referrer, referred = _make_pair(pg_db_session)
 
@@ -95,7 +95,7 @@ def test_referral_milestones_are_uncapped(pg_db_session):
         pg_db_session.commit()
         for i in range(min_questions):
             _add_question(pg_db_session, referred.id, referred.created_at + timedelta(days=mid_days - 0.01, hours=i))
-        evaluate_referral_milestones(pg_db_session, referred)
+        await evaluate_referral_milestones(pg_db_session, referred)
 
     total_bonus = sum(b for _, _, _, _, b in REFERRAL_MILESTONES)
     assert cost_tracker.get_referral_credits_earned(pg_db_session, referrer.id) == total_bonus

@@ -14,6 +14,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import Centre, Chapter, ChatHistory, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import cost_tracker, school_billing
+from app.services.escalation import get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
@@ -815,7 +816,7 @@ class TeacherCreateRequest(BaseModel):
 
 
 @router.post("/admin/teachers")
-def create_teacher(
+async def create_teacher(
     body: TeacherCreateRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     """
@@ -852,6 +853,19 @@ def create_teacher(
     db.add(new_teacher)
     db.commit()
     db.refresh(new_teacher)
+    # Previously a completely silent DB row — a newly "invited" teacher had
+    # no way of knowing an account existed unless someone told them
+    # out-of-band. Best-effort: shouldn't fail account creation if the send
+    # itself fails.
+    try:
+        await send_whatsapp_message(
+            body.phone,
+            f"Welcome to Qlass, {body.name}! 🎉 An account has been set up for you on the Qlass "
+            f"Partner Console.\n\nLog in with:\nPhone: {body.phone}\nPassword: {body.password}\n\n"
+            f"You can change your password any time from the login page's \"Forgot password?\" link.",
+        )
+    except Exception:
+        pass
     return _teacher_to_dict(new_teacher)
 
 
@@ -1743,7 +1757,7 @@ class UpdateSalesInfoRequest(BaseModel):
 
 
 @router.patch("/admin/schools/{centre_id}/sales")
-def update_school_sales_info(
+async def update_school_sales_info(
     centre_id: int, body: UpdateSalesInfoRequest, db: Session = Depends(get_db),
     teacher: Teacher = Depends(get_current_teacher),
 ):
@@ -1753,6 +1767,7 @@ def update_school_sales_info(
     if centre is None:
         raise HTTPException(status_code=404, detail="School not found")
     _require_school_management_access(teacher, centre)
+    was_churned = centre.sales_status == "churned"
     if body.sales_status is not None:
         centre.sales_status = body.sales_status
     if body.sales_notes is not None:
@@ -1760,6 +1775,28 @@ def update_school_sales_info(
     if body.contract_notes is not None:
         centre.contract_notes = body.contract_notes
     db.commit()
+    # Previously silent: every student at a churned school just hit a
+    # paywall on their next message with no warning to anyone at the
+    # school. Notify the school's own staff at the moment of transition (in
+    # both directions) so they aren't finding out from a parent complaint —
+    # not individual students/parents directly, since Qlass's relationship
+    # is with the school, not a mass alert to every enrolled family.
+    now_churned = centre.sales_status == "churned"
+    if now_churned != was_churned:
+        recipients = get_escalation_recipients(db, centre.id)
+        if now_churned:
+            notice = (
+                f"⚠️ {centre.name}'s Qlass account has been marked churned — students here will no "
+                f"longer get AI tutor replies on WhatsApp starting now (any student with their own "
+                f"paid credits keeps working). Contact Qlass to reactivate."
+            )
+        else:
+            notice = f"✅ {centre.name}'s Qlass account is active again — students here can resume chatting on WhatsApp."
+        for recipient in recipients:
+            try:
+                await send_whatsapp_message(recipient.phone, notice)
+            except Exception:
+                pass
     return {
         "id": centre.id, "sales_status": centre.sales_status,
         "sales_notes": centre.sales_notes, "contract_notes": centre.contract_notes,

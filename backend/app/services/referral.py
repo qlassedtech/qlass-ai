@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, Student
 from app.services import cost_tracker
+from app.services.whatsapp_client import send_whatsapp_message
 
 REFERRAL_CODE_PREFIX = "QL"
 _CODE_PATTERN = re.compile(r"\bQL(\d{4,})\b")
@@ -38,7 +39,7 @@ def extract_referral_code(text: str) -> str | None:
     return f"{REFERRAL_CODE_PREFIX}{match.group(1)}" if match else None
 
 
-def evaluate_referral_milestones(db: Session, student: Student) -> None:
+async def evaluate_referral_milestones(db: Session, student: Student) -> None:
     """
     Called on every real tutoring question a referred student sends (see
     whatsapp.py). Checks whichever day/week window "now" falls into against
@@ -80,6 +81,21 @@ def evaluate_referral_milestones(db: Session, student: Student) -> None:
             )
             paid.add(name)
             changed = True
+            # The referrer isn't in this conversation at all (this call is
+            # triggered by the REFERRED student's activity), so a silent
+            # ledger credit is the only way they'd ever see it — actively
+            # notify them instead. Best-effort: shouldn't break the
+            # referred student's own reply if this send fails.
+            referrer = db.query(Student).filter(Student.id == student.referred_by_id).first()
+            if referrer is not None:
+                try:
+                    await send_whatsapp_message(
+                        referrer.phone,
+                        f"🎉 Your referral is paying off! {student.name} has been active, so you've "
+                        f"earned ₹{bonus:.0f} in bonus AI credits.",
+                    )
+                except Exception:
+                    pass
 
     if changed:
         student.referral_milestones_paid = list(paid)

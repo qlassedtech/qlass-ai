@@ -25,34 +25,34 @@ def _add_question(pg_db_session, student_id, at: datetime):
     pg_db_session.commit()
 
 
-def test_day1_habit_milestone_pays_student_own_wallet(pg_db_session):
+async def test_day1_habit_milestone_pays_student_own_wallet(pg_db_session):
     student = _make_student(pg_db_session)
     signup = _utcnow() - timedelta(days=1, hours=12)
     student.created_at = signup
     pg_db_session.commit()
 
     _add_question(pg_db_session, student.id, signup + timedelta(days=1, hours=2))
-    evaluate_habit_milestones(pg_db_session, student)
+    await evaluate_habit_milestones(pg_db_session, student)
     pg_db_session.refresh(student)
 
     assert "day1" in student.habit_milestones_paid
     assert cost_tracker.get_balance(pg_db_session, student.id) == 5.0
 
 
-def test_habit_milestone_not_paid_without_activity(pg_db_session):
+async def test_habit_milestone_not_paid_without_activity(pg_db_session):
     student = _make_student(pg_db_session)
     signup = _utcnow() - timedelta(days=1, hours=12)
     student.created_at = signup
     pg_db_session.commit()
 
-    evaluate_habit_milestones(pg_db_session, student)
+    await evaluate_habit_milestones(pg_db_session, student)
     pg_db_session.refresh(student)
 
     assert "day1" not in (student.habit_milestones_paid or [])
     assert cost_tracker.get_balance(pg_db_session, student.id) == 0.0
 
 
-def test_full_21_day_habit_schedule(pg_db_session):
+async def test_full_21_day_habit_schedule(pg_db_session):
     student = _make_student(pg_db_session)
 
     for name, start, end, bonus in HABIT_MILESTONES:
@@ -60,7 +60,7 @@ def test_full_21_day_habit_schedule(pg_db_session):
         student.created_at = _utcnow() - timedelta(days=mid_days)
         pg_db_session.commit()
         _add_question(pg_db_session, student.id, student.created_at + timedelta(days=mid_days - 0.01))
-        evaluate_habit_milestones(pg_db_session, student)
+        await evaluate_habit_milestones(pg_db_session, student)
 
     pg_db_session.refresh(student)
     expected_total = sum(b for _, _, _, b in HABIT_MILESTONES)
