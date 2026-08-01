@@ -298,6 +298,10 @@ class TutorAgent(BaseAgent):
                 "separate follow-up turn where the real explanation happens; whatever you write now is "
                 "the entire spoken message the student receives. Write the actual explanation itself, "
                 "just like you would for a text-only reply.\n"
+                "  (c) This is still a normal teaching turn, not a special exception — end it with your "
+                "usual check question just like any other explanation (see the teaching-behavior rules "
+                "above), unless it qualifies for one of the stated skip-it exceptions. Don't let the "
+                "voice/video request distract you into dropping that habit.\n"
                 if voice_enabled
                 else "- audio: always false — voice replies aren't available for this student. If asked "
                 "for one, just say you can't right now and continue in text, briefly and naturally.\n"
