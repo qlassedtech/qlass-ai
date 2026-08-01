@@ -4,7 +4,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.core import Centre, ChatHistory, CreditEvent, SchoolCreditEvent, SchoolPilotGrant, Student
-from app.services import cost_tracker, school_billing
 
 PILOT_CREDIT_SERVICE = "school_pilot_credit"
 PILOT_TEACHER_TOOLS_SERVICE = "school_pilot_teacher_tools"

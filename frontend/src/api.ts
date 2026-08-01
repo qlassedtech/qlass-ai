@@ -152,6 +152,8 @@ export interface Teacher {
   role: string;
   phone: string;
   photo_url: string | null;
+  centre_id: number | null;
+  organization_id: number | null;
 }
 
 export interface Student {
@@ -269,16 +271,38 @@ export const api = {
   listStudents: () => request("/admin/students") as Promise<Student[]>,
   createStudent: (data: { name: string; phone: string; class_?: string; board?: string; school?: string }) =>
     request("/admin/students", { method: "POST", body: JSON.stringify(data) }) as Promise<Student>,
-  bulkUploadStudents: (file: File, features: Record<string, boolean>) => {
+  previewStudentBulkUpload: (file: File, centreId?: number) => {
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("features", JSON.stringify(features));
-    return requestMultipart("/admin/students/bulk-upload", formData) as Promise<{
-      created: string[];
-      updated: string[];
-      skipped: unknown[];
+    const query = centreId ? `?centre_id=${centreId}` : "";
+    return requestMultipart(`/admin/students/bulk-upload/preview${query}`, formData) as Promise<{
+      rows: Record<string, string | null>[];
     }>;
   },
+  confirmStudentBulkUpload: (
+    rows: Record<string, string | null>[], features: Record<string, boolean>, centreId?: number,
+  ) =>
+    request("/admin/students/bulk-upload/confirm", {
+      method: "POST",
+      body: JSON.stringify({ rows, features, centre_id: centreId }),
+    }) as Promise<{ created: string[]; updated: string[]; skipped: unknown[] }>,
+  previewTeacherBulkUpload: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestMultipart("/admin/teachers/bulk-upload/preview", formData) as Promise<{
+      rows: Record<string, string | null>[];
+    }>;
+  },
+  confirmTeacherBulkUpload: (rows: Record<string, string | null>[]) =>
+    request("/admin/teachers/bulk-upload/confirm", {
+      method: "POST",
+      body: JSON.stringify({ rows }),
+    }) as Promise<{
+      created_count: number;
+      created: string[];
+      skipped_count: number;
+      generated_passwords: Record<string, string>;
+    }>,
   updateStudent: (id: number, data: Partial<Student> & { class_?: string }) =>
     request(`/admin/students/${id}`, { method: "PATCH", body: JSON.stringify(data) }) as Promise<Student>,
   getProgress: (id: number) => request(`/admin/students/${id}/progress`) as Promise<ProgressResponse>,
@@ -351,9 +375,10 @@ export const api = {
   createTeacher: (data: { name: string; phone: string; password: string; role: string; centre_id?: number }) =>
     request("/admin/teachers", { method: "POST", body: JSON.stringify(data) }) as Promise<TeacherAccount>,
   getSchool: () => request("/admin/school") as Promise<School>,
-  getAnalytics: () => request("/admin/analytics") as Promise<Analytics>,
-  downloadSchoolStatement: (year: number, month: number) =>
-    requestBlob(`/admin/school/statement?year=${year}&month=${month}`),
+  getAnalytics: (centreId?: number) =>
+    request(`/admin/analytics${centreId ? `?centre_id=${centreId}` : ""}`) as Promise<Analytics>,
+  downloadSchoolStatement: (year: number, month: number, centreId?: number) =>
+    requestBlob(`/admin/school/statement?year=${year}&month=${month}${centreId ? `&centre_id=${centreId}` : ""}`),
   getDeletionRequests: () => request("/admin/deletion-requests") as Promise<DeletionRequest[]>,
   fulfillDeletion: (id: number) =>
     request(`/admin/students/${id}/fulfill-deletion`, { method: "POST" }) as Promise<{ deleted: boolean }>,
@@ -391,11 +416,17 @@ export const api = {
       assigned: string[];
       skipped_already_in_quiz: string[];
     }>,
-  getCurriculumChapters: (classNum: string) =>
-    request(`/admin/curriculum/chapters?class_=${encodeURIComponent(classNum)}`) as Promise<
-      { id: number; name: string; chapter_no: number | null; subject: string }[]
-    >,
-  generatePresentation: (data: { topic: string; num_cards: number }) =>
+  getCurriculumChapters: (classNum: string, board: string = "CBSE") =>
+    request(
+      `/admin/curriculum/chapters?class_=${encodeURIComponent(classNum)}&board=${encodeURIComponent(board)}`,
+    ) as Promise<{ id: number; name: string; chapter_no: number | null; subject: string }[]>,
+  generatePresentation: (data: {
+    topic?: string;
+    chapter_id?: number;
+    class_?: string;
+    board?: string;
+    num_cards: number;
+  }) =>
     request("/admin/presentation/generate", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       generation_id: string;
     }>,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type Analytics as AnalyticsData, type DeletionRequest } from "../api";
+import { api, type Analytics as AnalyticsData, type DeletionRequest, type SchoolOverview, type Teacher } from "../api";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -16,17 +16,44 @@ export default function Analytics() {
   const [deletionRequests, setDeletionRequests] = useState<DeletionRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [statementDownloading, setStatementDownloading] = useState(false);
+  const [me, setMe] = useState<Teacher | null>(null);
+  const [schools, setSchools] = useState<SchoolOverview[]>([]);
+  const [centreId, setCentreId] = useState("");
+
+  const needsSchoolPicker = me?.role === "org_admin" || me?.role === "super_admin";
 
   useEffect(() => {
-    api.getAnalytics().then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+    api.me().then((teacher) => {
+      setMe(teacher);
+      if (teacher.role === "org_admin" || teacher.role === "super_admin") {
+        api.getSchoolsOverview().then(setSchools);
+      } else {
+        api.getAnalytics().then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+      }
+    });
     api.getDeletionRequests().then(setDeletionRequests).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    // Analytics is per-school, so org_admin/super_admin only load it once
+    // they've picked which of their (potentially many) schools to view.
+    if (needsSchoolPicker && centreId) {
+      setData(null);
+      api
+        .getAnalytics(Number(centreId))
+        .then(setData)
+        .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreId]);
 
   async function handleDownloadStatement() {
     setStatementDownloading(true);
     try {
       const now = new Date();
-      const blob = await api.downloadSchoolStatement(now.getFullYear(), now.getMonth() + 1);
+      const blob = await api.downloadSchoolStatement(
+        now.getFullYear(), now.getMonth() + 1, needsSchoolPicker ? Number(centreId) : undefined,
+      );
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -43,6 +70,33 @@ export default function Analytics() {
   }
 
   if (error) return <p className="error">{error}</p>;
+
+  if (needsSchoolPicker && !centreId) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>School Analytics</h1>
+            <p>Pick a school to view its engagement, progress, and usage</p>
+          </div>
+        </div>
+        <div className="card" style={{ maxWidth: 420 }}>
+          <label>
+            School
+            <select value={centreId} onChange={(e) => setCentreId(e.target.value)}>
+              <option value="">Select school…</option>
+              {schools.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+    );
+  }
+
   if (!data) return <p>Loading...</p>;
 
   return (
@@ -52,9 +106,20 @@ export default function Analytics() {
           <h1>School Analytics</h1>
           <p>Engagement, progress, and usage across your whole school</p>
         </div>
-        <button type="button" onClick={handleDownloadStatement} disabled={statementDownloading}>
-          {statementDownloading ? "Downloading..." : "Download This Month's Statement"}
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {needsSchoolPicker && (
+            <select value={centreId} onChange={(e) => setCentreId(e.target.value)}>
+              {schools.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <button type="button" onClick={handleDownloadStatement} disabled={statementDownloading}>
+            {statementDownloading ? "Downloading..." : "Download This Month's Statement"}
+          </button>
+        </div>
       </div>
 
       <div className="grid-2" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: 24 }}>

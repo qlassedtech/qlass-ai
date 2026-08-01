@@ -39,7 +39,7 @@ export default function ParentDashboard() {
   return (
     <ParentLayout>
       {consent && !consent.given && (
-        <div className="card" style={{ marginBottom: 20, background: "rgba(43, 62, 196, 0.06)" }}>
+        <div className="card" style={{ marginBottom: 20, background: "var(--accent-lighter)" }}>
           <p style={{ marginBottom: 12 }}>{consent.statement}</p>
           <button type="button" onClick={handleGiveConsent}>
             I Confirm & Consent
@@ -69,7 +69,7 @@ export default function ParentDashboard() {
             <p>Needs reinforcement: {progress.stats.weak_topics.join(", ")}</p>
           )}
           {progress.coverage && (
-            <p>Syllabus coverage: {progress.coverage.covered.length}/{progress.coverage.total} NCERT chapters</p>
+            <p>Syllabus coverage: {progress.coverage.covered.length}/{progress.coverage.total} chapters</p>
           )}
         </>
       )}

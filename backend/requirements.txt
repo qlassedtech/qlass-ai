@@ -24,3 +24,5 @@ httpx
 pyjwt
 bcrypt
 razorpay
+pytest
+pytest-asyncio

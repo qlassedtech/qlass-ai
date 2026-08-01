@@ -4,7 +4,6 @@ must never work as a student token and vice versa, even if a teacher_id
 and a student_id happen to collide numerically.
 """
 import jwt as pyjwt
-import pytest
 
 from app.config import settings
 from app.services.teacher_auth import create_access_token, JWT_ALGORITHM

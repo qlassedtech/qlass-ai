@@ -268,17 +268,17 @@ def seed():
     try:
         for class_num in [str(n) for n in range(1, 6)]:
             for subject_name in PRIMARY_SUBJECTS + (["EVS"] if class_num in ("3", "4", "5") else []):
-                existing = db.query(Subject).filter(Subject.class_ == class_num, Subject.name == subject_name).first()
+                existing = db.query(Subject).filter(Subject.class_ == class_num, Subject.name == subject_name, Subject.board == "CBSE").first()
                 if not existing:
-                    db.add(Subject(name=subject_name, class_=class_num))
+                    db.add(Subject(name=subject_name, class_=class_num, board="CBSE"))
                     created_subjects += 1
         db.commit()
 
         for class_num, subjects in CURRICULUM.items():
             for subject_name, chapters in subjects.items():
-                subject = db.query(Subject).filter(Subject.class_ == class_num, Subject.name == subject_name).first()
+                subject = db.query(Subject).filter(Subject.class_ == class_num, Subject.name == subject_name, Subject.board == "CBSE").first()
                 if not subject:
-                    subject = Subject(name=subject_name, class_=class_num)
+                    subject = Subject(name=subject_name, class_=class_num, board="CBSE")
                     db.add(subject)
                     db.commit()
                     db.refresh(subject)

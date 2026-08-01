@@ -8,7 +8,7 @@ export default function SchoolProfile() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
-    api.getSchool().then(setSchool);
+    api.getSchool().then(setSchool).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
   }
 
   useEffect(load, []);
@@ -28,7 +28,7 @@ export default function SchoolProfile() {
     }
   }
 
-  if (!school) return <p>Loading...</p>;
+  if (!school) return error ? <p className="error">{error}</p> : <p>Loading...</p>;
 
   return (
     <div>

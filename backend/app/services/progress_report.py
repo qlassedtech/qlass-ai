@@ -6,13 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, TopicProgress, Subject, Chapter
 
-# The seeded curriculum (see scripts/seed_ncert_curriculum.py) is the NCERT
-# syllabus specifically. NCERT chapter names/order don't reliably apply to
-# ICSE or most State boards, which use entirely different textbooks — only
-# match coverage against it when the student is CBSE or hasn't told us
-# their board yet (most likely CBSE/NCERT-aligned by default in this
-# market), never for a board we know is different.
-_NCERT_ALIGNED_BOARDS = {"", "cbse", "ncert"}
+# A student's free-text `board` value maps to the `Subject.board` the
+# seeded curriculum is actually tagged with (see scripts/seed_ncert_
+# curriculum.py and scripts/seed_bseb_curriculum.py) — chapter names/order
+# don't reliably carry over between boards, which use different textbooks,
+# so coverage must only ever match against the SAME board's seeded data.
+# A student with no board on file yet defaults to CBSE (most likely in
+# this market), never silently matched against every board's chapters.
+_BOARD_TO_SUBJECT_BOARD = {"": "CBSE", "cbse": "CBSE", "ncert": "CBSE", "bseb": "BSEB"}
 _STOPWORDS = {"the", "and", "of", "in", "on", "a", "an", "to", "for", "with"}
 
 
@@ -125,21 +126,22 @@ def _significant_words(text: str) -> set[str]:
 
 def get_chapter_coverage(db: Session, student) -> dict | None:
     """
-    Which seeded NCERT chapters (for this student's class) have been
+    Which seeded chapters (for this student's class AND board) have been
     touched based on topics discussed, vs. not yet — a fuzzy word-overlap
     match against free-text TopicProgress.topic values, since topics aren't
     linked to a specific chapter_id anywhere in the tutoring flow yet.
-    Returns None when not applicable: no class on file, or a board other
-    than CBSE/NCERT/unset (see _NCERT_ALIGNED_BOARDS).
+    Returns None when not applicable: no class on file, or a board with no
+    seeded curriculum at all (see _BOARD_TO_SUBJECT_BOARD).
     """
     board = (student.board or "").strip().lower()
-    if board not in _NCERT_ALIGNED_BOARDS or not student.class_:
+    subject_board = _BOARD_TO_SUBJECT_BOARD.get(board)
+    if subject_board is None or not student.class_:
         return None
 
     chapters = (
         db.query(Chapter)
         .join(Subject, Chapter.subject_id == Subject.id)
-        .filter(Subject.class_ == student.class_)
+        .filter(Subject.class_ == student.class_, Subject.board == subject_board)
         .all()
     )
     if not chapters:
@@ -174,7 +176,11 @@ def format_progress_message(stats: dict, activity: dict | None = None, coverage:
     if activity and activity["streak_days"] >= 2:
         lines.append(f"- 🔥 {activity['streak_days']}-day streak — keep it going!")
     if coverage and coverage["total"] > 0:
-        lines.append(f"- 📚 Covered {len(coverage['covered'])}/{coverage['total']} NCERT chapters for your class this year")
+        # Not "NCERT chapters" — get_chapter_coverage also serves BSEB
+        # students now (see _BOARD_TO_SUBJECT_BOARD), and naming the wrong
+        # board here would be a real, visible inaccuracy in their own
+        # progress report.
+        lines.append(f"- 📚 Covered {len(coverage['covered'])}/{coverage['total']} chapters for your class this year")
         if coverage["not_covered"]:
             preview = ", ".join(coverage["not_covered"][:3])
             lines.append(f"  Not touched yet: {preview}{'...' if len(coverage['not_covered']) > 3 else ''}")

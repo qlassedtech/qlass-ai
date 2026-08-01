@@ -69,9 +69,19 @@ def build_disambiguation_prompt(student_names: list[str]) -> str:
 def match_student_by_name(students: list, text: str):
     """Best-effort match of a disambiguation reply (or any message) against
     known profile names on this phone — a real name mention is a strong
-    enough signal to skip an explicit confirmation step."""
+    enough signal to skip an explicit confirmation step.
+
+    Matched on a whole word, not a bare substring — a plain `name in text`
+    check would false-positive on short/common Indian names that happen to
+    appear inside unrelated words (e.g. a student named "Om" would "match"
+    any message containing "tomorrow", "welcome", or "phenomenon"; "Ria"
+    would match "Maria"), silently switching the active profile to the
+    wrong sibling on an ordinary tutoring question.
+    """
     lowered = text.lower().strip()
     for student in students:
-        if student.name and student.name.lower() != "new student" and student.name.lower() in lowered:
+        if not student.name or student.name.lower() == "new student":
+            continue
+        if re.search(rf"\b{re.escape(student.name.lower())}\b", lowered):
             return student
     return None

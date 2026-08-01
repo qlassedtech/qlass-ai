@@ -1,6 +1,6 @@
 import csv
 import io
-import json
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import razorpay
@@ -16,7 +16,7 @@ from app.models.core import Centre, Chapter, ChatHistory, Parent, Question, Quiz
 from app.services import cost_tracker, school_billing
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
-from app.services.deletion import fulfill_deletion_request, list_pending_deletion_requests
+from app.services.deletion import fulfill_deletion_request
 from app.services.otp import generate_and_store_otp, verify_otp
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
@@ -29,14 +29,22 @@ from app.services import razorpay_client
 from app.services.razorpay_client import client as _razorpay_client, MIN_TOPUP_AMOUNT
 from app.services.student_chat import process_web_message
 from app.services.teacher_auth import get_current_teacher, hash_password, verify_password, create_access_token
+from app.services import tenancy
 from app.services.tenancy import get_or_create_linked_student
 from app.services.uploads import save_image_upload
 from app.services.whatsapp_client import send_whatsapp_message
 from app.services.workbook_service import generate_workbook_questions
+from app.services.ocr_client import extract_text_from_image
+from app.services.document_client import extract_text_from_document
+from app.services.roster_extraction import extract_student_rows, extract_teacher_rows
 
 router = APIRouter()
 
 DEFAULT_FEATURES = {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
+
+# Same rationale as student_app.py's CHAT_HISTORY_LIMIT — a long-running
+# "My AI Tutor" chat shouldn't return an ever-growing unbounded history.
+MY_TUTOR_CHAT_HISTORY_LIMIT = 200
 
 
 class LoginRequest(BaseModel):
@@ -54,9 +62,16 @@ class StudentCreateRequest(BaseModel):
 
 class StudentUpdateRequest(BaseModel):
     name: str | None = None
+    phone: str | None = None
     class_: str | None = None
     board: str | None = None
     school: str | None = None
+    # Only ever auto-detected from voice-note pitch today (see
+    # app.services.audio_qa) — that heuristic is admittedly error-prone,
+    # and until now a teacher had no way to see or correct a wrong guess,
+    # which picks the wrong opposite-gender TTS voice on every future
+    # voice reply for that student.
+    gender: str | None = None
     focus_topic: str | None = None
     features: dict | None = None
     parent_phone: str | None = None
@@ -89,22 +104,45 @@ def _student_to_dict(db: Session, student: Student) -> dict:
     }
 
 
+def _org_centre_ids(db: Session, organization_id: int | None):
+    """Every centre_id under one organization — see the Organization model."""
+    return db.query(Centre.id).filter(Centre.organization_id == organization_id)
+
+
 def _scoped_students(db: Session, teacher: Teacher) -> Query:
     """
     This product is sold to multiple schools — a school's own admin/teacher
     must only ever see their own school's (centre's) students, never
-    another school's. Only "super_admin" (Qlass's own staff) sees across
-    every school. Also excludes teachers' own personal "My AI Tutor"
-    profiles (see tenancy.get_or_create_linked_student) — those aren't
-    real students and shouldn't appear in any student-facing list. And
-    excludes students whose data-deletion request has been fulfilled (see
-    app.services.deletion) — that row is kept (anonymized) only for the
-    credit_events audit trail, not to be shown as a live student.
+    another school's. "org_admin" sees across every centre under their own
+    organization_id (e.g. a government programme spanning many schools) —
+    see the Organization model. Only "super_admin" (Qlass's own staff) sees
+    across every school on the whole platform. Also excludes teachers' own
+    personal "My AI Tutor" profiles (see tenancy.get_or_create_linked_student)
+    — those aren't real students and shouldn't appear in any student-facing
+    list. And excludes students whose data-deletion request has been
+    fulfilled (see app.services.deletion) — that row is kept (anonymized)
+    only for the credit_events audit trail, not to be shown as a live student.
     """
     query = db.query(Student).filter(Student.is_staff_profile.is_(False), Student.is_deleted.is_(False))
-    if teacher.role != "super_admin":
-        query = query.filter(Student.centre_id == teacher.centre_id)
-    return query
+    if teacher.role == "super_admin":
+        return query
+    if teacher.role == "org_admin":
+        return query.filter(Student.centre_id.in_(_org_centre_ids(db, teacher.organization_id)))
+    return query.filter(Student.centre_id == teacher.centre_id)
+
+
+def _require_school_management_access(teacher: Teacher, centre: Centre) -> None:
+    """
+    Shared gate for school-level bulk actions (trial grants, pilot launch)
+    that used to be super_admin-only — an org_admin may perform the same
+    actions, but only for a school inside their own organization, never an
+    unrelated school on the platform.
+    """
+    if teacher.role == "super_admin":
+        return
+    if teacher.role == "org_admin" and centre.organization_id == teacher.organization_id:
+        return
+    raise HTTPException(status_code=403, detail="You don't have management access to this school")
 
 
 def _get_scoped_student_or_404(db: Session, teacher: Teacher, student_id: int) -> Student:
@@ -206,7 +244,7 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
 def me(teacher: Teacher = Depends(get_current_teacher)):
     return {
         "id": teacher.id, "name": teacher.name, "role": teacher.role, "phone": teacher.phone,
-        "photo_url": teacher.photo_url,
+        "photo_url": teacher.photo_url, "centre_id": teacher.centre_id, "organization_id": teacher.organization_id,
     }
 
 
@@ -226,7 +264,8 @@ def create_student(
     body: StudentCreateRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     student = Student(
-        name=body.name, phone=body.phone, class_=body.class_, board=body.board, school=body.school,
+        name=body.name, phone=body.phone, class_=body.class_,
+        board=body.board or tenancy.default_board_for_centre(db, teacher.centre_id), school=body.school,
         features=dict(DEFAULT_FEATURES), centre_id=teacher.centre_id,
     )
     db.add(student)
@@ -236,34 +275,109 @@ def create_student(
     return _student_to_dict(db, student)
 
 
-@router.post("/admin/students/bulk-upload")
-async def bulk_upload_students(
-    file: UploadFile = File(...),
-    features: str = Form(...),  # JSON-encoded dict, e.g. {"voice": true, "ocr": false, ...}
-    db: Session = Depends(get_db),
-    teacher: Teacher = Depends(get_current_teacher),
+async def _rows_from_roster_upload(file: UploadFile, extract_rows_fn, db: Session, bill_centre_id: int | None) -> list[dict]:
+    """
+    Turns an uploaded file into row dicts (string keys like name/phone/...)
+    regardless of source format — a clean CSV parses directly; a roster
+    photo or PDF/Word file goes through OCR/document-text extraction and
+    then an LLM extraction pass (see app.services.roster_extraction).
+
+    Always returns a PREVIEW only, never writes anything — OCR/LLM
+    extraction from a photo or scanned document is not reliable enough to
+    create real accounts unattended; a human must review (and can correct)
+    these rows before the separate .../confirm endpoint actually acts on
+    them.
+    """
+    content_type = (file.content_type or "").lower()
+    filename = (file.filename or "").lower()
+    raw_bytes = await file.read()
+
+    if filename.endswith(".csv") or content_type in ("text/csv", "application/vnd.ms-excel"):
+        reader = csv.DictReader(io.StringIO(raw_bytes.decode("utf-8-sig")))
+        reader.fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
+        return [dict(row) for row in reader]
+
+    if content_type.startswith("image/"):
+        source_text = await extract_text_from_image(raw_bytes)
+    elif filename.endswith((".pdf", ".docx")):
+        source_text = extract_text_from_document(raw_bytes, filename)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type — use a CSV, image, PDF, or Word file")
+
+    if not source_text:
+        raise HTTPException(status_code=400, detail="Couldn't read any text from that file — try a clearer photo/scan")
+
+    rows, llm_result = await extract_rows_fn(source_text)
+    if bill_centre_id is not None:
+        school_billing.record_claude_usage(
+            db, bill_centre_id, "roster_extraction", llm_result.input_tokens, llm_result.output_tokens,
+        )
+    return rows
+
+
+@router.post("/admin/students/bulk-upload/preview")
+async def preview_student_bulk_upload(
+    file: UploadFile = File(...), centre_id: int | None = None,
+    db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
 ):
     """
-    CSV columns expected: name, phone, class, board, school (board/school
-    optional, class optional). The same feature-access selection is applied
-    to every student in the batch — for per-student feature differences,
-    upload separate batches or adjust individually afterward on the
-    student's detail page. Every created student is assigned to the
-    uploading teacher's own school (centre) and starts with trial credits.
+    Parses a CSV, or OCRs/extracts a roster photo, PDF, or Word file, into
+    row previews for the admin to review — and correct — before anything is
+    created. Expected fields per row: name, phone, class, board, school
+    (only name/phone are actually required to proceed). `centre_id` is
+    required for org_admin/super_admin (who have no single school of their
+    own — see _resolve_centre_for_write) and ignored for a school's own
+    admin, who always uploads into their own school.
     """
-    try:
-        selected_features = {**DEFAULT_FEATURES, **json.loads(features)}
-    except (json.JSONDecodeError, TypeError):
-        raise HTTPException(status_code=400, detail="Invalid features payload")
+    centre = _resolve_centre_for_write(db, teacher, centre_id)
+    rows = await _rows_from_roster_upload(file, extract_student_rows, db, centre.id)
+    return {"rows": rows}
 
-    raw = (await file.read()).decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(raw))
-    reader.fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
+
+class ConfirmStudentBulkUploadRequest(BaseModel):
+    rows: list[dict]
+    features: dict[str, bool] = {}
+    centre_id: int | None = None
+
+
+@router.post("/admin/students/bulk-upload/confirm")
+def confirm_student_bulk_upload(
+    body: ConfirmStudentBulkUploadRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Actually creates/updates students from previously-previewed (and
+    possibly hand-corrected) rows — see .../bulk-upload/preview. The same
+    feature-access selection is applied to every student in the batch —
+    for per-student feature differences, upload separate batches or adjust
+    individually afterward on the student's detail page. Every created
+    student is assigned to the resolved school (centre) and starts with
+    trial credits — resolved the same way as preview above, so org_admin/
+    super_admin must pass the same centre_id they previewed with instead of
+    silently orphaning students with no school at all (Student.centre_id is
+    nullable, so this previously failed silently rather than erroring). A
+    row's own `board` value always wins if present (e.g. a school with
+    mixed-board sections); otherwise a new student defaults to the school's
+    own known board (see tenancy.default_board_for_centre) instead of being
+    left blank.
+    """
+    centre = _resolve_centre_for_write(db, teacher, body.centre_id)
+    selected_features = {**DEFAULT_FEATURES, **body.features}
+    centre_default_board = tenancy.default_board_for_centre(db, centre.id)
+
+    # One query for every existing student this batch might touch, instead
+    # of one query per row — a few-hundred-row upload previously meant a
+    # few hundred round-trips to Postgres just to check for duplicates.
+    batch_phones = [str(row.get("phone") or "").strip() for row in body.rows]
+    existing_by_phone = {
+        s.phone: s
+        for s in db.query(Student).filter(Student.phone.in_(batch_phones), Student.centre_id == centre.id).all()
+    }
 
     created, updated, skipped = [], [], []
-    for row in reader:
-        name = (row.get("name") or "").strip()
-        phone = (row.get("phone") or "").strip()
+    new_students = []
+    for row in body.rows:
+        name = str(row.get("name") or "").strip()
+        phone = str(row.get("phone") or "").strip()
         if not name or not phone:
             skipped.append(row)
             continue
@@ -271,35 +385,43 @@ async def bulk_upload_students(
         # Scoped to the uploader's own school — matching by phone alone
         # would let one school's bulk upload silently overwrite another
         # school's student just by coincidentally listing the same number.
-        existing = (
-            db.query(Student)
-            .filter(Student.phone == phone, Student.centre_id == teacher.centre_id)
-            .first()
-        )
+        existing = existing_by_phone.get(phone)
         if existing:
             existing.features = {**(existing.features or {}), **selected_features}
             if row.get("class"):
-                existing.class_ = row["class"].strip()
+                existing.class_ = str(row["class"]).strip()
             if row.get("board"):
-                existing.board = row["board"].strip()
+                existing.board = str(row["board"]).strip()
             if row.get("school"):
-                existing.school = row["school"].strip()
+                existing.school = str(row["school"]).strip()
             updated.append(phone)
         else:
             new_student = Student(
                 name=name, phone=phone,
-                class_=(row.get("class") or "").strip() or None,
-                board=(row.get("board") or "").strip() or None,
-                school=(row.get("school") or "").strip() or None,
+                class_=str(row.get("class") or "").strip() or None,
+                board=str(row.get("board") or "").strip() or centre_default_board,
+                school=str(row.get("school") or "").strip() or None,
                 features=selected_features,
-                centre_id=teacher.centre_id,
+                centre_id=centre.id,
             )
             db.add(new_student)
-            db.commit()
-            db.refresh(new_student)
-            cost_tracker.add_trial_credits(db, new_student.id)
+            new_students.append(new_student)
+            # So the SAME phone appearing again later in this batch updates
+            # this just-created row instead of creating a second duplicate
+            # profile for it.
+            existing_by_phone[phone] = new_student
             created.append(phone)
 
+    # Flush (not commit) so every new student gets its auto-generated id
+    # without ending the transaction yet, saving N-1 round-trips on the
+    # student inserts themselves. cost_tracker.add_trial_credits still
+    # commits once per student internally (shared helper used everywhere
+    # else in this codebase as a simple, immediately-committed credit
+    # grant) — not worth changing that shared behavior just for this one
+    # caller, so this part of the batch still isn't fully single-commit.
+    db.flush()
+    for new_student in new_students:
+        cost_tracker.add_trial_credits(db, new_student.id)
     db.commit()
     return {"created": created, "updated": updated, "skipped": skipped}
 
@@ -313,12 +435,23 @@ def update_student(
 
     if body.name is not None:
         student.name = body.name
+    if body.phone is not None:
+        # Never blanked out — Student.phone is how every WhatsApp message
+        # gets matched back to this profile (see app.routers.whatsapp),
+        # so an empty value here would silently orphan the student from
+        # their own conversation history the next time they message.
+        phone = body.phone.strip()
+        if not phone:
+            raise HTTPException(status_code=400, detail="phone cannot be empty")
+        student.phone = phone
     if body.class_ is not None:
         student.class_ = body.class_
     if body.board is not None:
         student.board = body.board
     if body.school is not None:
         student.school = body.school
+    if body.gender is not None:
+        student.gender = body.gender or None
     if body.focus_topic is not None:
         student.focus_topic = body.focus_topic
     if body.features is not None:
@@ -554,18 +687,19 @@ def activate_school_trial_subscriptions(
     Grants a free trial of the unlimited plan to a hand-picked set of
     students/teachers at one school in a single call — the sales-side
     counterpart to a school negotiating trial access for a subset of its
-    people before committing to paying for everyone. Super_admin-only, and
-    always a trial (see _activate_unlimited) — no payment_reference, and
-    tagged so it correctly does NOT count as an independent payment for
-    churn-gating purposes.
+    people before committing to paying for everyone. Restricted to
+    super_admin (Qlass staff) or an org_admin managing this school's
+    organization (see _require_school_management_access) — always a trial
+    (see _activate_unlimited) — no payment_reference, and tagged so it
+    correctly does NOT count as an independent payment for churn-gating
+    purposes.
     """
-    if teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can grant trial subscriptions")
     if not body.student_ids and not body.teacher_ids:
         raise HTTPException(status_code=400, detail="Select at least one student or teacher")
     centre = db.query(Centre).filter(Centre.id == centre_id).first()
     if centre is None:
         raise HTTPException(status_code=404, detail="School not found")
+    _require_school_management_access(teacher, centre)
 
     activated = []
     for student in (
@@ -604,14 +738,17 @@ def launch_school_pilot(
     centre_id: int, body: LaunchSchoolPilotRequest, db: Session = Depends(get_db),
     teacher: Teacher = Depends(get_current_teacher),
 ):
-    """Fund a bounded, no-charge school pilot with student wallet credits."""
-    if teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can launch school pilots")
+    """
+    Fund a bounded, no-charge school pilot with student wallet credits.
+    Restricted to super_admin (Qlass staff) or an org_admin managing this
+    school's organization — see _require_school_management_access.
+    """
     if not body.student_ids:
         raise HTTPException(status_code=400, detail="Select at least one student for the pilot")
     centre = db.query(Centre).filter(Centre.id == centre_id).first()
     if centre is None:
         raise HTTPException(status_code=404, detail="School not found")
+    _require_school_management_access(teacher, centre)
     try:
         students = launch_pilot(
             db, centre, body.student_ids, body.credits_per_student, body.duration_days,
@@ -650,10 +787,12 @@ def list_teachers(
     db: Session = Depends(get_db),
     teacher: Teacher = Depends(get_current_teacher),
 ):
-    if teacher.role not in ("admin", "super_admin"):
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can view teacher accounts")
     query = db.query(Teacher)
-    if teacher.role != "super_admin":
+    if teacher.role == "org_admin":
+        query = query.filter(Teacher.centre_id.in_(_org_centre_ids(db, teacher.organization_id)))
+    elif teacher.role != "super_admin":
         query = query.filter(Teacher.centre_id == teacher.centre_id)
     return [_teacher_to_dict(t) for t in query.order_by(Teacher.id).offset(offset).limit(limit).all()]
 
@@ -677,9 +816,12 @@ def create_teacher(
     Lets a school's own admin add teacher accounts for their school without
     needing CLI/database access — necessary now that schools can self-
     register (see /auth/register-school), since a non-technical school
-    admin has no other way to provision their staff's logins.
+    admin has no other way to provision their staff's logins. An org_admin
+    (e.g. a government programme spanning many schools) may add accounts
+    for any school within their own organization — covers roles like a
+    headmaster/vice-principal (both just "admin" at their own school).
     """
-    if teacher.role not in ("admin", "super_admin"):
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can add teacher accounts")
     if body.role not in ("teacher", "admin"):
         raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'admin'")
@@ -692,6 +834,10 @@ def create_teacher(
         if not body.centre_id:
             raise HTTPException(status_code=400, detail="centre_id is required")
         centre_id = body.centre_id
+        if teacher.role == "org_admin":
+            centre = db.query(Centre).filter(Centre.id == centre_id).first()
+            if centre is None or centre.organization_id != teacher.organization_id:
+                raise HTTPException(status_code=403, detail="That school is not part of your organization")
 
     new_teacher = Teacher(
         name=body.name, phone=body.phone, password_hash=hash_password(body.password),
@@ -703,30 +849,130 @@ def create_teacher(
     return _teacher_to_dict(new_teacher)
 
 
+@router.post("/admin/teachers/bulk-upload/preview")
+async def preview_teacher_bulk_upload(
+    file: UploadFile = File(...), db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Parses a CSV, or OCRs/extracts a staff-list photo, PDF, or Word file,
+    into row previews for the admin to review — and correct — before
+    anything is created. Expected fields per row: name, phone, role
+    (teacher/admin — a headmaster/principal/vice-principal is just
+    "admin" for their own school), centre_id (required for org_admin/
+    super_admin, since a batch can span multiple schools; ignored for a
+    plain school admin). A photo/scan can never contain real passwords, so
+    those are always generated fresh at confirm time, not extracted here.
+    """
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can bulk-upload teacher accounts")
+    rows = await _rows_from_roster_upload(file, extract_teacher_rows, db, teacher.centre_id)
+    return {"rows": rows}
+
+
+class ConfirmTeacherBulkUploadRequest(BaseModel):
+    rows: list[dict]
+
+
+@router.post("/admin/teachers/bulk-upload/confirm")
+def confirm_teacher_bulk_upload(
+    body: ConfirmTeacherBulkUploadRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Actually creates teacher accounts from previously-previewed (and
+    possibly hand-corrected) rows — see .../bulk-upload/preview. A row's
+    own `password` wins if the admin filled one in during review;
+    otherwise a random temporary password is generated and returned so it
+    can be shared with that teacher (there is no other channel to deliver
+    it — this product has no teacher-facing signup email/SMS flow).
+    """
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can bulk-upload teacher accounts")
+
+    org_centre_ids = (
+        {row.id for row in _org_centre_ids(db, teacher.organization_id).all()}
+        if teacher.role == "org_admin" else None
+    )
+
+    # One query for every phone this batch might touch, instead of one
+    # query per row.
+    batch_phones = [str(row.get("phone") or "").strip() for row in body.rows]
+    existing_phones = {
+        t.phone for t in db.query(Teacher.phone).filter(Teacher.phone.in_(batch_phones)).all()
+    }
+
+    created, skipped, generated_passwords = [], [], {}
+    for row in body.rows:
+        name = str(row.get("name") or "").strip()
+        phone = str(row.get("phone") or "").strip()
+        role = str(row.get("role") or "teacher").strip().lower()
+        if not name or not phone or role not in ("teacher", "admin"):
+            skipped.append(row)
+            continue
+        if phone in existing_phones:
+            # Also catches the SAME phone appearing twice within this batch
+            # — the phone column is UNIQUE, so without this check a
+            # duplicate row would only surface as an IntegrityError on the
+            # final commit, rolling back every other row in the batch too.
+            skipped.append(row)
+            continue
+        existing_phones.add(phone)
+
+        if teacher.role == "admin":
+            centre_id = teacher.centre_id
+        else:
+            row_centre_id = str(row.get("centre_id") or "").strip()
+            if not row_centre_id or not row_centre_id.isdigit():
+                skipped.append(row)
+                continue
+            centre_id = int(row_centre_id)
+            if teacher.role == "org_admin" and centre_id not in org_centre_ids:
+                skipped.append(row)
+                continue
+
+        password = str(row.get("password") or "").strip()
+        if not password:
+            password = secrets.token_urlsafe(6)
+            generated_passwords[phone] = password
+
+        db.add(Teacher(name=name, phone=phone, password_hash=hash_password(password), role=role, centre_id=centre_id))
+        created.append(phone)
+    db.commit()
+    return {
+        "created_count": len(created), "created": created, "skipped_count": len(skipped),
+        "generated_passwords": generated_passwords,
+    }
+
+
 def _resolve_centre_for_read(db: Session, teacher: Teacher, centre_id: int | None) -> Centre:
     """
     Any signed-in teacher/admin can VIEW their own school's profile and
     credit balance (needed for the workbook generator to show remaining
     balance) — only WRITE actions (logo, manual credit grants) are
-    restricted further, see _resolve_centre_for_write below.
+    restricted further, see _resolve_centre_for_write below. org_admin may
+    view any school within their own organization (see the Organization
+    model), not just one fixed centre.
     """
-    target_id = teacher.centre_id if teacher.role != "super_admin" else centre_id
+    target_id = teacher.centre_id if teacher.role in ("teacher", "admin") else centre_id
     if not target_id:
         raise HTTPException(status_code=400, detail="centre_id is required")
     centre = db.query(Centre).filter(Centre.id == target_id).first()
     if not centre:
         raise HTTPException(status_code=404, detail="School not found")
+    if teacher.role == "org_admin" and centre.organization_id != teacher.organization_id:
+        raise HTTPException(status_code=403, detail="This school is not part of your organization")
     return centre
 
 
 def _resolve_centre_for_write(db: Session, teacher: Teacher, centre_id: int | None) -> Centre:
     """
-    A school's own admin always edits their own school; only super_admin
-    (Qlass staff, who has no centre of their own) may target a different
-    school, and must say which one via centre_id — mirrors the same pattern
-    used for admin-vs-super_admin teacher creation above.
+    A school's own admin always edits their own school; org_admin may edit
+    any school within their own organization; only super_admin (Qlass
+    staff, who has no centre of their own) may target a different school
+    outside any organization, and must say which one via centre_id —
+    mirrors the same pattern used for admin-vs-super_admin teacher
+    creation above.
     """
-    if teacher.role not in ("admin", "super_admin"):
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can manage the school profile")
     return _resolve_centre_for_read(db, teacher, centre_id)
 
@@ -738,8 +984,33 @@ def get_school(
     centre = _resolve_centre_for_read(db, teacher, centre_id)
     return {
         "id": centre.id, "name": centre.name, "city": centre.city, "logo_url": centre.logo_url,
-        "credit_balance": school_billing.get_balance(db, centre.id),
+        "board": centre.board, "credit_balance": school_billing.get_balance(db, centre.id),
     }
+
+
+class UpdateSchoolProfileRequest(BaseModel):
+    centre_id: int | None = None
+    name: str | None = None
+    city: str | None = None
+    # The school's own board (e.g. "CBSE", "BSEB") — new students under this
+    # school default to this instead of being asked individually (see
+    # tenancy.default_board_for_centre).
+    board: str | None = None
+
+
+@router.patch("/admin/school")
+def update_school_profile(
+    body: UpdateSchoolProfileRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    centre = _resolve_centre_for_write(db, teacher, body.centre_id)
+    if body.name is not None:
+        centre.name = body.name
+    if body.city is not None:
+        centre.city = body.city
+    if body.board is not None:
+        centre.board = body.board
+    db.commit()
+    return {"id": centre.id, "name": centre.name, "city": centre.city, "board": centre.board}
 
 
 class AddSchoolCreditsRequest(BaseModel):
@@ -863,19 +1134,22 @@ async def generate_workbook(
 
 @router.get("/admin/curriculum/chapters")
 def list_curriculum_chapters(
-    class_: str, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
+    class_: str, board: str = "CBSE", db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     """
-    Chapters for the seeded NCERT curriculum (see scripts/seed_ncert_curriculum.py),
-    grouped by subject — lets a teacher assign a quiz tied to an actual
-    chapter instead of a free-text topic prone to typos/ambiguity.
-    Curriculum data isn't centre-scoped (it's the shared national syllabus),
-    so any authenticated teacher/admin can browse it.
+    Chapters for the seeded curriculum (see scripts/seed_ncert_curriculum.py
+    for CBSE/NCERT, scripts/seed_bseb_curriculum.py for BSEB), grouped by
+    subject — lets a teacher assign a quiz tied to an actual chapter
+    instead of a free-text topic prone to typos/ambiguity. `board` defaults
+    to CBSE (the original, larger seeded curriculum) for backward
+    compatibility with existing callers that don't pass it yet. Curriculum
+    data isn't centre-scoped (it's the shared syllabus for that board), so
+    any authenticated teacher/admin can browse it.
     """
     rows = (
         db.query(Chapter, Subject)
         .join(Subject, Chapter.subject_id == Subject.id)
-        .filter(Subject.class_ == class_)
+        .filter(Subject.class_ == class_, Subject.board == board)
         .order_by(Subject.name, Chapter.chapter_no)
         .all()
     )
@@ -940,7 +1214,13 @@ async def assign_quiz(
     if not questions_data:
         raise HTTPException(status_code=502, detail="Couldn't generate questions for that topic — try again")
 
+    # One commit for the whole batch instead of three per student (quiz,
+    # questions, active_quiz_id) — a class-sized assignment previously
+    # meant up to 3x the number of students in round-trips to Postgres.
+    # db.flush() (not commit) gets each quiz's auto-generated id without
+    # ending the transaction, so all of it lands atomically at the end.
     assigned, skipped = [], []
+    pending_notifications = []
     for student in targets:
         if student.active_quiz_id:
             skipped.append(student.name)  # already mid-quiz — don't interrupt it with a new one
@@ -950,22 +1230,23 @@ async def assign_quiz(
             chapter_id=chapter.id if chapter else None,
         )
         db.add(quiz)
-        db.commit()
-        db.refresh(quiz)
+        db.flush()
         for q in questions_data:
             db.add(Question(
                 quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
                 question_text=q["question"], correct_answer=q["answer"],
             ))
-        db.commit()
         student.active_quiz_id = quiz.id
-        db.commit()
-        intro = (
-            f"📝 Your teacher assigned a {len(questions_data)}-question quiz on *{topic}*!\n\n"
-            f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
-        )
-        await send_whatsapp_message(student.phone, intro)
+        pending_notifications.append(student.phone)
         assigned.append(student.name)
+    db.commit()
+
+    intro = (
+        f"📝 Your teacher assigned a {len(questions_data)}-question quiz on *{topic}*!\n\n"
+        f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
+    )
+    for phone in pending_notifications:
+        await send_whatsapp_message(phone, intro)
 
     return {"assigned_count": len(assigned), "assigned": assigned, "skipped_already_in_quiz": skipped}
 
@@ -1044,7 +1325,10 @@ def verify_school_payment(
 
 
 class PresentationGenerateRequest(BaseModel):
-    topic: str
+    topic: str | None = None
+    chapter_id: int | None = None
+    class_: str | None = None
+    board: str | None = None
     num_cards: int = 8
 
 
@@ -1057,6 +1341,12 @@ async def generate_presentation(
     endpoint's docstring. Requires a real GAMMA_API_KEY in .env (Gamma's
     Generate API is a paid beta); until then this 503s cleanly, matching
     the Razorpay "not configured yet" pattern.
+
+    class_/board (and chapter_id, which resolves to a subject + chapter
+    name) give Gamma real curriculum context instead of a bare topic string
+    — without this, a request like "Real Numbers" produces a generic deck
+    with no sense of grade level or board-specific depth/terminology,
+    exactly like the same gap AssignQuiz's chapter picker exists to close.
     """
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to generate a presentation")
@@ -1065,7 +1355,24 @@ async def generate_presentation(
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for presentation generation")
 
-    generation_id = await create_presentation_generation(body.topic, body.num_cards)
+    topic = body.topic
+    if body.chapter_id:
+        chapter = db.query(Chapter).filter(Chapter.id == body.chapter_id).first()
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+        subject = db.query(Subject).filter(Subject.id == chapter.subject_id).first()
+        topic = f"{subject.name if subject else ''}: {chapter.name}".strip(": ")
+    if not topic:
+        raise HTTPException(status_code=400, detail="topic or chapter_id is required")
+
+    context_parts = [topic]
+    if body.class_:
+        context_parts.append(f"for Class {body.class_}")
+    if body.board:
+        context_parts.append(f"({body.board} curriculum)")
+    input_text = " ".join(context_parts)
+
+    generation_id = await create_presentation_generation(input_text, body.num_cards)
     return {"generation_id": generation_id}
 
 
@@ -1205,10 +1512,13 @@ def get_my_tutor_history(db: Session = Depends(get_db), teacher: Teacher = Depen
     rows = (
         db.query(ChatHistory)
         .filter(ChatHistory.student_id == student.id)
-        .order_by(ChatHistory.created_at.asc())
+        .order_by(ChatHistory.created_at.desc())
+        .limit(MY_TUTOR_CHAT_HISTORY_LIMIT)
         .all()
     )
-    return [{"role": r.role, "message": r.message, "created_at": r.created_at.isoformat()} for r in rows]
+    return [
+        {"role": r.role, "message": r.message, "created_at": r.created_at.isoformat()} for r in reversed(rows)
+    ]
 
 
 class MyTutorSendRequest(BaseModel):
@@ -1268,28 +1578,41 @@ def activate_teacher_tutor_subscription(
 
 
 @router.get("/admin/analytics")
-def get_analytics(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
-    if teacher.role not in ("admin", "super_admin"):
+def get_analytics(
+    centre_id: int | None = None, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Analytics is per-school, so org_admin/super_admin (who each span
+    multiple schools) must say which one via centre_id — same resolution
+    as the school profile/statement endpoints. A school's own admin always
+    sees their own school regardless of what's passed.
+    """
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can view school analytics")
-    if teacher.role == "super_admin" and teacher.centre_id is None:
-        raise HTTPException(status_code=400, detail="Sign in as a school's own admin to view analytics")
-    student_ids = [s.id for s in _scoped_students(db, teacher).all()]
-    return get_school_analytics(db, student_ids, teacher.centre_id)
+    centre = _resolve_centre_for_read(db, teacher, centre_id)
+    student_ids = [
+        row.id for row in _scoped_students(db, teacher).filter(Student.centre_id == centre.id).with_entities(Student.id).all()
+    ]
+    return get_school_analytics(db, student_ids, centre.id)
 
 
 @router.get("/admin/school/statement")
 def get_school_statement(
-    year: int, month: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+    year: int, month: int, centre_id: int | None = None,
+    db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
 ):
     """
     Monthly billing statement PDF for the school's own credit_events ledger
     (teacher-tool spend, not per-student wallets — see school_billing).
+    centre_id is required for org_admin/super_admin, same resolution as
+    analytics/school-profile — previously this used teacher.centre_id
+    directly, which is None for those roles and crashed rather than erroring
+    cleanly (Centre.id == None matches no row, so centre came back None and
+    generate_school_statement_pdf blew up on centre.name).
     """
-    if teacher.role == "super_admin":
-        raise HTTPException(status_code=400, detail="Sign in as a school's own admin to download its statement")
     if not (1 <= month <= 12):
         raise HTTPException(status_code=400, detail="month must be 1-12")
-    centre = db.query(Centre).filter(Centre.id == teacher.centre_id).first()
+    centre = _resolve_centre_for_read(db, teacher, centre_id)
     pdf_bytes = generate_school_statement_pdf(db, centre, year, month)
     filename = f"{centre.name.replace(' ', '_')}_statement_{year}_{month:02d}.pdf"
     return StreamingResponse(
@@ -1303,12 +1626,21 @@ def get_deletion_requests(db: Session = Depends(get_db), teacher: Teacher = Depe
     """
     Pending data-erasure requests a parent submitted via the parent app
     (see /parent-app/request-deletion) — a school's own admin sees their
-    school's requests, super_admin sees all, matching the usual scoping.
+    school's requests, org_admin sees every school in their own
+    organization, super_admin sees all, matching the usual scoping (see
+    _scoped_students — used here instead of list_pending_deletion_requests's
+    own single-centre_id filter, since that would need a None centre_id to
+    mean "no filter" for org_admin too, which would incorrectly also
+    surface every OTHER organization's/school's pending requests).
     """
-    if teacher.role not in ("admin", "super_admin"):
+    if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can view deletion requests")
-    centre_id = None if teacher.role == "super_admin" else teacher.centre_id
-    students = list_pending_deletion_requests(db, centre_id)
+    students = (
+        _scoped_students(db, teacher)
+        .filter(Student.deletion_requested_at.isnot(None))
+        .order_by(Student.deletion_requested_at.asc())
+        .all()
+    )
     return [
         {"id": s.id, "name": s.name, "phone": s.phone, "requested_at": s.deletion_requested_at}
         for s in students
@@ -1336,9 +1668,11 @@ def fulfill_deletion(student_id: int, db: Session = Depends(get_db), teacher: Te
 
 @router.get("/admin/schools")
 def get_schools(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
-    if teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can view the schools/sales pipeline")
-    return get_schools_overview(db)
+    if teacher.role == "super_admin":
+        return get_schools_overview(db)
+    if teacher.role == "org_admin":
+        return get_schools_overview(db, organization_id=teacher.organization_id)
+    raise HTTPException(status_code=403, detail="Only Qlass staff or an organization admin can view the schools/sales pipeline")
 
 
 class UpdateSalesInfoRequest(BaseModel):
@@ -1352,13 +1686,12 @@ def update_school_sales_info(
     centre_id: int, body: UpdateSalesInfoRequest, db: Session = Depends(get_db),
     teacher: Teacher = Depends(get_current_teacher),
 ):
-    if teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can edit the schools/sales pipeline")
     if body.sales_status is not None and body.sales_status not in ("prospect", "trial", "active", "churned"):
         raise HTTPException(status_code=400, detail="sales_status must be prospect, trial, active, or churned")
     centre = db.query(Centre).filter(Centre.id == centre_id).first()
     if centre is None:
         raise HTTPException(status_code=404, detail="School not found")
+    _require_school_management_access(teacher, centre)
     if body.sales_status is not None:
         centre.sales_status = body.sales_status
     if body.sales_notes is not None:

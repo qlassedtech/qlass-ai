@@ -11,6 +11,10 @@
   --accent-light: #eef0fd;
   --accent-lighter: #f7f8fe;
   --error: #d33;
+  /* A translucent wash of --error, for a whole-row highlight (e.g. a
+     churn-risk flag) — a separate token rather than computing it inline
+     per-use, so it still inverts correctly in dark mode. */
+  --error-tint: rgba(220, 38, 38, 0.08);
   --success: #17874a;
   --shadow-sm: 0 1px 2px rgba(20, 23, 60, 0.04);
   --shadow: 0 2px 6px rgba(20, 23, 60, 0.05), 0 12px 28px rgba(20, 23, 60, 0.07);
@@ -43,6 +47,7 @@
     --accent-light: #232853;
     --accent-lighter: #1a1e38;
     --error: #ff7a7a;
+    --error-tint: rgba(255, 122, 122, 0.12);
     --success: #3ecf94;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
     --shadow: 0 2px 6px rgba(0, 0, 0, 0.35), 0 12px 28px rgba(0, 0, 0, 0.4);
@@ -134,7 +139,12 @@ button:disabled {
   box-shadow: none;
 }
 
-input {
+/* select/textarea share input's exact styling — without this, a <select>
+   falls back to the browser's default UI font/size (not "Plus Jakarta
+   Sans" 14px), which is what made dropdowns look visibly inconsistent
+   with every text field around them, especially in newer forms that
+   lean heavily on <select> (school pickers, class/board filters). */
+input, select, textarea {
   padding: 10px 13px;
   border: 1.5px solid var(--border);
   border-radius: 10px;
@@ -145,11 +155,11 @@ input {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-input::placeholder {
-  color: #a8abc2;
+input::placeholder, textarea::placeholder {
+  color: var(--text-muted);
 }
 
-input:focus {
+input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 4px var(--accent-light);
@@ -375,7 +385,7 @@ label {
 .nav-group-label {
   font-size: 10.5px;
   font-weight: 700;
-  color: #a8abc2;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   padding: 0 14px 6px;

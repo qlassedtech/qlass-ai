@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -13,15 +13,20 @@ from app.services import school_billing
 CHURN_RISK_INACTIVE_DAYS = 21
 
 
-def get_schools_overview(db: Session) -> list[dict]:
+def get_schools_overview(db: Session, organization_id: int | None = None) -> list[dict]:
     """
-    Super_admin-only sales/pipeline view across every school — student
-    count, school credit balance, and last real student activity, so Qlass
-    staff can see at a glance which "active" accounts have gone quiet
-    (see CHURN_RISK_INACTIVE_DAYS) without cross-referencing several pages.
+    Sales/pipeline view across every school — student count, school credit
+    balance, and last real student activity, so staff can see at a glance
+    which "active" accounts have gone quiet (see CHURN_RISK_INACTIVE_DAYS)
+    without cross-referencing several pages. Used by super_admin (Qlass
+    staff, sees every school) and org_admin (sees only their own
+    organization's schools — pass organization_id to scope it).
     """
     now = datetime.now(timezone.utc)
-    centres = db.query(Centre).order_by(Centre.id).all()
+    query = db.query(Centre)
+    if organization_id is not None:
+        query = query.filter(Centre.organization_id == organization_id)
+    centres = query.order_by(Centre.id).all()
 
     student_counts = dict(
         db.query(Student.centre_id, func.count(Student.id))

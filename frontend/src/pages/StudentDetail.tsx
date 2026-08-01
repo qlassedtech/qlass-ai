@@ -3,15 +3,38 @@ import { useParams, Link } from "react-router-dom";
 import { api, absoluteUrl, type Student, type ProgressResponse, type Teacher } from "../api";
 
 const FEATURE_KEYS = ["voice", "ocr", "image_generation", "documents", "youtube_videos"] as const;
+const CLASS_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+// Matches the boards the WhatsApp onboarding flow itself asks about, plus
+// BSEB (the other board this product has real seeded curriculum for) —
+// see app.services.progress_report._BOARD_TO_SUBJECT_BOARD on the backend.
+const BOARD_OPTIONS = ["CBSE", "ICSE", "BSEB", "State Board"];
+const GENDER_OPTIONS = [
+  { value: "", label: "Not set" },
+  { value: "male", label: "Male" },
+  { value: "female", label: "Female" },
+];
+
+// A select must include the CURRENT value as an option even when it isn't
+// one of the canonical choices above — otherwise picking any option would
+// silently discard legacy/free-typed data (e.g. an old row saved as
+// "Bihar Board" before this became a fixed dropdown) the moment the form
+// re-renders, since the browser would just fall back to the first option.
+function selectableOptions(current: string, canonical: string[]): string[] {
+  return current && !canonical.includes(current) ? [current, ...canonical] : canonical;
+}
 
 export default function StudentDetail() {
   const { id } = useParams();
   const studentId = Number(id);
   const [student, setStudent] = useState<Student | null>(null);
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [focusTopic, setFocusTopic] = useState("");
   const [classNum, setClassNum] = useState("");
   const [board, setBoard] = useState("");
+  const [schoolName, setSchoolName] = useState("");
+  const [gender, setGender] = useState("");
   const [parentPhone, setParentPhone] = useState("");
   const [parentName, setParentName] = useState("");
   const [digestPhone, setDigestPhone] = useState("");
@@ -25,6 +48,8 @@ export default function StudentDetail() {
   const [subPaymentRef, setSubPaymentRef] = useState("");
   const [subStatus, setSubStatus] = useState<string | null>(null);
   const [subLoading, setSubLoading] = useState(false);
+  const [editingContact, setEditingContact] = useState(false);
+  const [contactStatus, setContactStatus] = useState<string | null>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
@@ -32,9 +57,13 @@ export default function StudentDetail() {
       const found = all.find((s) => s.id === studentId) || null;
       setStudent(found);
       if (found) {
+        setName(found.name || "");
+        setPhone(found.phone || "");
         setFocusTopic(found.focus_topic || "");
         setClassNum(found.class || "");
         setBoard(found.board || "");
+        setSchoolName(found.school || "");
+        setGender(found.gender || "");
         setParentPhone(found.parent_phone || "");
         setParentName(found.parent_name || "");
       }
@@ -83,11 +112,34 @@ export default function StudentDetail() {
     }
   }
 
+  async function handleSaveContact() {
+    setContactStatus(null);
+    if (!name.trim() || !phone.trim()) {
+      setContactStatus("Name and WhatsApp number can't be blank");
+      return;
+    }
+    try {
+      await api.updateStudent(studentId, { name: name.trim(), phone: phone.trim() });
+      setEditingContact(false);
+      load();
+    } catch (err) {
+      setContactStatus(err instanceof Error ? err.message : "Failed to save");
+    }
+  }
+
+  function handleCancelContact() {
+    setName(student?.name || "");
+    setPhone(student?.phone || "");
+    setContactStatus(null);
+    setEditingContact(false);
+  }
+
   async function handleSave() {
     setStatus(null);
     try {
       await api.updateStudent(studentId, {
-        class_: classNum, board, focus_topic: focusTopic,
+        class_: classNum, board, school: schoolName || undefined, gender: gender || undefined,
+        focus_topic: focusTopic,
         parent_phone: parentPhone || undefined, parent_name: parentName || undefined,
       });
       setStatus("Saved!");
@@ -181,10 +233,35 @@ export default function StudentDetail() {
             <span className="photo-placeholder">{student.name.charAt(0)}</span>
           )}
         </div>
-        <div>
-          <h1 style={{ margin: 0 }}>{student.name}</h1>
-          <p className="muted" style={{ margin: 0 }}>{student.phone}</p>
-        </div>
+        {editingContact ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Student name" style={{ fontSize: 18, fontWeight: 700 }} />
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="91XXXXXXXXXX" style={{ width: 220 }} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={handleSaveContact}>
+                Save
+              </button>
+              <button type="button" onClick={handleCancelContact}>
+                Cancel
+              </button>
+            </div>
+            {contactStatus && <p className="error" style={{ margin: 0 }}>{contactStatus}</p>}
+          </div>
+        ) : (
+          <div>
+            <h1 style={{ margin: 0 }}>{student.name}</h1>
+            <p className="muted" style={{ margin: 0 }}>
+              {student.phone}{" "}
+              <button
+                type="button"
+                onClick={() => setEditingContact(true)}
+                style={{ padding: "2px 8px", fontSize: 12, marginLeft: 4 }}
+              >
+                Edit
+              </button>
+            </p>
+          </div>
+        )}
       </div>
       <input
         ref={photoInputRef}
@@ -263,12 +340,43 @@ export default function StudentDetail() {
           <h3>Learner Profile</h3>
           <label>
             Class
-            <input value={classNum} onChange={(e) => setClassNum(e.target.value)} />
+            <select value={classNum} onChange={(e) => setClassNum(e.target.value)}>
+              <option value="">Not set</option>
+              {selectableOptions(classNum, CLASS_OPTIONS).map((c) => (
+                <option key={c} value={c}>
+                  Class {c}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             Board
-            <input value={board} onChange={(e) => setBoard(e.target.value)} />
+            <select value={board} onChange={(e) => setBoard(e.target.value)}>
+              <option value="">Not set</option>
+              {selectableOptions(board, BOARD_OPTIONS).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
           </label>
+          <label>
+            School
+            <input value={schoolName} onChange={(e) => setSchoolName(e.target.value)} placeholder="e.g. Patna High School" />
+          </label>
+          <label>
+            Gender
+            <select value={gender} onChange={(e) => setGender(e.target.value)}>
+              {GENDER_OPTIONS.map((g) => (
+                <option key={g.value} value={g.value}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="muted" style={{ marginTop: -10, fontSize: 12 }}>
+            Only used to pick an opposite-gender voice for spoken replies — auto-detected from a voice note if never set, and safe to correct here if it's wrong.
+          </p>
           <label>
             Focus topic (teacher-assigned)
             <input value={focusTopic} onChange={(e) => setFocusTopic(e.target.value)} placeholder="e.g. quadratic equations" />
@@ -315,7 +423,7 @@ export default function StudentDetail() {
               )}
               {progress.coverage && (
                 <p>
-                  Syllabus coverage: {progress.coverage.covered.length}/{progress.coverage.total} NCERT chapters
+                  Syllabus coverage: {progress.coverage.covered.length}/{progress.coverage.total} chapters
                 </p>
               )}
               <p className="muted">

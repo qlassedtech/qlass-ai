@@ -15,6 +15,12 @@ from app.services.whatsapp_client import send_whatsapp_message
 
 router = APIRouter()
 
+# A long-running student could otherwise accumulate years of chat history —
+# returning every row unbounded on every page load doesn't scale (grows the
+# response and query cost indefinitely). Recent-first is what a "history"
+# screen actually needs; a proper paginated "load more" is future work.
+CHAT_HISTORY_LIMIT = 200
+
 
 def student_summary(db: Session, student: Student) -> dict:
     return {
@@ -111,10 +117,13 @@ def get_chat_history(db: Session = Depends(get_db), student: Student = Depends(g
     rows = (
         db.query(ChatHistory)
         .filter(ChatHistory.student_id == student.id)
-        .order_by(ChatHistory.created_at.asc())
+        .order_by(ChatHistory.created_at.desc())
+        .limit(CHAT_HISTORY_LIMIT)
         .all()
     )
-    return [{"role": r.role, "message": r.message, "created_at": r.created_at.isoformat()} for r in rows]
+    return [
+        {"role": r.role, "message": r.message, "created_at": r.created_at.isoformat()} for r in reversed(rows)
+    ]
 
 
 class SendMessageRequest(BaseModel):
@@ -130,6 +139,15 @@ async def send_message(
             status_code=402,
             detail="Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
                    "or top up your own AI credits directly",
+        )
+    # Mirrors the same gate whatsapp.py enforces — without it, a student
+    # could keep chatting for free through the web app indefinitely past
+    # their school's pilot expiry, since this endpoint never checked it.
+    if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
+        raise HTTPException(
+            status_code=402,
+            detail="Your school's Qlass pilot has ended. Ask your school to continue the programme, "
+                   "or top up your own AI credits to keep learning!",
         )
     if not cost_tracker.has_credits(db, student.id):
         raise HTTPException(status_code=402, detail="You're out of AI credits — ask your school to top up your account")

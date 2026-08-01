@@ -135,11 +135,11 @@ export default function Schools() {
           </thead>
           <tbody>
             {schools.map((s) => (
-              <tr key={s.id} style={s.is_churn_risk ? { background: "rgba(220, 38, 38, 0.08)" } : undefined}>
+              <tr key={s.id} style={s.is_churn_risk ? { background: "var(--error-tint)" } : undefined}>
                 <td>
                   {s.name}
                   {s.is_churn_risk && (
-                    <span className="muted" style={{ display: "block", fontSize: 12, color: "#dc2626" }}>
+                    <span className="muted" style={{ display: "block", fontSize: 12, color: "var(--error)" }}>
                       ⚠ Churn risk — inactive {s.days_inactive ?? "many"} days
                     </span>
                   )}

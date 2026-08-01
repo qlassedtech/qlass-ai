@@ -56,6 +56,7 @@ def parse_track_reply(raw_reply: str) -> dict:
             "off_level_class": None,
             "video_query": None,
             "solved_directly": None,
+            "class_confirm": None,
         }
 
     block = match.group(1)
@@ -69,6 +70,7 @@ def parse_track_reply(raw_reply: str) -> dict:
     off_level = _track_field(block, "off_level") == "true"
     wants_video = _track_field(block, "video") == "true"
     solved = _track_field(block, "solved")
+    class_confirm_raw = _track_field(block, "class_confirm")
 
     image_prompt = None
     image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
@@ -102,6 +104,7 @@ def parse_track_reply(raw_reply: str) -> dict:
         "off_level_class": off_level_class,
         "video_query": video_query,
         "solved_directly": {"true": True, "false": False, "na": None}.get(solved),
+        "class_confirm": {"yes": True, "no": False, "na": None}.get(class_confirm_raw),
     }
 
 
@@ -117,6 +120,7 @@ class TutorAgent(BaseAgent):
         voice_enabled: bool = False,
         video_enabled: bool = False,
         active_document_text: str | None = None,
+        pending_class_confirm: str | None = None,
     ) -> str:
         profile = (
             f"You are the Qlass AI Tutor, speaking with a student in class "
@@ -196,7 +200,7 @@ class TutorAgent(BaseAgent):
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
             "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false> "
-            "solved=<true|false|na>]]\n"
+            "solved=<true|false|na> class_confirm=<yes|no|na>]]\n"
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -211,6 +215,20 @@ class TutorAgent(BaseAgent):
             "for a teacher-facing report on how much a student leans on direct answers vs. working "
             "things out — never mention it or let it change your own behavior beyond the hint-not-solve "
             "rule already given.\n"
+            + (
+                f"- class_confirm: you (the system) already appended a question to your OWN previous "
+                f"reply asking whether to update this student's registered class to {pending_class_confirm} "
+                f"— set yes/no based on whether the student's CURRENT message answers that, even if it's "
+                f"mixed in with something else (e.g. \"12.. no\" is both an attempted answer to a maths "
+                f"question AND a decline — read the whole message for an actual yes/no signal about the "
+                f"class change specifically, don't just grab the first word). If yes/no, briefly and "
+                f"naturally acknowledge their decision as PART of your reply (e.g. \"Sure, I'll leave your "
+                f"class as is!\" or \"Got it, updated!\"), woven in naturally — don't ignore whatever else "
+                f"they asked; answer that too in the same reply. Set na only if their message doesn't "
+                f"address this at all — don't ask about it again yourself, just answer normally.\n"
+                if pending_class_confirm
+                else "- class_confirm: always na — there's no pending class-update question this turn.\n"
+            )
             + (
                 "- image: true ONLY if the student explicitly asked for a picture/diagram/drawing, OR "
                 "a diagram is genuinely necessary to explain this (e.g. labeled parts of a cell, a "
@@ -338,12 +356,13 @@ class TutorAgent(BaseAgent):
         voice_enabled: bool = False,
         video_enabled: bool = False,
         active_document_text: str | None = None,
+        pending_class_confirm: str | None = None,
     ) -> dict:
         # TODO Phase 6: replace [] with real RAG retrieval against document_chunks
         retrieved_chunks: list[str] = []
         system_prompt = self.build_context(
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
-            active_document_text,
+            active_document_text, pending_class_confirm,
         )
         messages = (history or []) + [{"role": "user", "content": message}]
         current_lang = student.get("preferred_language") or "en-IN"

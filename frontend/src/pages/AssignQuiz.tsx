@@ -34,15 +34,18 @@ export default function AssignQuiz() {
   }, []);
 
   useEffect(() => {
-    // The seeded NCERT curriculum is keyed by class — only fetch once a
-    // specific class is picked (chapters don't make sense for "all classes").
+    // The seeded curriculum is keyed by class AND board (e.g. CBSE/NCERT vs
+    // BSEB have different chapter lists for the same class) — only fetch
+    // once a specific class is picked (chapters don't make sense for "all
+    // classes"). Defaults to CBSE when no board filter is selected, since
+    // that's the larger seeded curriculum.
     setChapterId("");
     if (!classNum) {
       setChapters([]);
       return;
     }
-    api.getCurriculumChapters(classNum).then(setChapters);
-  }, [classNum]);
+    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase()).then(setChapters);
+  }, [classNum, board]);
 
   async function handleAssign(e: React.FormEvent) {
     e.preventDefault();
@@ -89,7 +92,7 @@ export default function AssignQuiz() {
 
           {chapters.length > 0 && (
             <label>
-              Chapter (optional — from the NCERT curriculum for this class)
+              Chapter (optional — from the curriculum for this class and board)
               <select value={chapterId} onChange={(e) => setChapterId(e.target.value)}>
                 <option value="">— pick a chapter, or type a topic below —</option>
                 {chapters.map((c) => (

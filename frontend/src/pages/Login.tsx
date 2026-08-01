@@ -44,7 +44,12 @@ export default function Login() {
     try {
       const { access_token } = await api.login(phone, password);
       setToken(access_token);
-      navigate("/students");
+      // An organization admin (e.g. a government programme spanning many
+      // schools) manages a portfolio of schools, not one school's own
+      // roster — land them on the schools overview instead of the
+      // single-school "Student Roster" default.
+      const me = await api.me();
+      navigate(me.role === "org_admin" ? "/schools" : "/students");
     } catch (err) {
       setError(err instanceof Error ? err.message : "We couldn't sign you in — please try again");
     } finally {

@@ -2,11 +2,24 @@
 -- Run via: psql $DATABASE_URL -f database/schema.sql
 -- This is a starting subset; expand toward the ~40-50 table target as phases progress.
 
+-- A group of schools/centres under one umbrella account (e.g. a state
+-- government programme spanning many schools).
+CREATE TABLE IF NOT EXISTS organizations (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    org_type TEXT DEFAULT 'school_group',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS centres (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     city TEXT,
     logo_url TEXT,
+    -- The school's own board (e.g. "CBSE", "BSEB") — new students under it
+    -- default to this instead of being asked individually.
+    board TEXT,
+    organization_id INTEGER REFERENCES organizations(id),
     sales_status TEXT DEFAULT 'active',
     sales_notes TEXT,
     contract_notes TEXT,
@@ -15,6 +28,7 @@ CREATE TABLE IF NOT EXISTS centres (
     pilot_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_centres_organization ON centres(organization_id);
 
 CREATE TABLE IF NOT EXISTS students (
     id SERIAL PRIMARY KEY,
@@ -68,15 +82,24 @@ CREATE TABLE IF NOT EXISTS teachers (
     name TEXT,
     phone TEXT UNIQUE,
     centre_id INTEGER REFERENCES centres(id),
+    -- Only set for role='org_admin' — see organizations.
+    organization_id INTEGER REFERENCES organizations(id),
     password_hash TEXT,
+    -- 'teacher' | 'admin' | 'org_admin' | 'super_admin'
     role TEXT DEFAULT 'teacher',
     photo_url TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_teachers_organization ON teachers(organization_id);
 
 CREATE TABLE IF NOT EXISTS subjects (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    class TEXT
+    class TEXT,
+    -- 'CBSE' (NCERT curriculum) | 'BSEB' | ... — part of the subject's
+    -- identity, since the same subject/class genuinely has a different
+    -- syllabus under a different board.
+    board TEXT DEFAULT 'CBSE',
+    UNIQUE (class, name, board)
 );
 
 CREATE TABLE IF NOT EXISTS chapters (

@@ -16,8 +16,17 @@ export default function Layout() {
     navigate("/login");
   }
 
-  const canManageSchool = teacher?.role === "admin" || teacher?.role === "super_admin";
+  const canManageSchool =
+    teacher?.role === "admin" || teacher?.role === "org_admin" || teacher?.role === "super_admin";
   const canUseTeachingTools = teacher?.role === "teacher" || teacher?.role === "admin";
+  // A single school's own profile/branding doesn't apply to org_admin or
+  // super_admin, who each manage many schools at once (see "Schools & Sales"
+  // below instead) — GET /admin/school 400s for either role since neither
+  // has a single centre_id, which is exactly what surfaced this as a real
+  // bug: the link used to show for super_admin and the page hung on
+  // "Loading..." forever once the request failed.
+  const hasOneOwnSchool = teacher?.role === "admin";
+  const managesMultipleSchools = teacher?.role === "org_admin" || teacher?.role === "super_admin";
 
   return (
     <div className="app-shell">
@@ -81,10 +90,12 @@ export default function Layout() {
             <NavLink to="/teachers" className={({ isActive }) => (isActive ? "active" : "")}>
               Teacher Accounts
             </NavLink>
-            <NavLink to="/school-profile" className={({ isActive }) => (isActive ? "active" : "")}>
-              School Profile
-            </NavLink>
-            {teacher?.role === "super_admin" && (
+            {hasOneOwnSchool && (
+              <NavLink to="/school-profile" className={({ isActive }) => (isActive ? "active" : "")}>
+                School Profile
+              </NavLink>
+            )}
+            {managesMultipleSchools && (
               <NavLink to="/schools" className={({ isActive }) => (isActive ? "active" : "")}>
                 Schools & Sales
               </NavLink>

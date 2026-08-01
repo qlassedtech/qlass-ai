@@ -4,9 +4,7 @@ import pytest
 
 from app.models.core import Centre, SchoolPilotGrant, Student
 from app.services import cost_tracker, school_billing
-from app.services.school_pilot import (
-    PILOT_CREDIT_SERVICE, PILOT_STUDENT_FEATURES, PILOT_TEACHER_TOOLS_SERVICE, launch_pilot,
-)
+from app.services.school_pilot import PILOT_CREDIT_SERVICE, PILOT_STUDENT_FEATURES, launch_pilot
 
 
 def test_launch_pilot_marks_school_trial_and_funds_selected_students(db_session):

@@ -38,3 +38,38 @@ def test_track_tag_missing_entirely_falls_back_gracefully():
     assert result["reply"] == raw
     assert result["topic"] is None
     assert result["evaluated"] is False
+    assert result["class_confirm"] is None
+
+
+def test_class_confirm_yes_is_parsed():
+    # The LLM reads the whole message (even mixed content like "12.. no")
+    # and reports its own yes/no reading directly — this replaces a local
+    # regex heuristic that used to discard real content sitting alongside
+    # the confirmation (see app.routers.whatsapp's pending_class_confirm).
+    raw = (
+        'Sure, updating your class!\n[[TRACK topic="classes" evaluated=false '
+        'correct=null image=false audio=false off_level=false video=false '
+        'solved=na class_confirm=yes]]'
+    )
+    result = _parsed(raw)
+    assert result["class_confirm"] is True
+
+
+def test_class_confirm_no_is_parsed():
+    raw = (
+        'No worries, leaving your class as is!\n[[TRACK topic="classes" '
+        'evaluated=false correct=null image=false audio=false off_level=false '
+        'video=false solved=na class_confirm=no]]'
+    )
+    result = _parsed(raw)
+    assert result["class_confirm"] is False
+
+
+def test_class_confirm_na_is_parsed_as_none():
+    raw = (
+        'Sure, here is the next question.\n[[TRACK topic="fractions" '
+        'evaluated=false correct=null image=false audio=false off_level=false '
+        'video=false solved=na class_confirm=na]]'
+    )
+    result = _parsed(raw)
+    assert result["class_confirm"] is None

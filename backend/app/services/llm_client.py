@@ -117,6 +117,7 @@ async def translate_with_claude(
     target_language_code: str,
     model: str = "claude-haiku-4-5-20251001",
     speaker_gender: str | None = None,
+    student_state: str | None = None,
 ) -> LLMResult | None:
     """
     Translate the tutor's English reply into the student's language using
@@ -139,6 +140,12 @@ async def translate_with_claude(
     confirmed live: a female-voiced reply spoke in grammatically masculine
     Hindi, which sounds wrong to a native speaker. This aligns the text's
     grammar with whichever voice (see OPPOSITE_GENDER_SPEAKER) will speak it.
+
+    `student_state` (from Student.state, e.g. "Bihar") drives the cultural
+    register — deliberately left for the model to infer per-region rather
+    than a hardcoded rule, since the right register (formality, how a tutor
+    addresses a student, local idiom) genuinely varies by region and this
+    product isn't Bihar-only forever.
     """
     if _client is None:
         return None
@@ -150,11 +157,19 @@ async def translate_with_claude(
             f" The speaker is {speaker_gender} — use grammatically {speaker_gender} first-person verb "
             f"forms throughout (e.g. {'करता हूँ, दूंगा' if speaker_gender == 'male' else 'करती हूँ, दूंगी'})."
         )
+    region_note = (
+        f" The student is in {student_state}, India — use the register, formality, and local idiom a "
+        f"tutor from that region would naturally use with a student there, rather than a generic "
+        f"one-size-fits-all translation."
+        if student_state
+        else ""
+    )
     system_prompt = (
-        f"Translate the given text into natural, colloquial {lang_name} as spoken in Bihar, India.{gender_note} "
-        "Keep it warm and conversational, the way a friendly tutor talks to a student — not stiff or "
-        "overly literal. Preserve all markdown formatting (*bold* markers) and line breaks exactly as "
-        "in the original. Output ONLY the translated text — no preamble, no quotes, no explanation."
+        f"Translate the given text into natural, colloquial {lang_name} as spoken in India.{gender_note}"
+        f"{region_note} Keep it warm and conversational, the way a friendly tutor talks to a student — "
+        "not stiff or overly literal. Preserve all markdown formatting (*bold* markers) and line breaks "
+        "exactly as in the original. Output ONLY the translated text — no preamble, no quotes, no "
+        "explanation."
     )
     try:
         response = await _client.messages.create(

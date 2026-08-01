@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,14 @@ from app.routers import whatsapp, health, broadcast, admin, payments, student_ap
 from app.database import Base, engine
 from app.config import settings, REPO_ROOT
 from app.logging_config import setup_logging
-import app.models.core  # noqa: F401 - registers models on Base
+
+# Pure side-effect import (registers models on Base) — done via importlib
+# rather than `import app.models.core` so it doesn't bind a top-level name
+# `app` that the very next line then immediately shadows with the FastAPI
+# instance. That shadowing was harmless today (nothing below references
+# the module), but it's a real trap: anyone later writing `app.models.core`
+# expecting the module would silently resolve to the FastAPI app instead.
+importlib.import_module("app.models.core")
 
 setup_logging()
 

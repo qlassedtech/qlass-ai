@@ -23,6 +23,19 @@ def get_qlass_direct_centre_id(db: Session) -> int | None:
     return _qlass_direct_centre_id
 
 
+def default_board_for_centre(db: Session, centre_id: int | None) -> str | None:
+    """
+    A school already knows which board it follows — a new student under it
+    should default to that instead of being asked individually (see
+    profile_builder.PROFILE_QUESTIONS, which only asks when the field is
+    still genuinely empty).
+    """
+    if centre_id is None:
+        return None
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    return centre.board if centre else None
+
+
 def create_student_profile(
     db: Session, phone: str, name: str, centre_id: int | None, is_staff_profile: bool = False
 ) -> Student:
@@ -31,7 +44,7 @@ def create_student_profile(
     the /admin/my-tutor endpoints)."""
     student = Student(
         name=name, phone=phone, features=dict(DEFAULT_FEATURES), centre_id=centre_id,
-        is_staff_profile=is_staff_profile,
+        is_staff_profile=is_staff_profile, board=default_board_for_centre(db, centre_id),
     )
     db.add(student)
     db.commit()

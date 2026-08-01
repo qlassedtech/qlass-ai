@@ -16,10 +16,14 @@ MARKUP_MULTIPLIER = 2.0
 SCHOOL_TRIAL_CREDITS = 50.0
 
 PRICING = {
-    # Reuses the same Claude Sonnet rates as cost_tracker.PRICING — kept
-    # duplicated rather than imported to avoid coupling the two ledgers'
-    # pricing tables together (they're allowed to diverge over time).
+    # Reuses the same Claude Sonnet/Haiku rates as cost_tracker.PRICING —
+    # kept duplicated rather than imported to avoid coupling the two
+    # ledgers' pricing tables together (they're allowed to diverge over time).
     "workbook_pdf": {"input_per_1k_tokens": 0.26, "output_per_1k_tokens": 1.31},
+    # Haiku rates — OCR/PDF roster-photo bulk-upload extraction (see
+    # app.services.roster_extraction) is a narrow structured-parsing task,
+    # not creative generation, so it deliberately uses the cheap tier.
+    "roster_extraction": {"input_per_1k_tokens": 0.07, "output_per_1k_tokens": 0.35},
 }
 
 # Confirmed from the real Qlass Gamma account: Pro plan, ₹1300/month for

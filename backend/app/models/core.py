@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, Text, Boolean, Numeric, Date, JSON, CheckConstraint, ForeignKey, TIMESTAMP, func
+    Column, Integer, Text, Boolean, Numeric, Date, JSON, CheckConstraint, ForeignKey, TIMESTAMP, UniqueConstraint, func
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -10,16 +10,44 @@ from app.database import Base
 JSONType = JSONB().with_variant(JSON(), "sqlite")
 
 
+class Organization(Base):
+    """
+    A group of schools/centres under one umbrella account — e.g. a state
+    government programme spanning many schools, or a multi-branch private
+    chain. Distinct from a single Centre (school): an org_admin (see
+    Teacher.role) manages every centre under their organization_id, the
+    same way a super_admin manages every centre on the whole platform, just
+    scoped to their own organization instead of everything.
+    """
+    __tablename__ = "organizations"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(Text, nullable=False)
+    # "government" | "school_group" — informational only for now, doesn't
+    # change any access-control behaviour.
+    org_type = Column(Text, default="school_group")
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    centres = relationship("Centre", back_populates="organization")
+
+
 class Centre(Base):
     __tablename__ = "centres"
 
     id = Column(Integer, primary_key=True)
     name = Column(Text, nullable=False)
     city = Column(Text)
+    organization_id = Column(Integer, ForeignKey("organizations.id"))
     # Shown on the school's own portal header and stamped onto anything
     # generated on their behalf (e.g. practice-set PDFs) alongside the
     # "Powered by Qlass Learning" mark.
     logo_url = Column(Text)
+    # The school's own board (e.g. "CBSE", "BSEB") — a school already knows
+    # which board it follows, so new students under it default to this
+    # instead of being asked individually (see tenancy.py/whatsapp.py). A
+    # school with genuinely mixed-board sections can still override per
+    # student; this is just the sensible default, not an enforced value.
+    board = Column(Text)
     # Lightweight sales-pipeline tracking — "prospect" (being sold to, no
     # real usage yet) | "trial" | "active" | "churned". Self-registered
     # schools (see /auth/register-school) start as "active" since they've
@@ -39,6 +67,7 @@ class Centre(Base):
 
     students = relationship("Student", back_populates="centre")
     teachers = relationship("Teacher", back_populates="centre")
+    organization = relationship("Organization", back_populates="centres")
 
 
 class Student(Base):
@@ -175,25 +204,46 @@ class Teacher(Base):
     name = Column(Text)
     phone = Column(Text, unique=True)
     centre_id = Column(Integer, ForeignKey("centres.id"))
+    # Only set for role="org_admin" — see Organization. Null for every
+    # other role, including super_admin (which is platform-wide, not
+    # scoped to one organization).
+    organization_id = Column(Integer, ForeignKey("organizations.id"))
     password_hash = Column(Text)
-    # "teacher" | "admin" | "super_admin". "teacher"/"admin" are scoped to
-    # their own centre_id (school) — this product is sold to multiple
-    # schools, so each school's students/teachers must stay isolated from
-    # every other school's. "admin" additionally manages other teacher
-    # accounts for their own school. "super_admin" is Qlass's own staff
-    # role and sees/manages across every school, centre_id is null for it.
+    # "teacher" | "admin" | "org_admin" | "super_admin".
+    # "teacher"/"admin" are scoped to their own centre_id (school) — this
+    # product is sold to multiple schools, so each school's students/
+    # teachers must stay isolated from every other school's. "admin"
+    # additionally manages other teacher accounts for their own school.
+    # "org_admin" is scoped to organization_id instead of one centre_id —
+    # sees/manages every school under that organization (e.g. a government
+    # programme spanning many schools), centre_id is null for it.
+    # "super_admin" is Qlass's own staff role and sees/manages across every
+    # school on the whole platform, centre_id and organization_id are both
+    # null for it.
     role = Column(Text, default="teacher")
     photo_url = Column(Text)
 
     centre = relationship("Centre", back_populates="teachers")
+    organization = relationship("Organization")
 
 
 class Subject(Base):
     __tablename__ = "subjects"
+    # A (class_, name, board) triple can legitimately repeat with different
+    # chapters — the same subject name under different boards has a
+    # genuinely different syllabus (e.g. BSEB Class 10 Hindi != CBSE/NCERT
+    # Class 10 Hindi), so board is part of what identifies a subject here,
+    # not just informational.
+    __table_args__ = (UniqueConstraint("class", "name", "board", name="uq_subjects_class_name_board"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(Text, nullable=False)
     class_ = Column("class", Text)
+    # 'CBSE' (covers the seeded NCERT curriculum) | 'BSEB' | ... — existing
+    # rows predate this column and are all NCERT/CBSE-aligned, hence the
+    # default. See scripts/seed_ncert_curriculum.py and
+    # scripts/seed_bseb_curriculum.py.
+    board = Column(Text, default="CBSE")
 
     chapters = relationship("Chapter", back_populates="subject")
 

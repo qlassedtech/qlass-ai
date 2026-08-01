@@ -28,7 +28,6 @@ from app.services.profile_builder import (
     next_missing_field,
     should_ask_this_turn,
     extract_profile_answer,
-    looks_like_confirmation_reply,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
 from app.services.llm_client import translate_with_claude
@@ -46,6 +45,7 @@ from app.services.escalation import (
 )
 from app.services.habit import evaluate_habit_milestones
 from app.services.rate_limit import is_rate_limited, student_lock
+from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
 from app.services.referral import (
     generate_referral_code,
@@ -105,8 +105,6 @@ ACTIVE_DOCUMENT_MIN_CHARS = 400
 # chars comfortably covers a real 20-30 question DPP/homework sheet while
 # still bounding the worst case.
 ACTIVE_DOCUMENT_MAX_CHARS = 8000
-
-_AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "haan", "y", "please", "yup"}
 
 # Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
 # in whatsapp_client.py) — each button maps to the same canonical phrase its
@@ -213,6 +211,28 @@ def _monthly_spend_status(db: Session, student: Student) -> float:
     return cost_tracker.get_student_monthly_spend(db, student.id)
 
 
+async def _send_localized_notice(db: Session, from_phone: str, student: Student, message: str) -> None:
+    """
+    Send a system notice (churn/pilot/credit-exhausted/limit-reached) in the
+    student's own detected language, same as every other outgoing reply —
+    without this, a Hindi-speaking student would suddenly get one message in
+    plain English right when something's already gone wrong for them, which
+    is exactly the wrong moment to be harder to understand.
+    """
+    lang = student.preferred_language or "en-IN"
+    if lang and not lang.startswith("en"):
+        translated_result = await translate_with_claude(
+            message, lang, speaker_gender=_assistant_voice_gender(student), student_state=student.state
+        )
+        if translated_result:
+            message = translated_result.text
+            cost_tracker.record_claude_usage(
+                db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
+                cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
+            )
+    await send_whatsapp_message(from_phone, message)
+
+
 def _monthly_limit_reached_message() -> str:
     return f"You've used all ₹{MONTHLY_STUDENT_CREDIT_LIMIT:.0f} of this month's AI credit — resets on the 1st of next month!"
 
@@ -237,22 +257,6 @@ def _monthly_threshold_notice(spent_before: float, spent_after: float) -> str | 
     )
 
 
-_NEGATIVE_WORDS = {"no", "nah", "nope", "never", "don't", "dont", "not"}
-
-
-def _looks_affirmative(text: str) -> bool:
-    """
-    A bare set-intersection against _AFFIRMATIVE_WORDS used to treat any
-    message containing the word "please" (e.g. "No please provide me quiz
-    on the same") as a yes, since "please" is itself in _AFFIRMATIVE_WORDS —
-    an explicit negative word anywhere in the message now wins regardless.
-    """
-    words = set(text.strip().lower().split())
-    if words & _NEGATIVE_WORDS:
-        return False
-    return bool(words & _AFFIRMATIVE_WORDS)
-
-
 def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
     features = {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
 
@@ -263,9 +267,11 @@ def _create_new_student(db: Session, from_phone: str, message_text: str = "") ->
         if referrer:
             referred_by_id = referrer.id
 
+    centre_id = get_qlass_direct_centre_id(db)
     student = Student(
         name="New Student", phone=from_phone, features=features,
-        centre_id=get_qlass_direct_centre_id(db), referred_by_id=referred_by_id,
+        centre_id=centre_id, referred_by_id=referred_by_id,
+        board=tenancy.default_board_for_centre(db, centre_id),
     )
     db.add(student)
     db.commit()
@@ -409,25 +415,65 @@ async def receive_message(request: Request):
     return {"received": True, "handled": "processing"}
 
 
+def _claim_webhook_job(db: Session, message_id: str, now: datetime) -> bool:
+    """
+    Atomically claim one job via a single conditional UPDATE, so two backend
+    processes racing on the same message_id can never both "win" — a prior
+    read-job-then-write-status version was safe with a single process (no
+    `await` between the read and the write, so nothing else in that event
+    loop could interleave) but broke the moment more than one backend
+    process/replica existed, since each has its own DB connection and
+    Python interpreter with no shared in-process ordering.
+    """
+    lease_until = now + timedelta(seconds=WEBHOOK_LEASE_SECONDS)
+    claimed = db.query(ProcessedWebhookMessage).filter(
+        ProcessedWebhookMessage.message_id == message_id,
+        ProcessedWebhookMessage.status == "pending",
+    ).update(
+        {
+            "status": "processing",
+            "attempts": ProcessedWebhookMessage.attempts + 1,
+            "lease_expires_at": lease_until,
+            "last_error": None,
+        },
+        synchronize_session=False,
+    )
+    if claimed == 0:
+        # Either already completed, or another worker holds (or recently
+        # held) it — only reclaim if its lease has actually expired.
+        claimed = db.query(ProcessedWebhookMessage).filter(
+            ProcessedWebhookMessage.message_id == message_id,
+            ProcessedWebhookMessage.status == "processing",
+            ProcessedWebhookMessage.lease_expires_at < now,
+        ).update(
+            {
+                "status": "processing",
+                "attempts": ProcessedWebhookMessage.attempts + 1,
+                "lease_expires_at": lease_until,
+                "last_error": None,
+            },
+            synchronize_session=False,
+        )
+    db.commit()
+    return claimed > 0
+
+
 async def _process_queued_webhook(message_id: str) -> None:
     """
-    Claim and process one persisted webhook job. The conditional lease means
-    concurrent API workers can safely see the same job without sending a
-    duplicate reply.
+    Claim and process one persisted webhook job. The atomic claim means
+    concurrent API workers/processes can safely see the same job without
+    sending a duplicate reply.
     """
     db = SessionLocal()
     payload = None
     try:
-        job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
-        if job is None or job.status == "completed":
-            return
         now = datetime.now(timezone.utc)
-        lease = job.lease_expires_at
-        if job.status == "processing" and lease is not None:
-            if lease.tzinfo is None:
-                lease = lease.replace(tzinfo=timezone.utc)
-            if lease > now:
-                return
+        if not _claim_webhook_job(db, message_id, now):
+            return
+
+        job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
+        if job is None:
+            return
         payload = job.payload
         if payload is None:
             # A row from before the payload column existed (migration 0033)
@@ -438,11 +484,6 @@ async def _process_queued_webhook(message_id: str) -> None:
             job.lease_expires_at = None
             db.commit()
             return
-        job.status = "processing"
-        job.attempts += 1
-        job.lease_expires_at = now + timedelta(seconds=WEBHOOK_LEASE_SECONDS)
-        job.last_error = None
-        db.commit()
 
         phone = payload.get("waId")
         async with (student_lock(phone) if phone else nullcontext()):
@@ -536,16 +577,16 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # own demo numbers shouldn't get free service either.
     if from_phone not in FULL_ACCESS_PHONES and school_billing.is_centre_churned(db, student.centre_id) \
             and not cost_tracker.has_independent_payment(db, student.id):
-        await send_whatsapp_message(
-            from_phone,
+        await _send_localized_notice(
+            db, from_phone, student,
             "Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
             "or top up your own AI credits directly to keep chatting with me!",
         )
         return
 
     if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
-        await send_whatsapp_message(
-            from_phone,
+        await _send_localized_notice(
+            db, from_phone, student,
             "Your school's Qlass pilot has ended. Ask your school to continue the programme, "
             "or top up your own AI credits to keep learning!",
         )
@@ -556,8 +597,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # against one shared account-wide balance. Demo/testing numbers get
     # unlimited credits (see FULL_ACCESS_PHONES) — they're never metered.
     if from_phone not in FULL_ACCESS_PHONES and not cost_tracker.has_credits(db, student.id):
-        await send_whatsapp_message(
-            from_phone, "You're out of AI credits — ask your school to top up your account to keep chatting with me!"
+        await _send_localized_notice(
+            db, from_phone, student,
+            "You're out of AI credits — ask your school to top up your account to keep chatting with me!"
         )
         return
 
@@ -744,14 +786,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
         # An explicit new request in the same message (e.g. "No, quiz me on
-        # circular motion" or "no, mock test on circular motion") should win
-        # over resolving the pending class-update nudge, rather than being
-        # silently discarded because _looks_affirmative matched an incidental
-        # "please" — treat it as an implicit decline (leave the class as-is)
-        # and let quiz_topic_request/mock_test_request start the quiz further
-        # down in this same if/elif ladder. Covers both since a mock-test
-        # request wouldn't otherwise be caught here (it's a separate flag,
-        # not part of extract_quiz_topic's own patterns).
+        # circular motion") should win over resolving the pending class-
+        # update nudge via the LLM below — treat it as an implicit decline
+        # (leave the class as-is) and let quiz_topic_request/mock_test_
+        # request start the quiz further down in this same if/elif ladder.
+        # Covers both since a mock-test request wouldn't otherwise be caught
+        # here (it's a separate flag, not part of extract_quiz_topic's own
+        # patterns).
         student.pending_profile_field = None
         student.suggested_class = None
         db.commit()
@@ -773,19 +814,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             student.pending_profile_field = None
             db.commit()
 
-    if student.pending_profile_field == "class_confirm" and looks_like_confirmation_reply(message_text):
-        # Special case, not a normal profile field — confirming (or declining)
-        # the class-update suggestion triggered by a run of off-level questions.
-        if _looks_affirmative(message_text):
-            student.class_ = student.suggested_class
-            reply_text = f"Got it, updated your class to {student.suggested_class}! 👍 What else can I help you with?"
-        else:
-            reply_text = "No worries, I'll leave it as is! What else can I help you with?"
-        student.pending_profile_field = None
-        student.suggested_class = None
-        db.commit()
-        detected_lang = student.preferred_language or "en-IN"
-    elif profile_answer and not profile_answer[1]:
+    if profile_answer and not profile_answer[1]:
         # The whole message was purely the profile answer (already saved
         # above) — nothing else in it to give a real tutoring reply to, so
         # skip the LLM call same as before.
@@ -845,18 +874,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # conversation history: confirmed live, a later real reply echoed
         # this exact message back verbatim because it was sitting in
         # history as if it were the tutor's own prior statement.
-        translated_limit_msg = None
-        lang = student.preferred_language or "en-IN"
-        limit_msg = _monthly_limit_reached_message()
-        if lang and not lang.startswith("en"):
-            translated_result = await translate_with_claude(limit_msg, lang, speaker_gender=_assistant_voice_gender(student))
-            if translated_result:
-                translated_limit_msg = translated_result.text
-                cost_tracker.record_claude_usage(
-                    db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
-                    cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
-                )
-        await send_whatsapp_message(from_phone, translated_limit_msg or limit_msg)
+        await _send_localized_notice(db, from_phone, student, _monthly_limit_reached_message())
         return
     elif student.active_quiz_id:
         # Treat this message as the answer to the current quiz question.
@@ -1007,7 +1025,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # Either there was no pending question, or the student ignored it and
         # asked something else — drop the pending question either way so we
         # don't keep misreading their answers, then answer normally.
-        if student.pending_profile_field:
+        # "class_confirm" is different: whether this message actually
+        # answers it is decided by the LLM itself below (pending_class_
+        # confirm / result["class_confirm"]), not a local yes/no heuristic —
+        # a plain word-matching check here previously mis-swallowed mixed
+        # messages like "12.. no" (an attempted maths answer AND a decline),
+        # discarding the "12" entirely. So it's left alone here and resolved
+        # after the LLM call instead.
+        pending_class_confirm = (
+            student.suggested_class if student.pending_profile_field == "class_confirm" else None
+        )
+        if student.pending_profile_field and student.pending_profile_field != "class_confirm":
             student.pending_profile_field = None
             student.suggested_class = None
             db.commit()
@@ -1041,11 +1069,24 @@ async def _handle_message(db: Session, payload: dict) -> None:
             voice_enabled=student.has_feature("voice"),
             video_enabled=student.has_feature("youtube_videos"),
             active_document_text=student.active_document_text,
+            pending_class_confirm=pending_class_confirm,
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
         video_query = result["video_query"]
+
+        if pending_class_confirm:
+            # The LLM already wove an acknowledgement into reply_text above
+            # when it read a yes/no signal — this just applies the actual
+            # class change and settles the nudge for good, whatever it
+            # decided (including "na", so an ignored suggestion is never
+            # re-appended to a future reply).
+            if result["class_confirm"] is True:
+                student.class_ = pending_class_confirm
+            student.pending_profile_field = None
+            student.suggested_class = None
+            db.commit()
         usage = result["usage"]
         cost_tracker.record_claude_usage(
             db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
@@ -1203,7 +1244,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # English) or both translation paths fail.
     outgoing_text = reply_text
     if detected_lang and not detected_lang.startswith("en"):
-        translated_result = await translate_with_claude(reply_text, detected_lang, speaker_gender=_assistant_voice_gender(student))
+        translated_result = await translate_with_claude(
+            reply_text, detected_lang, speaker_gender=_assistant_voice_gender(student), student_state=student.state
+        )
         if translated_result:
             outgoing_text = translated_result.text
             cost_tracker.record_claude_usage(
