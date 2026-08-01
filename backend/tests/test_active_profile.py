@@ -1,27 +1,7 @@
-from types import SimpleNamespace
+import asyncio
 
-from app.services.active_profile import (
-    build_disambiguation_prompt,
-    extract_switch_target_name,
-    looks_like_new_profile_request,
-    match_student_by_name,
-)
-
-
-def _student(name):
-    return SimpleNamespace(name=name)
-
-
-def test_looks_like_new_profile_request_matches_known_phrases():
-    assert looks_like_new_profile_request("this is for my different child") is True
-    assert looks_like_new_profile_request("what is photosynthesis") is False
-
-
-def test_extract_switch_target_name_matches_common_patterns():
-    assert extract_switch_target_name("switch to Priya") == "priya"
-    assert extract_switch_target_name("it's Raj now") == "raj"
-    assert extract_switch_target_name("this is Priya talking") == "priya"
-    assert extract_switch_target_name("what is gravity") is None
+from app.services.active_profile import build_disambiguation_prompt, classify_profile_routing
+from app.services.llm_client import LLMResult
 
 
 def test_build_disambiguation_prompt_two_names():
@@ -34,34 +14,59 @@ def test_build_disambiguation_prompt_three_names():
     assert "Priya, Raj or Amit" in prompt
 
 
-def test_match_student_by_name_matches_whole_word():
-    students = [_student("Priya"), _student("Raj")]
-    match = match_student_by_name(students, "hi it's raj, what is friction")
-    assert match is not None
-    assert match.name == "Raj"
+def test_classify_profile_routing_detects_switch_target(monkeypatch):
+    async def fake_classify(system_prompt, messages, fallback, model, max_tokens=10):
+        return LLMResult(text='[[ROUTE new_profile=no switch_target="Raj" name_match=NONE]]', model=model)
+
+    monkeypatch.setattr("app.services.active_profile.classify", fake_classify)
+
+    routing = asyncio.run(classify_profile_routing("switch to Raj", ["Priya", "Raj"]))
+
+    assert routing.new_profile_request is False
+    assert routing.switch_target == "Raj"
+    assert routing.name_match is None
 
 
-def test_match_student_by_name_does_not_false_positive_on_substring():
-    # Regression test: "Om" must not match just because it's a substring of
-    # "tomorrow" — this previously mis-attributed an ordinary question to
-    # the wrong sibling on a shared family phone.
-    students = [_student("Om"), _student("Priya")]
-    match = match_student_by_name(students, "what is the homework for tomorrow")
-    assert match is None
+def test_classify_profile_routing_detects_new_profile_request(monkeypatch):
+    async def fake_classify(system_prompt, messages, fallback, model, max_tokens=10):
+        return LLMResult(text='[[ROUTE new_profile=yes switch_target=NONE name_match=NONE]]', model=model)
+
+    monkeypatch.setattr("app.services.active_profile.classify", fake_classify)
+
+    routing = asyncio.run(classify_profile_routing("this is for my other son", ["Priya"]))
+
+    assert routing.new_profile_request is True
 
 
-def test_match_student_by_name_does_not_false_positive_on_substring_of_another_name():
-    # "Ria" is a substring of "Maria" — must not match on that alone.
-    students = [_student("Ria")]
-    match = match_student_by_name(students, "tell me about Maria Curie's discoveries")
-    assert match is None
+def test_classify_profile_routing_name_match_only_resolves_known_names(monkeypatch):
+    # Regression guard: even if the model hallucinates or mis-cases a name,
+    # name_match must never resolve to anything outside the known profiles
+    # on this phone — that's the hard guarantee against silently switching
+    # the active profile to nobody (or the wrong record).
+    async def fake_classify(system_prompt, messages, fallback, model, max_tokens=10):
+        return LLMResult(text='[[ROUTE new_profile=no switch_target=NONE name_match="raj"]]', model=model)
+
+    monkeypatch.setattr("app.services.active_profile.classify", fake_classify)
+
+    routing = asyncio.run(classify_profile_routing("hi it's raj here", ["Priya", "Raj"]))
+
+    assert routing.name_match == "Raj"  # resolved to the correctly-cased known name
 
 
-def test_match_student_by_name_skips_placeholder_name():
-    students = [_student("New Student")]
-    assert match_student_by_name(students, "new student here, help me") is None
+def test_classify_profile_routing_rejects_unknown_name_match(monkeypatch):
+    async def fake_classify(system_prompt, messages, fallback, model, max_tokens=10):
+        return LLMResult(text='[[ROUTE new_profile=no switch_target=NONE name_match="Timmy"]]', model=model)
+
+    monkeypatch.setattr("app.services.active_profile.classify", fake_classify)
+
+    routing = asyncio.run(classify_profile_routing("some message", ["Priya", "Raj"]))
+
+    assert routing.name_match is None
 
 
-def test_match_student_by_name_returns_none_when_no_match():
-    students = [_student("Priya"), _student("Raj")]
-    assert match_student_by_name(students, "what is 2+2") is None
+def test_classify_profile_routing_returns_none_for_single_profile_phone_with_no_names():
+    # No LLM call at all when there are no known names to route against.
+    routing = asyncio.run(classify_profile_routing("what is gravity", []))
+    assert routing.new_profile_request is False
+    assert routing.switch_target is None
+    assert routing.name_match is None

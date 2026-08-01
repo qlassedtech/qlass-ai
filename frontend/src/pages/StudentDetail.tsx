@@ -170,7 +170,10 @@ export default function StudentDetail() {
   if (!student) return <p>Loading...</p>;
 
   function buildTopUpLink(): string {
-    return `${window.location.origin}/pay?phone=${encodeURIComponent(student!.phone)}`;
+    // student_id disambiguates a shared family phone with more than one
+    // child enrolled on it — without it, a payment could silently land in
+    // a sibling's wallet instead of this specific student's.
+    return `${window.location.origin}/pay?phone=${encodeURIComponent(student!.phone)}&student_id=${student!.id}`;
   }
 
   async function copyTopUpLink() {
@@ -374,9 +377,6 @@ export default function StudentDetail() {
               ))}
             </select>
           </label>
-          <p className="muted" style={{ marginTop: -10, fontSize: 12 }}>
-            Only used to pick an opposite-gender voice for spoken replies — auto-detected from a voice note if never set, and safe to correct here if it's wrong.
-          </p>
           <label>
             Focus topic (teacher-assigned)
             <input value={focusTopic} onChange={(e) => setFocusTopic(e.target.value)} placeholder="e.g. quadratic equations" />

@@ -192,6 +192,7 @@ export interface School {
   id: number;
   name: string;
   city: string | null;
+  board: string | null;
   logo_url: string | null;
   credit_balance: number;
 }
@@ -402,11 +403,17 @@ export const api = {
     formData.append("file", file);
     return requestMultipart(`/admin/teachers/${id}/photo`, formData) as Promise<{ photo_url: string }>;
   },
-  generateWorkbook: (data: { topic: string; class_?: string; num_questions: number; include_answer_key: boolean }) =>
-    requestBlob("/admin/workbook/generate", { method: "POST", body: JSON.stringify(data) }),
+  generateWorkbook: (data: {
+    topic?: string;
+    chapter_ids?: number[];
+    class_?: string;
+    board?: string;
+    num_questions: number;
+    include_answer_key: boolean;
+  }) => requestBlob("/admin/workbook/generate", { method: "POST", body: JSON.stringify(data) }),
   assignQuiz: (data: {
     topic?: string;
-    chapter_id?: number;
+    chapter_ids?: number[];
     class_?: string;
     board?: string;
     phone_numbers?: string[];
@@ -422,7 +429,7 @@ export const api = {
     ) as Promise<{ id: number; name: string; chapter_no: number | null; subject: string }[]>,
   generatePresentation: (data: {
     topic?: string;
-    chapter_id?: number;
+    chapter_ids?: number[];
     class_?: string;
     board?: string;
     num_cards: number;
@@ -519,24 +526,34 @@ export interface CreateSubscriptionResponse {
 
 // Public — no teacher/admin login involved, parents/students pay directly.
 export const payApi = {
-  createOrder: (phone: string, amount: number) =>
-    request("/pay/create-order", { method: "POST", body: JSON.stringify({ phone, amount }) }) as Promise<CreateOrderResponse>,
+  // student_id disambiguates a shared family phone with more than one
+  // child on it — every caller of this API already knows which specific
+  // student a payment is for, so it's passed through rather than left for
+  // the backend to guess (which previously always picked whichever
+  // sibling had the lowest database id, regardless of who a link/button
+  // was actually generated for).
+  createOrder: (phone: string, amount: number, studentId?: number) =>
+    request("/pay/create-order", {
+      method: "POST", body: JSON.stringify({ phone, amount, student_id: studentId }),
+    }) as Promise<CreateOrderResponse>,
   verify: (data: {
     razorpay_order_id: string;
     razorpay_payment_id: string;
     razorpay_signature: string;
     phone: string;
+    student_id?: number;
   }) => request("/pay/verify", { method: "POST", body: JSON.stringify(data) }) as Promise<{ credited: number; balance: number }>,
-  createSubscription: (phone: string) =>
+  createSubscription: (phone: string, studentId?: number) =>
     request("/pay/create-subscription", {
       method: "POST",
-      body: JSON.stringify({ phone }),
+      body: JSON.stringify({ phone, student_id: studentId }),
     }) as Promise<CreateSubscriptionResponse>,
   verifySubscription: (data: {
     razorpay_subscription_id: string;
     razorpay_payment_id: string;
     razorpay_signature: string;
     phone: string;
+    student_id?: number;
   }) =>
     request("/pay/verify-subscription", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       subscription_plan: string;
@@ -546,6 +563,7 @@ export const payApi = {
 
 export interface ParentProfile {
   parent_name: string;
+  student_id: number;
   student_name: string;
   student_phone: string;
   class: string | null;

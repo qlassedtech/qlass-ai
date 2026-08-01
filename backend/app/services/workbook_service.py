@@ -8,17 +8,22 @@ MAX_QUESTIONS = 25  # keeps a single generation call (and its cost) bounded
 
 
 async def generate_workbook_questions(
-    topic: str, class_: str | None, num_questions: int
+    topic: str, class_: str | None, num_questions: int, board: str | None = None,
 ) -> tuple[list[dict], object]:
     """
     Returns (questions, llm_result) where each question is
     {"question": str, "answer": str} — llm_result carries token usage so
     the caller can bill the school ledger (see app.services.school_billing).
+    board matters for real content correctness, not just cosmetics — the
+    same topic name can carry a different depth/scope/terminology under a
+    different board's own syllabus (see quiz_service.generate_quiz_questions,
+    which has the same parameter for the same reason).
     """
     num_questions = max(1, min(num_questions, MAX_QUESTIONS))
     class_note = f" for Class {class_} students" if class_ else ""
+    board_note = f" following the {board} syllabus" if board else ""
     system_prompt = (
-        f"Generate exactly {num_questions} practice questions on the topic \"{topic}\"{class_note}, "
+        f"Generate exactly {num_questions} practice questions on the topic \"{topic}\"{class_note}{board_note}, "
         "suitable for a printed worksheet. Mix question types (short answer, numeric, one-line "
         "explanation) and difficulty levels. Each question needs one clear correct answer. "
         'Respond with ONLY a JSON array, no markdown fences, no explanation: '

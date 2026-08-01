@@ -73,6 +73,7 @@ def get_me(db: Session = Depends(get_db), parent: Parent = Depends(get_current_p
     student = _linked_student(db, parent)
     return {
         "parent_name": parent.name,
+        "student_id": student.id,
         "student_name": student.name,
         "student_phone": student.phone,
         "class": student.class_,

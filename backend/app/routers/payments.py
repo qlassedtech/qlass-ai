@@ -14,18 +14,35 @@ from app.services.razorpay_client import client as _client, MIN_TOPUP_AMOUNT
 router = APIRouter()
 
 
-def _find_real_student(db: Session, phone: str) -> Student:
-    # Excludes staff "My AI Tutor" profiles and picks deterministically
-    # (lowest id) when a shared family phone has more than one real
-    # student profile — see Student.is_staff_profile and
-    # app.services.active_profile for the richer WhatsApp-side
-    # disambiguation this simpler public page doesn't yet have.
-    student = (
-        db.query(Student)
-        .filter(Student.phone == phone, Student.is_staff_profile.is_(False))
-        .order_by(Student.id)
-        .first()
-    )
+def _find_real_student(db: Session, phone: str, student_id: int | None = None) -> Student:
+    """
+    Excludes staff "My AI Tutor" profiles. When a shared family phone has
+    more than one real student profile, student_id disambiguates which one
+    a payment is actually for — every link this app generates already
+    knows the specific student (a teacher/admin sending a top-up link, the
+    WhatsApp bot replying to the exact student who's texting, a parent
+    portal scoped to one linked child) and now includes it, so a real
+    payment is never blindly attributed to "whichever sibling has the
+    lowest id" — confirmed as a genuine risk: a family with two children
+    sharing one phone could have a payment meant for the younger child
+    silently credit the older one's wallet instead, purely because of
+    database insertion order. student_id must still match phone (a
+    student can't be claimed by an unrelated number), so this only ever
+    narrows within that phone's own real profiles, never widens access.
+    Falls back to the old lowest-id behavior only when no student_id is
+    given at all (an older cached link, or a caller with no specific
+    student in hand).
+    """
+    query = db.query(Student).filter(Student.phone == phone, Student.is_staff_profile.is_(False))
+    if student_id is not None:
+        student = query.filter(Student.id == student_id).first()
+        if not student:
+            raise HTTPException(
+                status_code=404,
+                detail="That student profile doesn't match this WhatsApp number — ask your school to check the link",
+            )
+        return student
+    student = query.order_by(Student.id).first()
     if not student:
         raise HTTPException(
             status_code=404,
@@ -37,6 +54,7 @@ def _find_real_student(db: Session, phone: str) -> Student:
 class CreateOrderRequest(BaseModel):
     phone: str
     amount: float
+    student_id: int | None = None
 
 
 @router.post("/pay/create-order")
@@ -45,7 +63,7 @@ def create_order(body: CreateOrderRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Qlass support")
     if body.amount < MIN_TOPUP_AMOUNT:
         raise HTTPException(status_code=400, detail=f"Minimum top-up is ₹{MIN_TOPUP_AMOUNT:.0f}")
-    student = _find_real_student(db, body.phone)
+    student = _find_real_student(db, body.phone, body.student_id)
 
     # Amount in paise (Razorpay's smallest unit), matching how the amount
     # will be re-fetched from Razorpay's own API at verification time —
@@ -63,6 +81,7 @@ class VerifyPaymentRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_signature: str
     phone: str
+    student_id: int | None = None
 
 
 @router.post("/pay/verify")
@@ -79,7 +98,7 @@ def verify_payment(body: VerifyPaymentRequest, db: Session = Depends(get_db)):
     except razorpay.errors.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Payment could not be verified")
 
-    student = _find_real_student(db, body.phone)
+    student = _find_real_student(db, body.phone, body.student_id)
 
     # Re-fetch the order from Razorpay itself rather than trusting any
     # client-supplied amount. Also bind the server-side order notes and
@@ -110,6 +129,7 @@ def verify_payment(body: VerifyPaymentRequest, db: Session = Depends(get_db)):
 
 class CreateSubscriptionRequest(BaseModel):
     phone: str
+    student_id: int | None = None
 
 
 @router.post("/pay/create-subscription")
@@ -125,7 +145,7 @@ def create_student_subscription(body: CreateSubscriptionRequest, db: Session = D
     """
     if _client is None or not settings.razorpay_student_plan_id:
         raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
-    student = _find_real_student(db, body.phone)
+    student = _find_real_student(db, body.phone, body.student_id)
     if cost_tracker.is_unlimited_active(student):
         raise HTTPException(status_code=400, detail="This student is already on the unlimited plan")
 
@@ -141,6 +161,7 @@ class VerifySubscriptionRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_signature: str
     phone: str
+    student_id: int | None = None
 
 
 @router.post("/pay/verify-subscription")
@@ -158,7 +179,7 @@ def verify_student_subscription(body: VerifySubscriptionRequest, db: Session = D
     except razorpay.errors.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Payment could not be verified")
 
-    student = _find_real_student(db, body.phone)
+    student = _find_real_student(db, body.phone, body.student_id)
     subscription = razorpay_client.fetch_subscription(body.razorpay_subscription_id)
     payment = _client.payment.fetch(body.razorpay_payment_id)
     try:
@@ -203,7 +224,7 @@ def cancel_student_subscription(body: CreateSubscriptionRequest, db: Session = D
     """
     if _client is None:
         raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
-    student = _find_real_student(db, body.phone)
+    student = _find_real_student(db, body.phone, body.student_id)
     if not student.razorpay_subscription_id:
         raise HTTPException(status_code=400, detail="No active auto-renewing subscription found for this student")
     razorpay_client.cancel_subscription(student.razorpay_subscription_id)

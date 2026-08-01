@@ -80,13 +80,20 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
         )
 
 
-async def classify(system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6") -> LLMResult:
+async def classify(
+    system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6", max_tokens: int = 10,
+) -> LLMResult:
     """
     A separate, deterministic (temperature=0) call for narrow classification
     tasks (e.g. "what language should the reply be in") — kept apart from
     the main creative reply generation so the tutor's actual phrasing keeps
     its normal variation/warmth, while decisions that need to be consistent
     turn-to-turn don't ride on the same non-deterministic sampling.
+
+    max_tokens defaults to 10 (enough for a single bare label like "hi-IN"
+    or "progress") — callers whose classifier returns a structured
+    multi-field tag (e.g. a resolved quiz topic string) must pass a larger
+    value or the response gets truncated mid-tag.
     """
     if _client is None:
         return LLMResult(text=fallback, model=model)
@@ -94,7 +101,7 @@ async def classify(system_prompt: str, messages: list[dict], fallback: str, mode
     try:
         response = await _client.messages.create(
             model=model,
-            max_tokens=10,
+            max_tokens=max_tokens,
             temperature=0,
             system=_cached_system(system_prompt),
             messages=messages,

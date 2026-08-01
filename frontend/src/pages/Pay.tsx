@@ -22,6 +22,13 @@ function loadRazorpayScript(): Promise<void> {
 export default function Pay() {
   const [searchParams] = useSearchParams();
   const prefilledPhone = searchParams.get("phone") || "";
+  const studentIdParam = searchParams.get("student_id");
+  // Disambiguates a shared family phone with more than one child on it —
+  // only meaningful when it arrived alongside a specific phone (a link a
+  // teacher/parent generated already knows exactly which student it's
+  // for); typed in manually with no student_id, the backend falls back to
+  // its old lowest-id-on-this-phone behavior.
+  const studentId = studentIdParam ? Number(studentIdParam) : undefined;
   const [phone, setPhone] = useState(prefilledPhone);
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState<{ kind: "error" | "success"; message: string } | null>(null);
@@ -36,7 +43,7 @@ export default function Pay() {
     setLoading(true);
     try {
       await loadRazorpayScript();
-      const subscription = await payApi.createSubscription(phone);
+      const subscription = await payApi.createSubscription(phone, studentId);
 
       const razorpay = new window.Razorpay({
         key: subscription.key_id,
@@ -49,7 +56,7 @@ export default function Pay() {
           razorpay_signature: string;
         }) => {
           try {
-            const result = await payApi.verifySubscription({ ...response, phone });
+            const result = await payApi.verifySubscription({ ...response, phone, student_id: studentId });
             const expires = result.subscription_expires_at
               ? new Date(result.subscription_expires_at).toLocaleDateString()
               : "";
@@ -81,7 +88,7 @@ export default function Pay() {
     setLoading(true);
     try {
       await loadRazorpayScript();
-      const order = await payApi.createOrder(phone, Number(amount));
+      const order = await payApi.createOrder(phone, Number(amount), studentId);
 
       const razorpay = new window.Razorpay({
         key: order.key_id,
@@ -96,7 +103,7 @@ export default function Pay() {
           razorpay_signature: string;
         }) => {
           try {
-            const result = await payApi.verify({ ...response, phone });
+            const result = await payApi.verify({ ...response, phone, student_id: studentId });
             setStatus({
               kind: "success",
               message: `Payment successful — ₹${result.credited.toFixed(2)} added. New balance: ₹${result.balance.toFixed(2)}`,

@@ -8,14 +8,23 @@ interface Chapter {
   subject: string;
 }
 
+// Fixed, universal choices — NOT derived from the existing student roster.
+// Deriving from the roster was a real bug: a brand-new school (or one
+// whose students haven't had class/board filled in yet) had nothing to
+// populate these dropdowns with, so both silently showed no options at
+// all, which then also blocked the Chapter picker further down (it only
+// loads once a class is picked). A teacher must be able to target ANY
+// class/board here, including ones no student is enrolled in yet.
+const CLASS_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const BOARD_OPTIONS = ["CBSE", "ICSE", "BSEB", "State Board"];
+
 export default function AssignQuiz() {
   const [topic, setTopic] = useState("");
   const [classNum, setClassNum] = useState("");
   const [board, setBoard] = useState("");
-  const [classOptions, setClassOptions] = useState<string[]>([]);
-  const [boardOptions, setBoardOptions] = useState<string[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [chapterId, setChapterId] = useState("");
+  const [subject, setSubject] = useState("");
+  const [selectedChapterIds, setSelectedChapterIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ assigned_count: number; assigned: string[]; skipped_already_in_quiz: string[] } | null>(
@@ -23,23 +32,22 @@ export default function AssignQuiz() {
   );
 
   useEffect(() => {
-    // Populated from the actual student roster rather than free-text entry
-    // — a typo or case mismatch (e.g. "cbse" vs "CBSE") would silently
-    // return "No matching students found," since the backend filters by
-    // exact match.
-    api.listStudents().then((students) => {
-      setClassOptions([...new Set(students.map((s) => s.class).filter((c): c is string => !!c))].sort());
-      setBoardOptions([...new Set(students.map((s) => s.board).filter((b): b is string => !!b))].sort());
+    // The school already knows its own board — default to it instead of a
+    // blank "Select a board…" that doesn't correspond to any real
+    // curriculum depth/terminology choice. A teacher can still override
+    // for a mixed-board school.
+    api.getSchool().then((school) => {
+      if (school.board) setBoard(school.board);
     });
   }, []);
 
   useEffect(() => {
     // The seeded curriculum is keyed by class AND board (e.g. CBSE/NCERT vs
     // BSEB have different chapter lists for the same class) — only fetch
-    // once a specific class is picked (chapters don't make sense for "all
-    // classes"). Defaults to CBSE when no board filter is selected, since
-    // that's the larger seeded curriculum.
-    setChapterId("");
+    // once a specific class is picked. Defaults to CBSE when no board is
+    // set, since that's the larger seeded curriculum.
+    setSubject("");
+    setSelectedChapterIds(new Set());
     if (!classNum) {
       setChapters([]);
       return;
@@ -47,16 +55,43 @@ export default function AssignQuiz() {
     api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase()).then(setChapters);
   }, [classNum, board]);
 
+  const subjects = [...new Set(chapters.map((c) => c.subject))].sort();
+  const chaptersForSubject = chapters.filter((c) => c.subject === subject);
+
+  function toggleChapter(id: number) {
+    setSelectedChapterIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   async function handleAssign(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setResult(null);
+    if (!classNum) {
+      // A quiz generated with no grade level in mind isn't pitched at
+      // anyone properly — the backend rejects this too, but catching it
+      // here avoids a round-trip for what's always a real mistake, not an
+      // edge case worth silently allowing.
+      setError("Please select a class — a quiz needs a grade level to be pitched at the right depth.");
+      return;
+    }
+    if (selectedChapterIds.size === 0 && !topic.trim()) {
+      setError("Pick at least one chapter, or type a topic.");
+      return;
+    }
     setLoading(true);
     try {
       const response = await api.assignQuiz({
-        topic: chapterId ? undefined : topic,
-        chapter_id: chapterId ? Number(chapterId) : undefined,
-        class_: classNum || undefined,
+        // When chapters are selected, topic is just an optional subtopic
+        // focus within them (the backend combines the two) — never
+        // required in that case.
+        topic: topic.trim() || undefined,
+        chapter_ids: selectedChapterIds.size > 0 ? Array.from(selectedChapterIds) : undefined,
+        class_: classNum,
         board: board || undefined,
       });
       setResult(response);
@@ -80,9 +115,9 @@ export default function AssignQuiz() {
         <form onSubmit={handleAssign}>
           <label>
             Class
-            <select value={classNum} onChange={(e) => setClassNum(e.target.value)}>
-              <option value="">All classes</option>
-              {classOptions.map((c) => (
+            <select value={classNum} onChange={(e) => setClassNum(e.target.value)} required>
+              <option value="">Select a class…</option>
+              {CLASS_OPTIONS.map((c) => (
                 <option key={c} value={c}>
                   Class {c}
                 </option>
@@ -90,41 +125,67 @@ export default function AssignQuiz() {
             </select>
           </label>
 
-          {chapters.length > 0 && (
+          <label>
+            Board
+            <select value={board} onChange={(e) => setBoard(e.target.value)}>
+              <option value="">Select a board…</option>
+              {BOARD_OPTIONS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {subjects.length > 0 && (
             <label>
-              Chapter (optional — from the curriculum for this class and board)
-              <select value={chapterId} onChange={(e) => setChapterId(e.target.value)}>
-                <option value="">— pick a chapter, or type a topic below —</option>
-                {chapters.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.subject}: {c.chapter_no ? `Ch. ${c.chapter_no} — ` : ""}
-                    {c.name}
+              Subject
+              <select
+                value={subject}
+                onChange={(e) => {
+                  setSubject(e.target.value);
+                  setSelectedChapterIds(new Set());
+                }}
+              >
+                <option value="">Select a subject…</option>
+                {subjects.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
                   </option>
                 ))}
               </select>
             </label>
           )}
 
+          {chaptersForSubject.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <p className="muted" style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                Chapters (pick one or more — optional, or type a topic below)
+              </p>
+              <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
+                {chaptersForSubject.map((c) => (
+                  <label key={c.id} className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedChapterIds.has(c.id)}
+                      onChange={() => toggleChapter(c.id)}
+                    />
+                    {c.chapter_no ? `Ch. ${c.chapter_no} — ` : ""}
+                    {c.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
           <label>
-            Topic {chapterId && <span className="muted">(ignored — a chapter is selected above)</span>}
+            {selectedChapterIds.size > 0 ? "Focus within selected chapters (optional)" : "Topic"}
             <input
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
-              placeholder="e.g. circular motion"
-              disabled={!!chapterId}
-              required={!chapterId}
+              placeholder={selectedChapterIds.size > 0 ? "e.g. HCF and LCM only" : "e.g. circular motion"}
+              required={selectedChapterIds.size === 0}
             />
-          </label>
-          <label>
-            Board
-            <select value={board} onChange={(e) => setBoard(e.target.value)}>
-              <option value="">All boards</option>
-              {boardOptions.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
           </label>
           <button type="submit" disabled={loading}>
             {loading ? "Sending…" : "Assign Quiz"}

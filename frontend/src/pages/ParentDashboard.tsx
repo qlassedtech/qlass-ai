@@ -34,7 +34,10 @@ export default function ParentDashboard() {
     );
   }
 
-  const payUrl = `${window.location.origin}/pay?phone=${encodeURIComponent(profile.student_phone)}`;
+  // student_id disambiguates a shared family phone with more than one
+  // child registered on it — without it, a payment could silently land in
+  // a sibling's wallet instead of this specific linked student's.
+  const payUrl = `${window.location.origin}/pay?phone=${encodeURIComponent(profile.student_phone)}&student_id=${profile.student_id}`;
 
   return (
     <ParentLayout>

@@ -27,7 +27,6 @@ from app.services.whatsapp_client import (
 from app.services.profile_builder import (
     next_missing_field,
     should_ask_this_turn,
-    extract_profile_answer,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
 from app.services.llm_client import translate_with_claude
@@ -53,14 +52,13 @@ from app.services.referral import (
     evaluate_referral_milestones,
     REFERRAL_SIGNUP_BONUS,
 )
-from app.services.intent_classifier import classify_intent, parse_intent
+from app.services.intent_classifier import classify_intent
 from app.services.active_profile import (
-    looks_like_new_profile_request,
-    extract_switch_target_name,
+    classify_profile_routing,
+    ProfileRouting,
     get_active_profile,
     set_active_profile,
     build_disambiguation_prompt,
-    match_student_by_name,
 )
 from app.services.progress_report import (
     get_student_stats,
@@ -70,11 +68,6 @@ from app.services.progress_report import (
     format_progress_message,
 )
 from app.services.quiz_service import (
-    extract_quiz_topic,
-    extract_mock_test_topic,
-    is_vague_quiz_topic,
-    looks_like_mock_test_request,
-    looks_like_quiz_skip,
     generate_quiz_questions,
     grade_answer,
     MOCK_TEST_QUESTION_COUNT,
@@ -116,6 +109,18 @@ MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
     "🎁 Refer a Friend": "refer a friend",
     "🆘 Talk to Teacher": "talk to teacher",
+}
+
+# Offered instead of a plain "you're out of credits" text (see the credit
+# gate in _handle_message) — a real option to act on beats a dead end.
+# "🏫 Ask My School" maps onto the SAME "talk to teacher" command as the
+# main menu button above (reuses get_escalation_recipients — no separate
+# path needed), rather than inventing a new intent for what's really the
+# same underlying action.
+CREDIT_EXHAUSTED_BUTTONS = ["💳 Top Up Credits", "🏫 Ask My School"]
+CREDIT_BUTTON_TO_COMMAND = {
+    "💳 Top Up Credits": "top up credits",
+    "🏫 Ask My School": "talk to teacher",
 }
 
 # Never keep production-cost bypasses for particular phone numbers. Feature
@@ -306,7 +311,31 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     if not students:
         return _create_new_student(db, from_phone, message_text), None
 
-    if looks_like_new_profile_request(message_text):
+    # Skipped entirely for audio/image/document messages (empty probe text
+    # at this point — see _handle_message) rather than spending a call on
+    # nothing to classify; same accepted gap as before AI replaced the
+    # regex here (a student on an ambiguous shared phone still gets asked
+    # "who's this?" before a voice/photo message is processed).
+    routing = (
+        await classify_profile_routing(message_text, [s.name for s in students if s.name])
+        if message_text.strip()
+        else ProfileRouting(False, None, None, None)
+    )
+
+    def resolved(student: Student, early_reply: str | None = None) -> tuple[Student, str | None]:
+        # Billed to whichever student this classification ultimately
+        # resolved to (or the default students[0] on a still-ambiguous
+        # result) — this is a real LLM call now, unlike the regex it
+        # replaced, so it must be recorded like any other.
+        if routing.llm_result is not None:
+            cost_tracker.record_claude_usage(
+                db, routing.llm_result.model, routing.llm_result.input_tokens, routing.llm_result.output_tokens,
+                student.id, cache_write_tokens=routing.llm_result.cache_write_tokens,
+                cache_read_tokens=routing.llm_result.cache_read_tokens,
+            )
+        return student, early_reply
+
+    if routing.new_profile_request:
         new_student = _create_new_student(db, from_phone)
         await set_active_profile(from_phone, new_student.id)
         missing = next_missing_field(new_student)
@@ -314,42 +343,42 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
         if missing:
             new_student.pending_profile_field = missing[0]
             db.commit()
-        return new_student, f"Got it, setting up a new profile! {question}"
+        return resolved(new_student, f"Got it, setting up a new profile! {question}")
 
     if len(students) == 1:
-        return students[0], None
+        return resolved(students[0])
 
     # Explicit switch request ("switch to Raj", "it's Priya now") overrides
     # any cached active profile — without this, once one sibling's session
     # is cached, the other has no way to take over except waiting out the
     # TTL or happening to mention their own name in an ordinary question.
-    switch_target = extract_switch_target_name(message_text)
-    if switch_target:
-        match = next((s for s in students if s.name and s.name.lower() == switch_target.lower()), None)
+    if routing.switch_target:
+        match = next((s for s in students if s.name and s.name.lower() == routing.switch_target.lower()), None)
         if match:
             await set_active_profile(from_phone, match.id)
-            return match, f"Switched! Hey {match.name}, what can I help you with? 😊"
+            return resolved(match, f"Switched! Hey {match.name}, what can I help you with? 😊")
         # Named someone we don't have a profile for — don't silently create
         # one on a guess (typo risk); ask instead.
         existing_names = ", ".join(s.name for s in students if s.name)
-        return students[0], (
-            f"I don't have a profile for '{switch_target}' yet — I've got {existing_names} on this number. "
+        return resolved(students[0], (
+            f"I don't have a profile for '{routing.switch_target}' yet — I've got {existing_names} on this number. "
             f"Want me to set up a new profile instead?"
-        )
+        ))
 
     active_id = await get_active_profile(from_phone)
     if active_id:
         match = next((s for s in students if s.id == active_id), None)
         if match:
-            return match, None
+            return resolved(match)
 
-    name_match = match_student_by_name(students, message_text)
-    if name_match:
-        await set_active_profile(from_phone, name_match.id)
-        return name_match, None
+    if routing.name_match:
+        match = next((s for s in students if s.name == routing.name_match), None)
+        if match:
+            await set_active_profile(from_phone, match.id)
+            return resolved(match)
 
     prompt = build_disambiguation_prompt([s.name for s in students])
-    return students[0], prompt
+    return resolved(students[0], prompt)
 
 
 @router.post("/webhook")
@@ -559,13 +588,29 @@ async def _handle_message(db: Session, payload: dict) -> None:
     button_reply = parse_incoming_button_reply(payload)
     if button_reply:
         button_from_phone, button_text = button_reply
-        parsed = (button_from_phone, MENU_BUTTON_TO_COMMAND.get(button_text, button_text))
+        command = MENU_BUTTON_TO_COMMAND.get(button_text) or CREDIT_BUTTON_TO_COMMAND.get(button_text, button_text)
+        parsed = (button_from_phone, command)
     else:
         parsed = parse_incoming_message(payload)
     probe_text = parsed[1] if parsed else ""
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
         await send_whatsapp_message(from_phone, early_reply)
+        return
+
+    # Tapping "💳 Top Up Credits" (see the credit-exhausted notice below)
+    # must work regardless of churn/pilot/credit state — sending a payment
+    # link costs no AI credits, so it's intercepted here, before any of
+    # those gates, rather than getting stuck behind the very check it's
+    # meant to resolve.
+    if probe_text == "top up credits":
+        # student_id disambiguates a shared family phone with more than one
+        # child on it — without it, a payment could silently land in a
+        # sibling's wallet instead of the one actually texting right now.
+        pay_link = f"{settings.portal_base_url}/pay?phone={student.phone}&student_id={student.id}"
+        await send_whatsapp_message(
+            from_phone, f"Here's your top-up link — pay directly and credits land instantly:\n{pay_link}",
+        )
         return
 
     # A school marked "churned" in the sales pipeline (see
@@ -597,10 +642,29 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # against one shared account-wide balance. Demo/testing numbers get
     # unlimited credits (see FULL_ACCESS_PHONES) — they're never metered.
     if from_phone not in FULL_ACCESS_PHONES and not cost_tracker.has_credits(db, student.id):
-        await _send_localized_notice(
-            db, from_phone, student,
-            "You're out of AI credits — ask your school to top up your account to keep chatting with me!"
-        )
+        # A dead-end text notice left a student stuck with no way to act —
+        # real options (pay directly, or have the school notified) beat
+        # just being told to go ask someone in person.
+        notice = "You're out of AI credits for now — here are your options:"
+        lang = student.preferred_language or "en-IN"
+        if lang and not lang.startswith("en"):
+            translated_result = await translate_with_claude(
+                notice, lang, speaker_gender=_assistant_voice_gender(student), student_state=student.state
+            )
+            if translated_result:
+                notice = translated_result.text
+                cost_tracker.record_claude_usage(
+                    db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens,
+                    student.id, cache_write_tokens=translated_result.cache_write_tokens,
+                    cache_read_tokens=translated_result.cache_read_tokens,
+                )
+        button_result = await send_whatsapp_buttons(from_phone, notice, CREDIT_EXHAUSTED_BUTTONS)
+        if not button_result.get("sent"):
+            await send_whatsapp_message(
+                from_phone,
+                "You're out of AI credits — reply 'top up credits' for your payment link, or 'talk to "
+                "teacher' to let your school know, to keep chatting with me!",
+            )
         return
 
     if parsed:
@@ -723,50 +787,45 @@ async def _handle_message(db: Session, payload: dict) -> None:
         "turn start phone=%s student_id=%s pending_field=%s active_quiz_id=%s text=%r",
         from_phone, student.id, student.pending_profile_field, student.active_quiz_id, message_text[:200],
     )
-    quiz_topic_request = extract_quiz_topic(message_text)
-    if quiz_topic_request and is_vague_quiz_topic(quiz_topic_request):
-        # "quiz on the same"/"quiz on this" etc. captures the referential
-        # phrase itself as the "topic" — resolve it to whatever topic was
-        # actually last discussed instead of literally quizzing on "the
-        # same". Prefers last_discussed_topic (updated on EVERY real
-        # tutoring turn, see the LLM branch below) over TopicProgress,
-        # which is only written when a scored check question is evaluated —
-        # relying on TopicProgress alone previously resolved to a stale
-        # topic from an unrelated earlier session whenever the answer to
-        # today's check question and the quiz request arrived in the same
-        # message (confirmed live: "demand and supply" resolved to a
-        # leftover physics topic from hours earlier). Falls back to
-        # TopicProgress, then None (treated as a normal tutoring message),
-        # for a student who hasn't triggered last_discussed_topic yet.
-        if student.last_discussed_topic:
-            quiz_topic_request = student.last_discussed_topic
-        else:
-            last_topic_row = (
-                db.query(TopicProgress.topic)
-                .filter(TopicProgress.student_id == student.id)
-                .order_by(TopicProgress.created_at.desc())
-                .first()
-            )
-            quiz_topic_request = last_topic_row[0] if last_topic_row else None
-
-    mock_test_request = looks_like_mock_test_request(message_text)
+    # Resolves "quiz on the same"/"quiz on this" — passed to the classifier
+    # below so it can substitute the real topic itself rather than quizzing
+    # on the literal referential phrase. Prefers last_discussed_topic
+    # (updated on EVERY real tutoring turn, see the LLM branch below) over
+    # TopicProgress, which is only written when a scored check question is
+    # evaluated — relying on TopicProgress alone previously resolved to a
+    # stale topic from an unrelated earlier session whenever the answer to
+    # today's check question and the quiz request arrived in the same
+    # message (confirmed live: "demand and supply" resolved to a leftover
+    # physics topic from hours earlier).
+    last_topic_row = (
+        db.query(TopicProgress.topic)
+        .filter(TopicProgress.student_id == student.id)
+        .order_by(TopicProgress.created_at.desc())
+        .first()
+    )
+    last_topic_context = student.last_discussed_topic or (last_topic_row[0] if last_topic_row else None)
 
     # A single cheap, deterministic classification call (same pattern as the
-    # tutor's own language classifier) replacing what used to be five
-    # separate hardcoded phrase-lists — one per intent below. Those only
-    # ever matched an exact fixed string (e.g. "my progress"), so any other
+    # tutor's own language classifier) replacing what used to be several
+    # separate hardcoded phrase-lists — one per intent, plus separate regex
+    # for quiz/mock-test/skip detection. Those only ever matched an exact
+    # fixed string (e.g. "my progress", "quiz me on X"), so any other
     # phrasing of the same request (confirmed live: "what is my
     # performance") silently fell through to the LLM improvising an answer
     # instead of the real command. Run for every message that reaches this
     # point, but only students who already passed the churn/pilot/credit
     # gates above ever reach here, so this never spends money on a blocked
     # account.
-    intent_result = await classify_intent(message_text)
+    classification = await classify_intent(message_text, last_discussed_topic=last_topic_context)
     cost_tracker.record_claude_usage(
-        db, intent_result.model, intent_result.input_tokens, intent_result.output_tokens, student.id,
-        cache_write_tokens=intent_result.cache_write_tokens, cache_read_tokens=intent_result.cache_read_tokens,
+        db, classification.llm_result.model, classification.llm_result.input_tokens,
+        classification.llm_result.output_tokens, student.id,
+        cache_write_tokens=classification.llm_result.cache_write_tokens,
+        cache_read_tokens=classification.llm_result.cache_read_tokens,
     )
-    intent = parse_intent(intent_result.text)
+    intent = classification.intent
+    quiz_topic_request = classification.quiz_topic
+    mock_test_request = classification.wants_mock_test
 
     if intent == "menu" and not student.active_quiz_id:
         # Free UI affordance — returns immediately without touching
@@ -790,37 +849,11 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # update nudge via the LLM below — treat it as an implicit decline
         # (leave the class as-is) and let quiz_topic_request/mock_test_
         # request start the quiz further down in this same if/elif ladder.
-        # Covers both since a mock-test request wouldn't otherwise be caught
-        # here (it's a separate flag, not part of extract_quiz_topic's own
-        # patterns).
         student.pending_profile_field = None
         student.suggested_class = None
         db.commit()
 
-    # Extracted (and saved) up front, independent of the branch ladder below —
-    # a pending profile question can be answered inside a message that ALSO
-    # has real tutoring content (e.g. "I don't know. Nikhil" answering both
-    # the tutor's own question and "what's your name?"). Saving the field
-    # here doesn't decide how the rest of the message gets handled; a
-    # non-empty remainder means there's still something to actually answer,
-    # so processing continues into the normal branch ladder below instead of
-    # being short-circuited into a content-free "Got it, thanks!".
-    profile_answer = None
-    if student.pending_profile_field and student.pending_profile_field != "class_confirm":
-        profile_answer = extract_profile_answer(student.pending_profile_field, message_text)
-        if profile_answer:
-            value, _remaining = profile_answer
-            setattr(student, student.pending_profile_field, value)
-            student.pending_profile_field = None
-            db.commit()
-
-    if profile_answer and not profile_answer[1]:
-        # The whole message was purely the profile answer (already saved
-        # above) — nothing else in it to give a real tutoring reply to, so
-        # skip the LLM call same as before.
-        reply_text = "Got it, thanks! 👍 What else can I help you with?"
-        detected_lang = student.preferred_language or "en-IN"
-    elif student.active_quiz_id and intent == "quiz_stop":
+    if student.active_quiz_id and intent == "quiz_stop":
         # No extra LLM call beyond the classification above, so available
         # even if the monthly credit is exhausted (a student shouldn't get
         # stuck unable to exit a quiz).
@@ -891,7 +924,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             detected_lang = student.preferred_language or "en-IN"
         else:
             current_question = quiz_questions[answered_count]
-            if looks_like_quiz_skip(message_text):
+            if classification.quiz_skip:
                 # No grading call needed — is_correct=None marks it as
                 # skipped rather than wrong, so it doesn't count against
                 # the student's score at the end.
@@ -952,8 +985,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
                     )
         detected_lang = student.preferred_language or "en-IN"
     elif mock_test_request:
-        mock_topic = extract_mock_test_topic(message_text) or "a mixed review covering everything we've discussed so far"
-        questions_data, gen_result = await generate_quiz_questions(mock_topic, student.class_, num_questions=MOCK_TEST_QUESTION_COUNT)
+        mock_topic = classification.mock_test_topic or "a mixed review covering everything we've discussed so far"
+        questions_data, gen_result = await generate_quiz_questions(
+            mock_topic, student.class_, num_questions=MOCK_TEST_QUESTION_COUNT, board=student.board,
+        )
         cost_tracker.record_claude_usage(
             db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
             cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
@@ -983,7 +1018,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             )
         detected_lang = student.preferred_language or "en-IN"
     elif quiz_topic_request:
-        questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_)
+        questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_, board=student.board)
         cost_tracker.record_claude_usage(
             db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
             cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
@@ -1022,23 +1057,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
         evaluate_referral_milestones(db, student)
         evaluate_habit_milestones(db, student)
 
-        # Either there was no pending question, or the student ignored it and
-        # asked something else — drop the pending question either way so we
-        # don't keep misreading their answers, then answer normally.
-        # "class_confirm" is different: whether this message actually
-        # answers it is decided by the LLM itself below (pending_class_
-        # confirm / result["class_confirm"]), not a local yes/no heuristic —
-        # a plain word-matching check here previously mis-swallowed mixed
-        # messages like "12.. no" (an attempted maths answer AND a decline),
-        # discarding the "12" entirely. So it's left alone here and resolved
-        # after the LLM call instead.
+        # Whether this message actually answers a pending onboarding question
+        # (name/class/board/school) or the class-update nudge is decided by
+        # the LLM itself below (pending_profile_field/pending_class_confirm
+        # -> result["profile_answer"]/result["class_confirm"]), not a local
+        # regex heuristic — a plain word-matching check here previously
+        # mis-swallowed mixed messages (e.g. "I don't know. Nikhil", or
+        # "12.. no" declining a class-update nudge while also attempting a
+        # maths answer), discarding real content entirely. So neither is
+        # cleared here; both are resolved after the LLM call instead.
         pending_class_confirm = (
             student.suggested_class if student.pending_profile_field == "class_confirm" else None
         )
-        if student.pending_profile_field and student.pending_profile_field != "class_confirm":
-            student.pending_profile_field = None
-            student.suggested_class = None
-            db.commit()
+        pending_profile_field = (
+            student.pending_profile_field if student.pending_profile_field != "class_confirm" else None
+        )
 
         # Surface topics this student has previously gotten wrong, so the
         # tutor can naturally revisit them rather than forgetting the moment
@@ -1070,6 +1103,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             video_enabled=student.has_feature("youtube_videos"),
             active_document_text=student.active_document_text,
             pending_class_confirm=pending_class_confirm,
+            pending_profile_field=pending_profile_field,
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
@@ -1086,6 +1120,16 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 student.class_ = pending_class_confirm
             student.pending_profile_field = None
             student.suggested_class = None
+            db.commit()
+        elif pending_profile_field:
+            # Same idea: whatever the LLM extracted (or didn't) settles this
+            # turn's onboarding question. If it didn't get an answer this
+            # turn, should_ask_this_turn/next_missing_field further below
+            # will naturally ask again in a few messages — this doesn't
+            # need to keep retrying the same turn.
+            if result["profile_answer"]:
+                setattr(student, pending_profile_field, result["profile_answer"])
+            student.pending_profile_field = None
             db.commit()
         usage = result["usage"]
         cost_tracker.record_claude_usage(

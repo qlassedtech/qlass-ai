@@ -22,6 +22,18 @@ _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
 _VIDEO_QUERY_TAG = re.compile(r"\n?\[\[VIDEO_QUERY: (.*?)\]\]")
 
 
+# What each Student.pending_profile_field value actually asks the student,
+# and how the extracted answer should be formatted — mirrors the questions
+# in app.services.profile_builder.PROFILE_QUESTIONS.
+_PROFILE_FIELD_LABELS = {
+    "name": "their name",
+    "class_": "which class/grade they're in — the answer must be JUST the number, e.g. \"10\", "
+    "not \"I'm in class 10\" or \"10th\"",
+    "board": "which education board they study under (e.g. CBSE, ICSE, a State board)",
+    "school": "which school they study at",
+}
+
+
 def _track_field(block: str, name: str) -> str | None:
     match = re.search(rf'\b{re.escape(name)}=("[^"]*"|[A-Za-z]+)', block)
     if not match:
@@ -57,6 +69,7 @@ def parse_track_reply(raw_reply: str) -> dict:
             "video_query": None,
             "solved_directly": None,
             "class_confirm": None,
+            "profile_answer": None,
         }
 
     block = match.group(1)
@@ -71,6 +84,8 @@ def parse_track_reply(raw_reply: str) -> dict:
     wants_video = _track_field(block, "video") == "true"
     solved = _track_field(block, "solved")
     class_confirm_raw = _track_field(block, "class_confirm")
+    profile_answer_raw = _track_field(block, "profile_answer")
+    profile_answer = profile_answer_raw.strip() if profile_answer_raw and profile_answer_raw.upper() != "NONE" else None
 
     image_prompt = None
     image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
@@ -105,6 +120,7 @@ def parse_track_reply(raw_reply: str) -> dict:
         "video_query": video_query,
         "solved_directly": {"true": True, "false": False, "na": None}.get(solved),
         "class_confirm": {"yes": True, "no": False, "na": None}.get(class_confirm_raw),
+        "profile_answer": profile_answer,
     }
 
 
@@ -121,6 +137,7 @@ class TutorAgent(BaseAgent):
         video_enabled: bool = False,
         active_document_text: str | None = None,
         pending_class_confirm: str | None = None,
+        pending_profile_field: str | None = None,
     ) -> str:
         profile = (
             f"You are the Qlass AI Tutor, speaking with a student in class "
@@ -163,6 +180,16 @@ class TutorAgent(BaseAgent):
             "turn in the conversation to tell), evaluate it first: say clearly whether they got it "
             "right, gently correct any misunderstanding in their own words, THEN continue — either "
             "go deeper on the same topic if they struggled, or move on if they've got it.\n"
+            "- CRITICAL — a short reply right after you asked a check question (even just one or two "
+            "words, and even if it names something that sounds like a different subject, e.g. you "
+            "asked \"closer to biology or psychology?\" and the student wrote \"Physics\") is almost "
+            "always an attempted ANSWER to your question, not a request to change subjects — students "
+            "guess wrong, misremember a term, or answer with the wrong word entirely. Default to "
+            "evaluating it as an answer (and correct it if it's wrong, explaining why) rather than "
+            "silently abandoning your own question and jumping to whatever subject the word suggests. "
+            "Only treat it as a genuine subject-change request when the student's own wording actually "
+            "signals that intent (e.g. \"can we do Physics instead\", \"I want to study Physics now\", "
+            "\"let's switch to Physics\") — a bare one-word reply on its own is NOT that signal.\n"
             "- Don't ask a check question after every single message — skip it for simple factual "
             "questions, greetings, or when the student is clearly just chatting, asking to move to "
             "a new unrelated topic, or asking for practice questions directly (give those instead).\n"
@@ -200,7 +227,7 @@ class TutorAgent(BaseAgent):
             "reply with exactly one line in this exact format, nothing else on that line:\n"
             '[[TRACK topic="<short topic name>" evaluated=<true|false> correct=<true|false|null> '
             "image=<true|false> audio=<true|false> off_level=<true|false> video=<true|false> "
-            "solved=<true|false|na> class_confirm=<yes|no|na>]]\n"
+            'solved=<true|false|na> class_confirm=<yes|no|na> profile_answer="<value>|NONE"]]\n'
             "- topic: a short 1-4 word name for what's being discussed right now (e.g. \"buoyancy\", "
             "\"contact force\") — keep it consistent with how you referred to this topic earlier in "
             "the conversation if it's the same one.\n"
@@ -228,6 +255,19 @@ class TutorAgent(BaseAgent):
                 f"address this at all — don't ask about it again yourself, just answer normally.\n"
                 if pending_class_confirm
                 else "- class_confirm: always na — there's no pending class-update question this turn.\n"
+            )
+            + (
+                f"- profile_answer: you (the system) already appended a question to your OWN previous "
+                f"reply asking {_PROFILE_FIELD_LABELS.get(pending_profile_field, 'a profile question')}. "
+                f"If the student's CURRENT message answers it — even mixed in with other content (e.g. "
+                f'"I don\'t know. Nikhil" answering both an academic question and "what\'s your name?") '
+                f"— extract just the clean answer value into profile_answer (quoted). Output NONE if "
+                f"their message doesn't actually address it at all (an unrelated question, or ignoring "
+                f"it entirely) — never guess or invent a value. This is a silent background extraction; "
+                f"you don't need to specially acknowledge it in your visible reply, just answer whatever "
+                f"else they asked as normal.\n"
+                if pending_profile_field
+                else '- profile_answer: always NONE — there\'s no pending onboarding question this turn.\n'
             )
             + (
                 "- image: true ONLY if the student explicitly asked for a picture/diagram/drawing, OR "
@@ -357,12 +397,13 @@ class TutorAgent(BaseAgent):
         video_enabled: bool = False,
         active_document_text: str | None = None,
         pending_class_confirm: str | None = None,
+        pending_profile_field: str | None = None,
     ) -> dict:
         # TODO Phase 6: replace [] with real RAG retrieval against document_chunks
         retrieved_chunks: list[str] = []
         system_prompt = self.build_context(
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
-            active_document_text, pending_class_confirm,
+            active_document_text, pending_class_confirm, pending_profile_field,
         )
         messages = (history or []) + [{"role": "user", "content": message}]
         current_lang = student.get("preferred_language") or "en-IN"

@@ -265,7 +265,8 @@ def create_student(
 ):
     student = Student(
         name=body.name, phone=body.phone, class_=body.class_,
-        board=body.board or tenancy.default_board_for_centre(db, teacher.centre_id), school=body.school,
+        board=body.board or tenancy.default_board_for_centre(db, teacher.centre_id),
+        school=body.school or tenancy.default_school_for_centre(db, teacher.centre_id),
         features=dict(DEFAULT_FEATURES), centre_id=teacher.centre_id,
     )
     db.add(student)
@@ -355,14 +356,16 @@ def confirm_student_bulk_upload(
     super_admin must pass the same centre_id they previewed with instead of
     silently orphaning students with no school at all (Student.centre_id is
     nullable, so this previously failed silently rather than erroring). A
-    row's own `board` value always wins if present (e.g. a school with
-    mixed-board sections); otherwise a new student defaults to the school's
-    own known board (see tenancy.default_board_for_centre) instead of being
-    left blank.
+    row's own `board`/`school` value always wins if present (e.g. a school
+    with mixed-board sections, or a student whose real school differs from
+    the uploading centre); otherwise a new student defaults to the school's
+    own known board and name (see tenancy.default_board_for_centre/
+    default_school_for_centre) instead of being left blank.
     """
     centre = _resolve_centre_for_write(db, teacher, body.centre_id)
     selected_features = {**DEFAULT_FEATURES, **body.features}
     centre_default_board = tenancy.default_board_for_centre(db, centre.id)
+    centre_default_school = tenancy.default_school_for_centre(db, centre.id)
 
     # One query for every existing student this batch might touch, instead
     # of one query per row — a few-hundred-row upload previously meant a
@@ -400,7 +403,7 @@ def confirm_student_bulk_upload(
                 name=name, phone=phone,
                 class_=str(row.get("class") or "").strip() or None,
                 board=str(row.get("board") or "").strip() or centre_default_board,
-                school=str(row.get("school") or "").strip() or None,
+                school=str(row.get("school") or "").strip() or centre_default_school,
                 features=selected_features,
                 centre_id=centre.id,
             )
@@ -518,7 +521,10 @@ async def send_payment_link(
 ):
     student = _get_scoped_student_or_404(db, teacher, student_id)
     to_phone = body.to_phone or student.phone
-    link = f"{settings.portal_base_url}/pay?phone={student.phone}"
+    # student_id disambiguates a shared family phone with more than one
+    # child enrolled on it — without it, a payment could silently land in
+    # a sibling's wallet instead of this specific student's.
+    link = f"{settings.portal_base_url}/pay?phone={student.phone}&student_id={student.id}"
     message = f"Top up *{student.name}*'s Qlass AI Tutor credits here: {link}"
     result = await send_whatsapp_message(to_phone, message)
     if not result.get("sent"):
@@ -1091,9 +1097,29 @@ async def upload_teacher_photo(
     return {"photo_url": target.photo_url}
 
 
+def _resolve_chapters_topic(db: Session, chapter_ids: list[int], extra_focus: str | None) -> str:
+    """
+    Combines one or more selected chapters into a single topic string for
+    the question/slide generator, preserving the order the teacher picked
+    them in (not DB order) — e.g. chapter_ids=[7, 3] on Real Numbers (3)
+    and Coordinate Geometry (7) produces "Coordinate Geometry, Real
+    Numbers". extra_focus (optional) narrows within those chapters (e.g.
+    "just HCF and LCM") rather than covering each in full.
+    """
+    chapters = db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).all()
+    chapters_by_id = {c.id: c for c in chapters}
+    missing = [cid for cid in chapter_ids if cid not in chapters_by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Chapter(s) not found: {missing}")
+    names = ", ".join(chapters_by_id[cid].name for cid in chapter_ids)
+    return f"{names}: {extra_focus.strip()}" if extra_focus and extra_focus.strip() else names
+
+
 class WorkbookGenerateRequest(BaseModel):
-    topic: str
+    topic: str | None = None
+    chapter_ids: list[int] = []
     class_: str | None = None
+    board: str | None = None
     num_questions: int = 10
     include_answer_key: bool = True
 
@@ -1105,16 +1131,29 @@ async def generate_workbook(
     """
     Teacher-facing practice-set PDF generator — billed to the school's own
     credit ledger (school_billing), not any student's wallet, since this is
-    a teacher tool rather than tutoring usage.
+    a teacher tool rather than tutoring usage. Chapter selection (from the
+    seeded curriculum for the given class/board) is the primary path, same
+    as quiz assignment and presentations — a bare free-text topic with no
+    class/chapter context produces generic, unpitched worksheets, so
+    chapter_ids is how a real syllabus-aligned worksheet gets its depth
+    and scope; topic alone remains for a genuinely custom topic outside
+    the seeded curriculum.
     """
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to generate a workbook")
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for workbook generation")
 
+    if body.chapter_ids:
+        topic = _resolve_chapters_topic(db, body.chapter_ids, body.topic)
+    else:
+        topic = body.topic
+    if not topic:
+        raise HTTPException(status_code=400, detail="Either topic or chapter_ids is required")
+
     centre = db.query(Centre).filter(Centre.id == teacher.centre_id).first()
 
-    questions, llm_result = await generate_workbook_questions(body.topic, body.class_, body.num_questions)
+    questions, llm_result = await generate_workbook_questions(topic, body.class_, body.num_questions, board=body.board)
     school_billing.record_claude_usage(
         db, teacher.centre_id, "workbook_pdf", llm_result.input_tokens, llm_result.output_tokens
     )
@@ -1122,10 +1161,10 @@ async def generate_workbook(
         raise HTTPException(status_code=502, detail="Couldn't generate questions for that topic — try again")
 
     pdf_bytes = render_workbook_pdf(
-        topic=body.topic, class_=body.class_, school_name=centre.name, school_logo_url=centre.logo_url,
+        topic=topic, class_=body.class_, school_name=centre.name, school_logo_url=centre.logo_url,
         questions=questions, include_answer_key=body.include_answer_key,
     )
-    filename = f"{body.topic.replace(' ', '_')}_worksheet.pdf"
+    filename = f"{topic.replace(' ', '_').replace(',', '')[:60]}_worksheet.pdf"
     return StreamingResponse(
         io.BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
@@ -1161,7 +1200,7 @@ def list_curriculum_chapters(
 
 class AssignQuizRequest(BaseModel):
     topic: str | None = None
-    chapter_id: int | None = None  # takes priority over topic when both are given
+    chapter_ids: list[int] = []  # takes priority over topic when both are given; may span multiple chapters
     class_: str | None = None
     board: str | None = None
     phone_numbers: list[str] | None = None  # bypass class_/board filters, target these students directly
@@ -1186,14 +1225,21 @@ async def assign_quiz(
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for quiz generation")
 
-    chapter = None
-    if body.chapter_id:
-        chapter = db.query(Chapter).filter(Chapter.id == body.chapter_id).first()
-        if chapter is None:
-            raise HTTPException(status_code=404, detail="Chapter not found")
-    topic = chapter.name if chapter else body.topic
+    if body.chapter_ids:
+        topic = _resolve_chapters_topic(db, body.chapter_ids, body.topic)
+    else:
+        topic = body.topic
     if not topic:
-        raise HTTPException(status_code=400, detail="Either topic or chapter_id is required")
+        raise HTTPException(status_code=400, detail="Either topic or chapter_ids is required")
+
+    # A single generated question set is sent to every targeted student
+    # verbatim — without a class, it's tuned to no grade level at all, and
+    # without this check it would previously go out to literally every
+    # student at the school regardless of age (a Class 3 and a Class 12
+    # student getting the identical quiz). A class is required so the
+    # content is pedagogically appropriate for whoever actually receives it.
+    if not body.class_ and not body.phone_numbers:
+        raise HTTPException(status_code=400, detail="A class is required to assign a quiz")
 
     if body.phone_numbers:
         query = db.query(Student).filter(Student.phone.in_(body.phone_numbers), Student.centre_id == teacher.centre_id)
@@ -1207,7 +1253,22 @@ async def assign_quiz(
     if not targets:
         raise HTTPException(status_code=400, detail="No matching students found")
 
-    questions_data, gen_result = await generate_quiz_questions(topic, body.class_)
+    # Explicit phone_numbers targeting bypasses the class_/board filters
+    # above, so it's not guaranteed every target shares one class the way
+    # the filtered path is — check directly, since the same "one quiz for
+    # everyone" content-mismatch risk applies just as much here.
+    target_classes = {s.class_ for s in targets if s.class_}
+    if len(target_classes) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Selected students span multiple classes ({', '.join(sorted(target_classes))}) — "
+            "assign separately per class so the quiz is pitched at the right level for each.",
+        )
+    effective_class = body.class_ or (next(iter(target_classes)) if target_classes else None)
+    target_boards = {s.board for s in targets if s.board}
+    effective_board = body.board or (next(iter(target_boards)) if len(target_boards) == 1 else None)
+
+    questions_data, gen_result = await generate_quiz_questions(topic, effective_class, board=effective_board)
     school_billing.record_claude_usage(
         db, teacher.centre_id, "quiz_assignment", gen_result.input_tokens, gen_result.output_tokens
     )
@@ -1226,8 +1287,11 @@ async def assign_quiz(
             skipped.append(student.name)  # already mid-quiz — don't interrupt it with a new one
             continue
         quiz = Quiz(
+            # Quiz.chapter_id is a single FK and can't represent a quiz
+            # spanning multiple chapters — informational best-effort only
+            # (the first chapter picked), not something anything else reads.
             student_id=student.id, created_by_teacher_id=teacher.id, title=topic,
-            chapter_id=chapter.id if chapter else None,
+            chapter_id=body.chapter_ids[0] if body.chapter_ids else None,
         )
         db.add(quiz)
         db.flush()
@@ -1326,7 +1390,7 @@ def verify_school_payment(
 
 class PresentationGenerateRequest(BaseModel):
     topic: str | None = None
-    chapter_id: int | None = None
+    chapter_ids: list[int] = []  # may span multiple chapters
     class_: str | None = None
     board: str | None = None
     num_cards: int = 8
@@ -1355,15 +1419,12 @@ async def generate_presentation(
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for presentation generation")
 
-    topic = body.topic
-    if body.chapter_id:
-        chapter = db.query(Chapter).filter(Chapter.id == body.chapter_id).first()
-        if not chapter:
-            raise HTTPException(status_code=404, detail="Chapter not found")
-        subject = db.query(Subject).filter(Subject.id == chapter.subject_id).first()
-        topic = f"{subject.name if subject else ''}: {chapter.name}".strip(": ")
+    if body.chapter_ids:
+        topic = _resolve_chapters_topic(db, body.chapter_ids, body.topic)
+    else:
+        topic = body.topic
     if not topic:
-        raise HTTPException(status_code=400, detail="topic or chapter_id is required")
+        raise HTTPException(status_code=400, detail="topic or chapter_ids is required")
 
     context_parts = [topic]
     if body.class_:

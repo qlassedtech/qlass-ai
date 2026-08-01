@@ -36,6 +36,24 @@ def default_board_for_centre(db: Session, centre_id: int | None) -> str | None:
     return centre.board if centre else None
 
 
+def default_school_for_centre(db: Session, centre_id: int | None) -> str | None:
+    """
+    Same idea as default_board_for_centre — a student enrolled through a
+    real school's own teacher/admin already IS at that school, so
+    Student.school shouldn't sit blank asking to be filled in separately.
+    Explicitly excludes Qlass Direct (the internal bucket for self-
+    registered/independent students with no real school on file) — that
+    name is a Qlass-internal label, not a real school, so it must never be
+    written into a student's own "school" field.
+    """
+    if centre_id is None:
+        return None
+    centre = db.query(Centre).filter(Centre.id == centre_id).first()
+    if not centre or centre.name == QLASS_DIRECT_CENTRE_NAME:
+        return None
+    return centre.name
+
+
 def create_student_profile(
     db: Session, phone: str, name: str, centre_id: int | None, is_staff_profile: bool = False
 ) -> Student:
@@ -45,6 +63,7 @@ def create_student_profile(
     student = Student(
         name=name, phone=phone, features=dict(DEFAULT_FEATURES), centre_id=centre_id,
         is_staff_profile=is_staff_profile, board=default_board_for_centre(db, centre_id),
+        school=default_school_for_centre(db, centre_id),
     )
     db.add(student)
     db.commit()

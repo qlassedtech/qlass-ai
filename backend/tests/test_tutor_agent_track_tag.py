@@ -73,3 +73,34 @@ def test_class_confirm_na_is_parsed_as_none():
     )
     result = _parsed(raw)
     assert result["class_confirm"] is None
+
+
+def test_profile_answer_extracted_from_track_tag():
+    # Replaces the old extract_profile_answer regex — the LLM reads the
+    # whole message itself (even "I don't know. Nikhil") and reports the
+    # clean extracted value directly, instead of a local sentence-splitting
+    # heuristic that used to silently discard real academic content
+    # sitting alongside the answer.
+    raw = (
+        'Nice to meet you, Nikhil! Let\'s get back to your question.\n'
+        '[[TRACK topic="algebra" evaluated=false correct=null image=false audio=false '
+        'off_level=false video=false solved=na class_confirm=na profile_answer="Nikhil"]]'
+    )
+    result = _parsed(raw)
+    assert result["profile_answer"] == "Nikhil"
+
+
+def test_profile_answer_none_when_not_addressed():
+    raw = (
+        'Sure, here\'s the next step.\n[[TRACK topic="algebra" evaluated=false correct=null '
+        'image=false audio=false off_level=false video=false solved=na class_confirm=na '
+        'profile_answer=NONE]]'
+    )
+    result = _parsed(raw)
+    assert result["profile_answer"] is None
+
+
+def test_profile_answer_missing_entirely_falls_back_to_none():
+    raw = "Just a plain reply with no tag at all."
+    result = _parsed(raw)
+    assert result["profile_answer"] is None
