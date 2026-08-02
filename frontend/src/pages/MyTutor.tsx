@@ -129,6 +129,9 @@ export default function MyTutor() {
       <ChatWindow
         fetchHistory={api.getMyTutorHistory}
         sendMessage={api.sendMyTutorMessage}
+        onSendImage={api.sendMyTutorImage}
+        onSendVoice={api.sendMyTutorVoice}
+        onSendDocument={api.sendMyTutorDocument}
         onBalanceChange={setBalance}
       />
     </div>

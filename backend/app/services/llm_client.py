@@ -1,7 +1,10 @@
+import logging
 from dataclasses import dataclass
 
 import anthropic
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
 
@@ -70,12 +73,13 @@ async def call_llm(system_prompt: str, messages: list[dict], model: str = "claud
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError as exc:
+        # The raw exception (often the provider's full JSON error body) goes
+        # to server logs only — a student should never see internal API
+        # error payloads in their chat, confirmed live: a 400/500 from
+        # Anthropic was showing up verbatim as the tutor's "reply".
+        logger.error("Anthropic API error in call_llm (model=%s): %s", model, exc)
         return LLMResult(
-            text=(
-                "Sorry, I'm having trouble reaching the AI service right now. "
-                "Please try again in a bit. "
-                f"[LLM error: {exc}]"
-            ),
+            text="Sorry, I'm having trouble reaching the AI service right now. Please try again in a bit.",
             model=model,
         )
 
@@ -115,7 +119,8 @@ async def classify(
             cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
-    except anthropic.APIError:
+    except anthropic.APIError as exc:
+        logger.error("Anthropic API error in classify (model=%s): %s", model, exc)
         return LLMResult(text=fallback, model=model)
 
 
@@ -197,5 +202,6 @@ async def translate_with_claude(
             cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
-    except anthropic.APIError:
+    except anthropic.APIError as exc:
+        logger.error("Anthropic API error in translate_with_claude (model=%s): %s", model, exc)
         return None

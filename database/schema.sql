@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS students (
     hints_given_count INTEGER DEFAULT 0,
     direct_solutions_count INTEGER DEFAULT 0,
     photo_url TEXT,
+    fcm_token TEXT,
     referral_code TEXT UNIQUE,
     referred_by_id INTEGER REFERENCES students(id),
     referral_milestones_paid JSONB DEFAULT '[]',
@@ -127,8 +128,10 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     document_id INTEGER REFERENCES documents(id),
     chunk_index INTEGER,
     content TEXT,
-    embedding_id TEXT -- pointer into the vector store (Chroma)
+    embedding_id TEXT, -- pointer into the vector store (Chroma) — unused; see content_tsv
+    content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
 );
+CREATE INDEX IF NOT EXISTS idx_document_chunks_content_tsv ON document_chunks USING GIN (content_tsv);
 
 CREATE TABLE IF NOT EXISTS chat_history (
     id SERIAL PRIMARY KEY,

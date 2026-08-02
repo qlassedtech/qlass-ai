@@ -23,6 +23,9 @@ export default function Chat() {
       <ChatWindow
         fetchHistory={studentApi.history}
         sendMessage={studentApi.sendMessage}
+        onSendImage={studentApi.sendImage}
+        onSendVoice={studentApi.sendVoice}
+        onSendDocument={studentApi.sendDocument}
         onBalanceChange={(b) => {
           setBalance(b);
           if (student) setStudent({ ...student, credit_balance: b });

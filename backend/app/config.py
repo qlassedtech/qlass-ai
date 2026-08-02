@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # YouTube Data API v3 (best-matching video suggestion for a topic)
     youtube_api_key: str | None = None
 
+    # Firebase Cloud Messaging (push notifications to the native Android
+    # student app) — path to a service account JSON downloaded from the
+    # Firebase console. firebase-admin is already in requirements.txt but
+    # unused until this is set; see app.services.push_client.
+    firebase_credentials_path: str | None = None
+
     # Razorpay (parent/student self-serve credit top-ups)
     razorpay_key_id: str | None = None
     razorpay_key_secret: str | None = None

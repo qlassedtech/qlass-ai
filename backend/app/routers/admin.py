@@ -37,6 +37,8 @@ from app.services.whatsapp_client import send_whatsapp_message
 from app.services.workbook_service import generate_workbook_questions
 from app.services.ocr_client import extract_text_from_image
 from app.services.document_client import extract_text_from_document
+from app.services.sarvam_client import transcribe_audio
+from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.roster_extraction import extract_student_rows, extract_teacher_rows
 
 router = APIRouter()
@@ -1608,6 +1610,67 @@ async def send_my_tutor_message(
     if not cost_tracker.has_credits(db, student.id):
         raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
     reply = await process_web_message(db, student, body.message)
+    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
+@router.post("/admin/my-tutor/chat/send-image")
+async def send_my_tutor_image(
+    file: UploadFile = File(...), db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """Same photo-OCR pipeline as the student app's send-image (see app.routers.student_app)."""
+    student = _my_tutor_student(db, teacher)
+    if not student.has_feature("ocr"):
+        raise HTTPException(status_code=403, detail="Photo questions aren't available on your personal tutor account yet")
+    if not cost_tracker.has_credits(db, student.id):
+        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+    image_bytes = await file.read()
+    message_text = await extract_text_from_image(image_bytes)
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't read any text in that photo — try a clearer picture")
+    cost_tracker.record_flat_usage(db, "azure_ocr", student.id)
+    reply = await process_web_message(db, student, message_text)
+    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
+@router.post("/admin/my-tutor/chat/send-voice")
+async def send_my_tutor_voice(
+    file: UploadFile = File(...), db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """Same Sarvam STT pipeline as the student app's send-voice (see app.routers.student_app)."""
+    student = _my_tutor_student(db, teacher)
+    if not student.has_feature("voice"):
+        raise HTTPException(status_code=403, detail="Voice questions aren't available on your personal tutor account yet")
+    if not cost_tracker.has_credits(db, student.id):
+        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+    audio_bytes = await file.read()
+    message_text = await transcribe_audio(audio_bytes, filename=file.filename or "voice_note.m4a")
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't understand that voice note — please try again")
+    cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
+    if student.gender is None:
+        detected_gender = detect_gender_from_pitch(audio_bytes)
+        if detected_gender:
+            student.gender = detected_gender
+            db.commit()
+    reply = await process_web_message(db, student, message_text)
+    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
+@router.post("/admin/my-tutor/chat/send-document")
+async def send_my_tutor_document(
+    file: UploadFile = File(...), db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """Same document-extraction pipeline as the student app's send-document (see app.routers.student_app)."""
+    student = _my_tutor_student(db, teacher)
+    if not student.has_feature("documents"):
+        raise HTTPException(status_code=403, detail="PDF/Word file questions aren't available on your personal tutor account yet")
+    if not cost_tracker.has_credits(db, student.id):
+        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+    document_bytes = await file.read()
+    message_text = extract_text_from_document(document_bytes, file.filename or "")
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't read any text in that file — try a different file")
+    reply = await process_web_message(db, student, message_text)
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 
 

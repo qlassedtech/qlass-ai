@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 SARVAM_BASE_URL = "https://api.sarvam.ai"
 TTS_CHAR_LIMIT = 2500
 
+# Sarvam validates the multipart content-type against its own allowlist
+# (audio/mpeg, audio/wav, audio/ogg, audio/mp4, audio/aac, ...) and 400s on
+# anything else. Relying on httpx's implicit mimetypes.guess_type() is
+# fragile — it resolves ".m4a" to "audio/mp4a-latm" on some systems, which
+# Sarvam rejects even though the file itself is fine. WhatsApp voice notes
+# are always ogg/opus so this never surfaced there; a native app recording
+# in AAC/M4A hit it immediately. Mapped explicitly so the real extensions
+# each client actually produces always resolve to something Sarvam accepts.
+_AUDIO_CONTENT_TYPES = {
+    ".ogg": "audio/ogg", ".opus": "audio/opus", ".m4a": "audio/mp4", ".aac": "audio/aac",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".webm": "audio/webm", ".flac": "audio/flac",
+}
+
 _MARKDOWN_EMPHASIS = re.compile(r"[*_]")
 
 # Launching in Bihar only — confine language handling to what's actually
@@ -70,7 +83,9 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
         return None
 
     headers = {"api-subscription-key": settings.sarvam_api_key}
-    files = {"file": (filename, audio_bytes)}
+    ext = filename[filename.rfind("."):].lower() if "." in filename else ""
+    content_type = _AUDIO_CONTENT_TYPES.get(ext, "application/octet-stream")
+    files = {"file": (filename, audio_bytes, content_type)}
     data = {"model": "saaras:v3", "language_code": "unknown"}
 
     try:

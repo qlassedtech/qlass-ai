@@ -125,6 +125,24 @@ async function requestStudent(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
+async function requestStudentMultipart(path: string, formData: FormData) {
+  const token = getStudentToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  // No Content-Type set here on purpose — same reasoning as requestMultipart.
+  const res = await fetch(`${API_BASE}${path}`, { method: "POST", headers, body: formData });
+  if (res.status === 401) {
+    setStudentToken(null);
+    window.location.href = "/login";
+    throw new Error("Not authenticated");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 async function requestParent(path: string, options: RequestInit = {}) {
   const token = getParentToken();
   const headers: Record<string, string> = {
@@ -482,6 +500,21 @@ export const api = {
       reply: string;
       credit_balance: number;
     }>,
+  sendMyTutorImage: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestMultipart("/admin/my-tutor/chat/send-image", formData) as Promise<ChatReplyResponse>;
+  },
+  sendMyTutorVoice: (file: Blob, filename: string) => {
+    const formData = new FormData();
+    formData.append("file", file, filename);
+    return requestMultipart("/admin/my-tutor/chat/send-voice", formData) as Promise<ChatReplyResponse>;
+  },
+  sendMyTutorDocument: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestMultipart("/admin/my-tutor/chat/send-document", formData) as Promise<ChatReplyResponse>;
+  },
 };
 
 export interface StudentProfile {
@@ -502,14 +535,34 @@ export interface ChatMessage {
 
 // Uses the separate student session (see setStudentToken) — the student
 // chat app's own auth, distinct from the teacher/admin portal above.
+export interface ChatReplyResponse {
+  reply: string;
+  credit_balance: number;
+}
+
 export const studentApi = {
   me: () => requestStudent("/student-app/me") as Promise<StudentProfile>,
   history: () => requestStudent("/student-app/chat/history") as Promise<ChatMessage[]>,
   sendMessage: (message: string) =>
-    requestStudent("/student-app/chat/send", { method: "POST", body: JSON.stringify({ message }) }) as Promise<{
-      reply: string;
-      credit_balance: number;
-    }>,
+    requestStudent("/student-app/chat/send", { method: "POST", body: JSON.stringify({ message }) }) as Promise<ChatReplyResponse>,
+  // Same OCR/STT/document pipeline WhatsApp uses (see backend
+  // app.routers.student_app) — the extracted text becomes an ordinary chat
+  // turn, so the response shape matches sendMessage exactly.
+  sendImage: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestStudentMultipart("/student-app/chat/send-image", formData) as Promise<ChatReplyResponse>;
+  },
+  sendVoice: (file: Blob, filename: string) => {
+    const formData = new FormData();
+    formData.append("file", file, filename);
+    return requestStudentMultipart("/student-app/chat/send-voice", formData) as Promise<ChatReplyResponse>;
+  },
+  sendDocument: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestStudentMultipart("/student-app/chat/send-document", formData) as Promise<ChatReplyResponse>;
+  },
 };
 
 export interface CreateOrderResponse {

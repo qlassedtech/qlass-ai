@@ -1,5 +1,6 @@
 from sqlalchemy import (
-    Column, Integer, Text, Boolean, Numeric, Date, JSON, CheckConstraint, ForeignKey, TIMESTAMP, UniqueConstraint, func
+    Column, DDL, Integer, Text, Boolean, Numeric, Date, JSON, CheckConstraint, ForeignKey, TIMESTAMP,
+    UniqueConstraint, event, func
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -120,6 +121,11 @@ class Student(Base):
     # expose a contact's profile photo to a business account (Meta blocks
     # this for user privacy), so there's no way to pull it in automatically.
     photo_url = Column(Text)
+    # Firebase Cloud Messaging registration token for the native student app
+    # (see app.services.push_client) — null for every WhatsApp-only student,
+    # and for app users until they've logged in on a build with Firebase
+    # actually configured (see android/app/build.gradle.kts FCM_* fields).
+    fcm_token = Column(Text)
     referral_code = Column(Text, unique=True)
     referred_by_id = Column(Integer, ForeignKey("students.id"))
     # Which of app.services.referral.REFERRAL_MILESTONES have already paid
@@ -283,9 +289,34 @@ class DocumentChunk(Base):
     document_id = Column(Integer, ForeignKey("documents.id"))
     chunk_index = Column(Integer)
     content = Column(Text)
-    embedding_id = Column(Text)  # pointer into the vector store (Chroma)
+    embedding_id = Column(Text)  # pointer into the vector store (Chroma) — unused; see content_tsv below
 
     document = relationship("Document", back_populates="chunks")
+
+
+# app.services.retrieval's full-text search needs a generated tsvector
+# column + GIN index (see database/migrations/0038_add_document_chunks_
+# fulltext_search.sql) — added via a raw DDL event (execute_if
+# dialect="postgresql") rather than a mapped Column(Computed(...)) on the
+# class above, because `to_tsvector(...)` is Postgres-only SQL: a mapped
+# Computed column would make Base.metadata.create_all emit that same DDL
+# for the in-memory SQLite test database too (see tests/conftest.py's
+# db_session fixture, used everywhere) and fail table creation outright,
+# even for tests that never touch documents/document_chunks at all.
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL(
+        "ALTER TABLE document_chunks ADD COLUMN content_tsv tsvector "
+        "GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED"
+    ).execute_if(dialect="postgresql"),
+)
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL("CREATE INDEX idx_document_chunks_content_tsv ON document_chunks USING GIN (content_tsv)")
+    .execute_if(dialect="postgresql"),
+)
 
 
 class ChatHistory(Base):

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import ChatHistory, Student  # noqa: E402
 from app.services.habit import HABIT_MILESTONES  # noqa: E402
+from app.services.push_client import send_push  # noqa: E402
 from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
 
 
@@ -74,7 +75,16 @@ async def send_nudges(dry_run: bool) -> None:
                     print(f"[DRY RUN] Would nudge {student.phone} ({student.name}) — {name}: {message}")
                 else:
                     result = await send_whatsapp_message(student.phone, message)
-                    print(f"{'Sent' if result.get('sent') else 'FAILED'} nudge to {student.phone} ({name})")
+                    print(f"{'Sent' if result.get('sent') else 'FAILED'} WhatsApp nudge to {student.phone} ({name})")
+                    # Additive, not a replacement — a student using the native
+                    # app may not have WhatsApp notifications enabled, so this
+                    # is a second channel, not a fallback. No-ops silently
+                    # until Firebase is actually configured (push_client.py)
+                    # or this student has never registered a device token.
+                    if student.fcm_token:
+                        push_result = await send_push(student.fcm_token, "Qlass AI Tutor", message)
+                        if push_result.get("sent"):
+                            print(f"Sent push nudge to student {student.id} ({name})")
                 sent += 1
                 break  # one nudge per student per run, even if multiple windows somehow overlap
         print(f"\n{sent} nudge(s) {'would be ' if dry_run else ''}sent.")

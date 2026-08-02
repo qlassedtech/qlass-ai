@@ -3,6 +3,7 @@ import re
 
 from app.agents.base import BaseAgent
 from app.services.llm_client import call_llm, classify
+from app.services.retrieval import RetrievedChunk, build_citation_footer
 
 # Matches the [[TRACK ...]] block by its outer brackets only, not by a fixed
 # field order/set — the model doesn't reliably keep every field in the
@@ -133,7 +134,7 @@ class TutorAgent(BaseAgent):
     def build_context(
         self,
         student: dict,
-        retrieved_chunks: list[str],
+        retrieved_chunks: list,
         weak_topics: list[str],
         image_generation_enabled: bool = False,
         voice_enabled: bool = False,
@@ -289,10 +290,26 @@ class TutorAgent(BaseAgent):
                 else '- profile_answer: always NONE — there\'s no pending onboarding question this turn.\n'
             )
             + (
-                "- image: true ONLY if the student explicitly asked for a picture/diagram/drawing, OR "
-                "a diagram is genuinely necessary to explain this (e.g. labeled parts of a cell, a "
-                "circuit, the water cycle) — not for every explanation, most questions don't need one. "
-                "false otherwise. When image=true, add ONE more line directly BEFORE the TRACK line, "
+                "CRITICAL — image/audio/video are each decided FRESH every single turn, based ONLY on "
+                "the student's CURRENT message. An earlier turn having image=true/audio=true/video=true "
+                "does NOT carry forward — don't keep attaching media just because the last reply or two "
+                "did (confirmed live: a student who simply answered \"what's your name?\" with their name "
+                "got a video attached to the reply, even though nothing in \"Nikhil\" asked for one). A "
+                "short reply — answering their name, a one-word check-question answer, a plain "
+                "acknowledgment — should almost always be all three false, no exceptions for "
+                "\"but the topic could use a diagram/video.\"\n"
+            )
+            + (
+                "- image: true ONLY if the student's CURRENT message explicitly asks for a picture/"
+                "diagram/drawing, OR a diagram is genuinely necessary to explain THIS reply's new "
+                "content (e.g. labeled parts of a cell, a circuit, the water cycle) — not for every "
+                "explanation, most questions don't need one. CRITICAL — false whenever this reply is "
+                "just evaluating/grading an answer to a check question you asked (evaluated=true "
+                "above), even if an earlier turn on the same topic included an image: a student "
+                "answering \"Rectum\" to your own question isn't asking for another diagram, and "
+                "correcting their answer in words doesn't need one either — don't regenerate an image "
+                "just because the topic already had one earlier in the conversation. false otherwise. "
+                "When image=true, add ONE more line directly BEFORE the TRACK line, "
                 "in this exact format: [[IMAGE_PROMPT: <a clear, specific description for an image "
                 "generator, e.g. \"a labeled diagram of a plant cell showing nucleus, chloroplast, "
                 "mitochondria, vacuole, for a Class 8 science textbook\">]]. Your visible reply text "
@@ -343,8 +360,13 @@ class TutorAgent(BaseAgent):
                 "every explanation — most questions don't need one. false otherwise. When video=true, add "
                 "ONE more line directly BEFORE the TRACK line, in this exact format: [[VIDEO_QUERY: <a "
                 "specific, well-formed YouTube search query for this topic, e.g. \"electromagnetic "
-                "induction explained class 12 physics\">]]. Your visible reply text must still stand on "
-                "its own with real explanation — the video is a supplement, never a replacement for "
+                "induction explained class 12 physics\">]]. CRITICAL — the query must match what THIS "
+                "reply is actually teaching as a whole, not one narrow sub-detail mentioned in passing "
+                "(e.g. if the reply is about what makes a laptop portable and just happens to mention "
+                "\"keyboard\" as one of several built-in parts, search for laptop portability/parts, NOT "
+                "a standalone \"how to use a laptop keyboard\" tutorial — a mismatched video actively "
+                "confuses a student more than no video at all). Your visible reply text must still stand "
+                "on its own with real explanation — the video is a supplement, never a replacement for "
                 "actually teaching in words. A real downstream system genuinely searches and sends a real "
                 "video whenever video=true — agree normally (e.g. \"Sure, here's a good one!\") and never "
                 "say you can't share videos.\n"
@@ -370,9 +392,16 @@ class TutorAgent(BaseAgent):
                 f"actually asked first; never ignore their real question to force this in."
             )
         if retrieved_chunks:
-            knowledge = "\n\n".join(retrieved_chunks)
+            knowledge = "\n\n".join(chunk.content for chunk in retrieved_chunks)
             profile += (
-                "\n\nUse the following textbook material as ground truth where relevant:\n\n"
+                "\n\nThe following is real textbook material for this exact topic — use it to keep "
+                "terminology, scope, and any stated facts/definitions consistent with what this student's "
+                "syllabus actually covers, and prefer it over your own knowledge if the two ever "
+                "genuinely conflict. CRITICAL — this is a floor, not a ceiling: a textbook passage is "
+                "necessarily brief and written for a printed page, not a full explanation. Still teach "
+                "with your own full depth — better examples, clearer step-by-step reasoning, real-world "
+                "analogies, more thorough coverage — exactly as you would without this material. Don't "
+                "just paraphrase or shorten your answer down to match the passage's own brevity.\n\n"
                 f"{knowledge}"
             )
         if active_document_text:
@@ -421,9 +450,18 @@ class TutorAgent(BaseAgent):
         active_document_text: str | None = None,
         pending_class_confirm: str | None = None,
         pending_profile_field: str | None = None,
+        retrieved_chunks: list[RetrievedChunk] | None = None,
     ) -> dict:
-        # TODO Phase 6: replace [] with real RAG retrieval against document_chunks
-        retrieved_chunks: list[str] = []
+        # Retrieval itself (Postgres full-text candidate search + the LLM
+        # relevance judgment) happens in the caller, before this is called
+        # — see app.services.retrieval.fetch_candidate_chunks and
+        # app.services.intent_classifier's relevant_excerpts field. This
+        # just renders whatever was already decided; real grounding only
+        # kicks in once a school's textbook content has actually been
+        # ingested via scripts/ingest_document.py, until then callers
+        # simply never have anything to pass here and the tutor teaches
+        # from general knowledge exactly as it always has.
+        retrieved_chunks = retrieved_chunks or []
         system_prompt = self.build_context(
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
             active_document_text, pending_class_confirm, pending_profile_field,
@@ -472,6 +510,16 @@ class TutorAgent(BaseAgent):
         }
 
         parsed = parse_track_reply(raw_reply)
+        # Generated from the DB rows actually retrieved, never left to the
+        # LLM to compose — it can't cite a chapter it wasn't given, or
+        # invent one, the way asking the model to "mention your source"
+        # could. A real, checkable citation is the whole point (see
+        # app.services.retrieval.build_citation_footer). Kept as a separate
+        # field rather than appended to "reply" here, so callers append it
+        # AFTER translation — a chapter title is a proper noun, and running
+        # it through the translation pass risked mangling it into awkward
+        # Hindi rather than leaving it as-is.
+        parsed["citation"] = build_citation_footer(retrieved_chunks)
         parsed["lang"] = lang
         parsed["usage"] = usage
         return parsed

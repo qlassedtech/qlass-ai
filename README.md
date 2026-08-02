@@ -38,15 +38,28 @@ fulfillment.
 qlass-ai/
   backend/      FastAPI app: routers, agents, models, services, tests
   frontend/     Single React/Vite web portal (admin/teacher/parent/student)
+  android/      Native Android student app (Kotlin/Compose) — see "Android App" below
   database/     schema.sql (full current schema) + migrations/ (ordered, numbered)
-  scripts/      Cron jobs, one-off admin scripts, deploy preflight check
+  scripts/      Cron jobs, one-off admin scripts, deploy preflight check, NCERT ingestion
   docker/       docker-compose.yml (local dev), docker-compose.ovh.yml (production)
   docs/         Architecture notes (some historical/aspirational — verify against code)
 ```
-`agents/`, `rag/`, `knowledge/`, `prompts/`, `android/` are empty, unused
-scaffolding from an earlier plan — the real tutor logic lives in
-`backend/app/agents/tutor_agent.py`; there is no RAG/embeddings pipeline or
-Android app in the current product.
+`agents/`, `knowledge/`, `prompts/` are empty, unused scaffolding from an
+earlier plan — the real tutor logic lives in `backend/app/agents/tutor_agent.py`.
+
+**RAG is real and live**, not aspirational: `backend/app/services/retrieval.py`
+does Postgres full-text retrieval (no vector DB/embeddings provider —
+`rag/`'s `CHROMA_PERSIST_DIR` setting is unused legacy config) against NCERT
+textbook content ingested via `scripts/ingest_document.py`, scoped to each
+student's class/board, with a code-generated citation footer on every
+grounded reply. Relevance is judged by the same LLM call that already runs
+per message for intent classification (see `app/services/intent_classifier.py`'s
+`relevant_excerpts` field) rather than a separate call or a keyword
+heuristic — a full-text keyword match alone was confirmed live to produce
+citations that shared a word with the message but nothing else (e.g. a
+student replying "Don't know" got cited against unrelated Calculus/Biology
+chapters purely because "know" is a common word). See "Populating the RAG
+corpus" below for how to get real content into a fresh database.
 
 ## Local Development Setup
 
@@ -93,6 +106,84 @@ npm run dev
 cd backend && pytest              # some tests need the pg_db_session fixture — see tests/conftest.py
 cd frontend && npm run test
 ```
+
+## Populating the RAG corpus
+
+A fresh database has the `documents`/`document_chunks` tables (see migration
+`0038_add_document_chunks_fulltext_search.sql`) but zero rows — retrieval
+degrades to "no grounding, tutor answers from general knowledge" until real
+textbook content is ingested. There is no bulk NCERT downloader in this repo
+(NCERT's own site blocks sustained automated scraping); ingest chapters you
+already have as PDF/DOCX files one at a time:
+
+```bash
+cd backend
+python scripts/ingest_document.py <file.pdf> --class 9 --subject Science --chapter "Cell: The Building Block of Life" --board CBSE
+```
+
+This extracts text (pymupdf/python-docx), chunks it (~1000 chars, 150 char
+overlap), and replaces any existing row for the same (class, subject,
+chapter, board) — safe to re-run on a corrected file. There's no bulk/watch-
+folder mode; script it yourself in a loop if you have many files with a
+consistent naming convention. Verify ingestion worked with a real question
+through `/student-app/chat/send` or WhatsApp and confirm a `📖 Source:` line
+appears in the reply.
+
+## Android App
+
+`android/` is a native Kotlin/Jetpack Compose app (OTP login, chat with
+citations, quizzes, progress/credit history, photo/voice/PDF upload, push
+notifications) hitting the same `backend/app/routers/student_app.py`
+endpoints the web app uses — feature parity across WhatsApp/web/Android is
+maintained deliberately (see `app/services/student_chat.py`'s and
+`app/routers/whatsapp.py`'s shared helpers).
+
+### Local build
+```bash
+cd android
+echo "sdk.dir=/path/to/your/Android/sdk" > local.properties
+./gradlew assembleDebug
+```
+Debug builds point at `http://10.0.2.2:8000` (the Android emulator's alias
+for the host machine) — a real device needs a build pointed at your actual
+deployed API domain (see `app/build.gradle.kts`'s `API_BASE_URL` per build
+type).
+
+### Push notifications (optional)
+Inert until configured — no crash, no google-services.json/Gradle plugin
+required. To enable:
+1. Create a Firebase project, register an Android app in it with package
+   name `com.qlass.tutor`, and add these four values to `local.properties`
+   (never commit this file — it's gitignored):
+   ```
+   fcm.apiKey=...
+   fcm.appId=...
+   fcm.projectId=...
+   fcm.senderId=...
+   ```
+   (Get them from Firebase console → Project settings → General, once the
+   Android app is registered.)
+2. Backend side: Firebase console → Project settings → Service accounts →
+   Generate new private key, save the downloaded JSON somewhere on your
+   server (never commit it — it's equivalent to a password), and set
+   `FIREBASE_CREDENTIALS_PATH` to its path in `.env`/`.env.production`.
+   `firebase-admin` is already in `requirements.txt`.
+3. Restart the backend so it picks up the credentials
+   (`app/services/push_client.py` initializes lazily on first use).
+
+Once both sides are set, `scripts/send_habit_nudges.py` sends push
+notifications to any student who's opened the Android app (registered a
+device token via `POST /student-app/device-token`) alongside their existing
+WhatsApp nudge — see the script for the exact behavior.
+
+### Release build / distribution
+There's no CI/signing pipeline set up yet — `assembleDebug` only produces a
+debug-signed APK. Before distributing to real users you still need to: set
+up a real release signing key (`keytool -genkey` + configure
+`signingConfigs` in `app/build.gradle.kts`), decide on a distribution
+channel (Play Store listing, or direct APK sideload — Play Store requires
+its own separate developer account/review process, not covered here), and
+point the release build's `API_BASE_URL` at your real production domain.
 
 ## Deploying to OVH
 

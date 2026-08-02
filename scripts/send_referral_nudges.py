@@ -31,16 +31,9 @@ from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Student  # noqa: E402
 from app.services.progress_report import get_activity_stats, get_student_stats  # noqa: E402
-from app.services.referral import generate_referral_code  # noqa: E402
+from app.services.referral import generate_referral_code, is_worth_asking_to_refer  # noqa: E402
 from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
 
-# "Active" = messaged within this many days — no point asking a student
-# who's gone quiet to go recruit someone else.
-ACTIVE_WITHIN_DAYS = 7
-# "Over-engaged" = at least one of these — a real streak, or a genuinely
-# busy week, not just one lucky recent message.
-STREAK_THRESHOLD_DAYS = 3
-WEEKLY_MESSAGE_THRESHOLD = 10
 # Don't ask the same student again for this long after a nudge.
 NUDGE_COOLDOWN_SECONDS = 14 * 24 * 3600
 
@@ -70,15 +63,8 @@ async def send_nudges(dry_run: bool) -> None:
         students = db.query(Student).filter(Student.is_staff_profile.is_(False)).all()
         for student in students:
             activity = get_activity_stats(db, student.id)
-            if activity["days_since_last_message"] is None or activity["days_since_last_message"] > ACTIVE_WITHIN_DAYS:
-                continue  # not active recently
-
             weekly_stats = get_student_stats(db, student.id, days=7)
-            is_over_engaged = (
-                activity["streak_days"] >= STREAK_THRESHOLD_DAYS
-                or weekly_stats["messages_sent"] >= WEEKLY_MESSAGE_THRESHOLD
-            )
-            if not is_over_engaged:
+            if not is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
                 continue
 
             if await _recently_nudged(student.phone):

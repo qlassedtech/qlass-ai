@@ -118,3 +118,43 @@ def test_classify_intent_malformed_response_falls_back_safely(monkeypatch):
     assert result.quiz_topic is None
     assert result.wants_mock_test is False
     assert result.quiz_skip is False
+    assert result.relevant_excerpts == []
+
+
+def test_classify_intent_extracts_relevant_excerpt_numbers(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.intent_classifier.classify",
+        _fake_classify(
+            '[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no '
+            'mock_test_topic=NONE quiz_skip=no relevant_excerpts=1,3]]'
+        ),
+    )
+    result = asyncio.run(classify_intent("what is euclid's division algorithm"))
+    assert result.relevant_excerpts == [1, 3]
+
+
+def test_classify_intent_relevant_excerpts_none_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.intent_classifier.classify",
+        _fake_classify(
+            '[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no '
+            'mock_test_topic=NONE quiz_skip=no relevant_excerpts=NONE]]'
+        ),
+    )
+    result = asyncio.run(classify_intent("thanks!"))
+    assert result.relevant_excerpts == []
+
+
+def test_classify_intent_passes_candidate_excerpts_into_prompt(monkeypatch):
+    from app.services.retrieval import RetrievedChunk
+
+    async def fake(system_prompt, messages, fallback, model, max_tokens=10):
+        assert "Real Numbers" in messages[0]["content"]
+        return LLMResult(text="[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE "
+                               "wants_mock_test=no mock_test_topic=NONE quiz_skip=no "
+                               "relevant_excerpts=1]]", model=model)
+
+    monkeypatch.setattr("app.services.intent_classifier.classify", fake)
+    candidate = RetrievedChunk(content="text", class_="10", subject="Math", chapter="Real Numbers", board="CBSE")
+    result = asyncio.run(classify_intent("euclid's division algorithm", candidate_chunks=[candidate]))
+    assert result.relevant_excerpts == [1]

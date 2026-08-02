@@ -88,6 +88,22 @@ def get_balance(db: Session, student_id: int) -> float:
     return float(total)
 
 
+def get_credit_history(db: Session, student_id: int, limit: int = 50) -> list[CreditEvent]:
+    """
+    Recent-first raw ledger rows for a student's own "transaction history"
+    view — distinct from get_balance (a single aggregate number) and from
+    every admin-side usage-cap query, which only ever need sums/counts, not
+    the individual rows themselves.
+    """
+    return (
+        db.query(CreditEvent)
+        .filter(CreditEvent.student_id == student_id)
+        .order_by(CreditEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def _is_unlimited_active(student: Student) -> bool:
     """
     True while a student is on the flat-fee unlimited plan (₹1800/yr for a

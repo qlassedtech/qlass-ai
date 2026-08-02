@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import get_db
 from app.models.core import Student
 from app.services.teacher_auth import JWT_ALGORITHM, JWT_EXPIRY_HOURS
 
@@ -22,16 +22,8 @@ def create_student_access_token(student_id: int) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=JWT_ALGORITHM)
 
 
-def _get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 async def get_current_student(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer), db: Session = Depends(_get_db)
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer), db: Session = Depends(get_db)
 ) -> Student:
     try:
         payload = jwt.decode(credentials.credentials, settings.secret_key, algorithms=[JWT_ALGORITHM])

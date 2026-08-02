@@ -1,10 +1,10 @@
-import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, TopicProgress, Subject, Chapter
+from app.services.text_utils import tokenize_words
 
 # A student's free-text `board` value maps to the `Subject.board` the
 # seeded curriculum is actually tagged with (see scripts/seed_ncert_
@@ -121,7 +121,7 @@ def get_welcome_back_note(db: Session, student_id: int, gap_threshold_days: int 
 
 
 def _significant_words(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z']+", text.lower()) if len(w) >= 4 and w not in _STOPWORDS}
+    return {w for w in tokenize_words(text) if len(w) >= 4 and w not in _STOPWORDS}
 
 
 def get_chapter_coverage(db: Session, student) -> dict | None:

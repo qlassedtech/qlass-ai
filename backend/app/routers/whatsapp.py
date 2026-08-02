@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage, Quiz, Question, Answer
+from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -33,7 +33,7 @@ from app.services.llm_client import translate_with_claude
 from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
-from app.services.document_client import extract_text_from_document
+from app.services.document_client import apply_active_document_pin, extract_text_from_document
 from app.services.youtube_client import find_best_video
 from app.services import cost_tracker, school_billing
 from app.services.escalation import (
@@ -50,9 +50,11 @@ from app.services.referral import (
     generate_referral_code,
     extract_referral_code,
     evaluate_referral_milestones,
+    is_worth_asking_to_refer,
     REFERRAL_SIGNUP_BONUS,
 )
 from app.services.intent_classifier import classify_intent
+from app.services.retrieval import fetch_candidate_chunks
 from app.services.active_profile import (
     classify_profile_routing,
     ProfileRouting,
@@ -67,11 +69,7 @@ from app.services.progress_report import (
     get_chapter_coverage,
     format_progress_message,
 )
-from app.services.quiz_service import (
-    generate_quiz_questions,
-    grade_answer,
-    MOCK_TEST_QUESTION_COUNT,
-)
+from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
 from app.agents.tutor_agent import TutorAgent
 
 logger = logging.getLogger(__name__)
@@ -86,29 +84,29 @@ WEBHOOK_RETRY_BATCH_SIZE = 100
 WEAK_TOPICS_LIMIT = 5
 OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
 
-# A message this long is almost certainly a multi-question problem set (a
-# pasted homework list, an OCR'd photo of one, or an extracted PDF/Word
-# document) rather than a single question — pin it as the student's active
-# document (see Student.active_document_text) so later turns like "now Q5"
-# still work once the original message has scrolled out of HISTORY_TURNS.
-ACTIVE_DOCUMENT_MIN_CHARS = 400
-# Upper bound on what actually gets pinned — confirmed live that a 33,000-
-# char paste got stored with no cap at all, permanently bloating that
-# student's system prompt (and cost) for the rest of the session. 8,000
-# chars comfortably covers a real 20-30 question DPP/homework sheet while
-# still bounding the worst case.
-ACTIVE_DOCUMENT_MAX_CHARS = 8000
-
 # Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
 # in whatsapp_client.py) — each button maps to the same canonical phrase its
 # corresponding typed command already matches, so a button tap is routed
 # through the exact same intent-classification path as if the student had
 # typed it (see classify_intent below) rather than needing its own path.
-MENU_BUTTONS = ["📊 My Progress", "🎁 Refer a Friend", "🆘 Talk to Teacher"]
+#
+# Deliberately no "Talk to Teacher" button here — proactively offering a
+# human escalation option on the AI tutor's own menu undercuts its own
+# credibility (it should be the front line, not routinely pointing to a
+# human). That path stays reachable two ways: the student explicitly types
+# it (still handled below via the teacher_help intent, regardless of any
+# button), or the automatic hint-streak escalation offers it after the
+# student has genuinely struggled (see app.services.escalation).
+#
+# "Refer a Friend" is also NOT always shown — see MENU_BUTTONS_BASE below,
+# it's added dynamically once the student has actually engaged enough to
+# credibly vouch for the product (asking a brand-new student to refer a
+# friend before they've experienced any value reads as growth-hungry, not
+# confident in the teaching itself).
+MENU_BUTTONS_BASE = ["📊 My Progress"]
 MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
     "🎁 Refer a Friend": "refer a friend",
-    "🆘 Talk to Teacher": "talk to teacher",
 }
 
 # Offered instead of a plain "you're out of credits" text (see the credit
@@ -774,9 +772,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # read as 0 days once this message is in chat_history.
     welcome_back_note = get_welcome_back_note(db, student.id)
 
-    if len(message_text) >= ACTIVE_DOCUMENT_MIN_CHARS:
-        student.active_document_text = message_text[:ACTIVE_DOCUMENT_MAX_CHARS]
-        db.commit()
+    apply_active_document_pin(db, student, message_text)
 
     # Pull recent conversation turns *before* saving this message, so the
     # tutor has context but doesn't see this message twice.
@@ -797,6 +793,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     image_prompt = None
     video_query = None
+    citation = None
     did_answer_via_llm = False
     monthly_spend_before = _monthly_spend_status(db, student)
     # Logged once per turn, before the routing ladder below decides which
@@ -837,7 +834,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # point, but only students who already passed the churn/pilot/credit
     # gates above ever reach here, so this never spends money on a blocked
     # account.
-    classification = await classify_intent(message_text, last_discussed_topic=last_topic_context)
+    last_assistant_message = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
+    # Candidate chunks (cheap Postgres full-text recall, no LLM cost) are
+    # fetched unconditionally here so classify_intent's single call can
+    # also judge their relevance (relevant_excerpts) — see
+    # app.services.retrieval's module docstring for why that judgment
+    # rides along in this call instead of a separate dedicated one.
+    candidate_chunks = fetch_candidate_chunks(db, message_text, student.class_, student.board)
+    classification = await classify_intent(
+        message_text, last_discussed_topic=last_topic_context, last_assistant_message=last_assistant_message,
+        candidate_chunks=candidate_chunks,
+    )
     cost_tracker.record_claude_usage(
         db, classification.llm_result.model, classification.llm_result.input_tokens,
         classification.llm_result.output_tokens, student.id,
@@ -884,13 +891,19 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # this ladder), so this exact greeting silently skipped it.
         menu_greeting = f"{welcome_back_note}\n\nJust ask me anything to start learning, or pick one of these:" \
             if welcome_back_note else "Hi! Just ask me anything to start learning, or pick one of these:"
-        button_result = await send_whatsapp_buttons(from_phone, menu_greeting, MENU_BUTTONS)
+        activity = get_activity_stats(db, student.id)
+        weekly_stats = get_student_stats(db, student.id, days=7)
+        menu_buttons = list(MENU_BUTTONS_BASE)
+        if is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
+            menu_buttons.append("🎁 Refer a Friend")
+        button_result = await send_whatsapp_buttons(from_phone, menu_greeting, menu_buttons)
         if not button_result.get("sent"):
             fallback_prefix = f"{welcome_back_note}\n\n" if welcome_back_note else ""
+            fallback_commands = "'my progress'" + (", 'refer a friend'," if len(menu_buttons) > 1 else "")
             await send_whatsapp_message(
                 from_phone,
-                f"{fallback_prefix}Just ask me anything to start learning! Or reply with 'my progress', "
-                "'refer a friend', or 'talk to teacher'.",
+                f"{fallback_prefix}Just ask me anything to start learning! Or reply with {fallback_commands} "
+                "or anything else you want to work on.",
             )
         return
 
@@ -908,9 +921,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # No extra LLM call beyond the classification above, so available
         # even if the monthly credit is exhausted (a student shouldn't get
         # stuck unable to exit a quiz).
-        student.active_quiz_id = None
-        db.commit()
-        reply_text = "No problem, quiz stopped! What else can I help you with?"
+        reply_text = stop_quiz(db, student)
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "progress":
         # Computed directly from real TopicProgress rows — no risk of the
@@ -962,140 +973,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
         return
     elif student.active_quiz_id:
         # Treat this message as the answer to the current quiz question.
-        quiz_questions = db.query(Question).filter(Question.quiz_id == student.active_quiz_id).order_by(Question.id).all()
-        answered_count = (
-            db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).count()
-            if quiz_questions else 0
-        )
-        if not quiz_questions or answered_count >= len(quiz_questions):
-            # Shouldn't normally happen (quiz should already have ended), but guard anyway.
-            student.active_quiz_id = None
-            db.commit()
-            reply_text = "Looks like that quiz already wrapped up! What else can I help you with?"
-            detected_lang = student.preferred_language or "en-IN"
-        else:
-            current_question = quiz_questions[answered_count]
-            if classification.quiz_skip:
-                # No grading call needed — is_correct=None marks it as
-                # skipped rather than wrong, so it doesn't count against
-                # the student's score at the end.
-                is_correct = None
-                feedback = f"Skipped ⏭️ — the answer was *{current_question.correct_answer}*."
-            else:
-                is_correct, grade_result = await grade_answer(
-                    current_question.question_text, current_question.correct_answer, message_text
-                )
-                cost_tracker.record_claude_usage(
-                    db, grade_result.model, grade_result.input_tokens, grade_result.output_tokens, student.id,
-                    cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
-                )
-                feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
-            db.add(Answer(
-                question_id=current_question.id, student_id=student.id,
-                given_answer=message_text, is_correct=is_correct,
-            ))
-            db.commit()
-            answered_count += 1
-            if answered_count < len(quiz_questions):
-                next_question = quiz_questions[answered_count]
-                reply_text = f"{feedback}\n\nQuestion {answered_count + 1}/{len(quiz_questions)}: {next_question.question_text}"
-            else:
-                all_answers = db.query(Answer).filter(Answer.question_id.in_([q.id for q in quiz_questions])).all()
-                score = sum(1 for a in all_answers if a.is_correct is True)
-                skipped = sum(1 for a in all_answers if a.is_correct is None)
-                attempted = len(quiz_questions) - skipped
-                student.active_quiz_id = None
-                db.commit()
-                skip_note = f" ({skipped} skipped)" if skipped else ""
-                # Only fetched here (quiz completion), not on every
-                # intermediate answer/skip turn — is_mock_test/created_at
-                # are only needed for the final report.
-                current_quiz = db.query(Quiz).filter(Quiz.id == quiz_questions[0].quiz_id).first()
-                if current_quiz is not None and current_quiz.is_mock_test and current_quiz.created_at:
-                    started_at = current_quiz.created_at
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=timezone.utc)
-                    elapsed = datetime.now(timezone.utc) - started_at
-                    minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
-                    reply_text = (
-                        f"{feedback}\n\n🎓 Mock test complete! You scored *{score}/{attempted}*{skip_note} "
-                        f"in {minutes}m {seconds}s."
-                    )
-                else:
-                    reply_text = f"{feedback}\n\n🎉 Quiz complete! You scored *{score}/{attempted}*{skip_note}."
-
-                # A real tutor doesn't just report a bad score and move on —
-                # offer to actually go back over the material. Only on a
-                # genuinely weak showing (not a single skip dragging down an
-                # otherwise-fine attempt), and only when there's a topic to
-                # offer to re-teach.
-                if attempted > 0 and score / attempted < 0.5 and current_quiz is not None and current_quiz.title:
-                    reply_text += (
-                        f"\n\nLooks like *{current_quiz.title}* could use more practice — "
-                        f"want me to go over it again from the start?"
-                    )
+        reply_text = await handle_quiz_answer(db, student, message_text, classification.quiz_skip)
         detected_lang = student.preferred_language or "en-IN"
     elif mock_test_request:
         mock_topic = classification.mock_test_topic or "a mixed review covering everything we've discussed so far"
-        questions_data, gen_result = await generate_quiz_questions(
-            mock_topic, student.class_, num_questions=MOCK_TEST_QUESTION_COUNT, board=student.board,
-        )
-        cost_tracker.record_claude_usage(
-            db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
-            cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
-        )
-        if not questions_data:
-            reply_text = (
-                "Sorry, I couldn't put together a mock test right now — want to try a specific topic, "
-                "or just ask me questions directly?"
-            )
-        else:
-            quiz = Quiz(student_id=student.id, is_mock_test=True, title=mock_topic)
-            db.add(quiz)
-            db.commit()
-            db.refresh(quiz)
-            for q in questions_data:
-                db.add(Question(
-                    quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
-                    question_text=q["question"], correct_answer=q["answer"],
-                ))
-            db.commit()
-            student.active_quiz_id = quiz.id
-            db.commit()
-            reply_text = (
-                f"🎓 Let's do a {len(questions_data)}-question mock test! Take your time, but I'll note "
-                f"how long it takes so you get a sense of your exam pace.\n\n"
-                f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
-            )
+        reply_text = await start_mock_test(db, student, mock_topic)
         detected_lang = student.preferred_language or "en-IN"
     elif quiz_topic_request:
-        questions_data, gen_result = await generate_quiz_questions(quiz_topic_request, student.class_, board=student.board)
-        cost_tracker.record_claude_usage(
-            db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
-            cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
-        )
-        if not questions_data:
-            reply_text = (
-                "Sorry, I couldn't put together a quiz on that right now — want to try a different "
-                "topic, or just ask me questions directly?"
-            )
-        else:
-            quiz = Quiz(student_id=student.id, title=quiz_topic_request)
-            db.add(quiz)
-            db.commit()
-            db.refresh(quiz)
-            for q in questions_data:
-                db.add(Question(
-                    quiz_id=quiz.id, question_type=q.get("question_type", "short_answer"),
-                    question_text=q["question"], correct_answer=q["answer"],
-                ))
-            db.commit()
-            student.active_quiz_id = quiz.id
-            db.commit()
-            reply_text = (
-                f"Great, let's do a {len(questions_data)}-question quiz on *{quiz_topic_request}*! 📝\n\n"
-                f"Question 1/{len(questions_data)}: {questions_data[0]['question']}"
-            )
+        reply_text = await start_quiz(db, student, quiz_topic_request)
         detected_lang = student.preferred_language or "en-IN"
     elif (
         db.query(ChatHistory.id)
@@ -1166,6 +1051,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # returning an image_prompt when so, and whether a text message
         # should selectively get a voice reply (only if explicitly asked
         # for — most text stays text).
+        relevant_chunks = [
+            candidate_chunks[i - 1] for i in classification.relevant_excerpts if 1 <= i <= len(candidate_chunks)
+        ]
         result = await tutor_agent.respond(
             student.as_profile_dict(),
             message_text,
@@ -1177,11 +1065,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
             active_document_text=student.active_document_text,
             pending_class_confirm=pending_class_confirm,
             pending_profile_field=pending_profile_field,
+            retrieved_chunks=relevant_chunks,
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
         video_query = result["video_query"]
+        citation = result["citation"]
 
         if pending_class_confirm:
             # The LLM already wove an acknowledgement into reply_text above
@@ -1387,6 +1277,16 @@ async def _handle_message(db: Session, payload: dict) -> None:
             if translated:
                 outgoing_text = translated
                 cost_tracker.record_char_usage(db, "sarvam_translate", len(reply_text), student.id)
+
+    # Appended AFTER translation, not before — a chapter title is a proper
+    # noun, and running it through the translation pass risked mangling it
+    # into awkward Hindi rather than leaving it as-is (see
+    # app.services.retrieval.build_citation_footer). `citation` is None
+    # unless this turn actually went through the tutor_agent.respond()
+    # branch AND grounding fired — every other branch (quiz, progress,
+    # menu, etc.) leaves it at its safe default.
+    if citation:
+        outgoing_text = f"{outgoing_text}\n\n{citation}"
 
     # Send back over Wati — as a voice note only if the student explicitly
     # asked for an audio reply (never just because their own input was

@@ -1,13 +1,18 @@
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.core import ChatHistory, Parent, Student, Teacher
 from app.services import cost_tracker, school_billing
+from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
+from app.services.document_client import extract_text_from_document
+from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
 from app.services.rate_limit import is_otp_rate_limited
 from app.services.referral import REFERRAL_SIGNUP_BONUS
+from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
@@ -126,14 +131,74 @@ def get_chat_history(db: Session = Depends(get_db), student: Student = Depends(g
     ]
 
 
+@router.get("/student-app/progress")
+def get_progress(db: Session = Depends(get_db), student: Student = Depends(get_current_student)):
+    """
+    JSON equivalent of the WhatsApp "progress" intent's format_progress_
+    message (see app.routers.whatsapp) — same underlying stats functions,
+    but structured for the app to render as a real progress screen instead
+    of a single chat bubble of text.
+    """
+    stats = get_student_stats(db, student.id)
+    activity = get_activity_stats(db, student.id)
+    coverage = get_chapter_coverage(db, student)
+    return {
+        "total_evaluated": stats["total_evaluated"],
+        "correct": stats["correct"],
+        "incorrect": stats["incorrect"],
+        "accuracy_pct": stats["accuracy_pct"],
+        "weak_topics": stats["weak_topics"],
+        "messages_sent": stats["messages_sent"],
+        "streak_days": activity["streak_days"],
+        "active_days": activity["active_days"],
+        "chapters_covered": len(coverage["covered"]) if coverage else None,
+        "chapters_total": coverage["total"] if coverage else None,
+        "chapters_not_covered": coverage["not_covered"][:5] if coverage else [],
+    }
+
+
+@router.get("/student-app/credits/history")
+def get_credit_history(db: Session = Depends(get_db), student: Student = Depends(get_current_student)):
+    events = cost_tracker.get_credit_history(db, student.id)
+    return [
+        {
+            "amount": float(e.amount), "service": e.service, "note": e.note,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]
+
+
+class DeviceTokenRequest(BaseModel):
+    token: str
+
+
+@router.post("/student-app/device-token")
+def register_device_token(
+    body: DeviceTokenRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    Called by the Android app right after login (and whenever FCM rotates
+    the token) so push notifications — currently only send_habit_nudges.py
+    — can reach app users, not just WhatsApp. A no-op with nothing to send
+    to until Firebase is actually configured (see app.services.push_client).
+    """
+    student.fcm_token = body.token
+    db.commit()
+    return {"saved": True}
+
+
 class SendMessageRequest(BaseModel):
     message: str
 
 
-@router.post("/student-app/chat/send")
-async def send_message(
-    body: SendMessageRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student)
-):
+async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
+    """
+    Shared by every input channel this app supports (typed, photo, voice
+    note, document) — same billing gates and same process_web_message call
+    WhatsApp effectively goes through, so a student sees identical behavior
+    regardless of which endpoint got them here.
+    """
     if school_billing.is_centre_churned(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
         raise HTTPException(
             status_code=402,
@@ -151,5 +216,73 @@ async def send_message(
         )
     if not cost_tracker.has_credits(db, student.id):
         raise HTTPException(status_code=402, detail="You're out of AI credits — ask your school to top up your account")
-    reply = await process_web_message(db, student, body.message)
+    reply = await process_web_message(db, student, message_text)
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
+@router.post("/student-app/chat/send")
+async def send_message(
+    body: SendMessageRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student)
+):
+    return await _reply_to(db, student, body.message)
+
+
+@router.post("/student-app/chat/send-image")
+async def send_image_message(
+    file: UploadFile = File(...), db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    Photo-of-a-question support (homework worksheets, textbook problems) —
+    same Azure Vision OCR call WhatsApp uses (app.services.ocr_client), just
+    fed from a multipart upload instead of a Wati media URL. The extracted
+    text is then indistinguishable from typed input to everything downstream.
+    """
+    if not student.has_feature("ocr"):
+        raise HTTPException(status_code=403, detail="Photo questions aren't available on your account yet")
+    image_bytes = await file.read()
+    message_text = await extract_text_from_image(image_bytes)
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't read any text in that photo — try a clearer picture")
+    cost_tracker.record_flat_usage(db, "azure_ocr", student.id)
+    return await _reply_to(db, student, message_text)
+
+
+@router.post("/student-app/chat/send-voice")
+async def send_voice_message(
+    file: UploadFile = File(...), db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """Same Sarvam STT call WhatsApp uses (app.services.sarvam_client) for a recorded voice note."""
+    if not student.has_feature("voice"):
+        raise HTTPException(status_code=403, detail="Voice questions aren't available on your account yet")
+    audio_bytes = await file.read()
+    message_text = await transcribe_audio(audio_bytes, filename=file.filename or "voice_note.m4a")
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't understand that voice note — please try again")
+    cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
+    if student.gender is None:
+        detected_gender = detect_gender_from_pitch(audio_bytes)
+        if detected_gender:
+            student.gender = detected_gender
+            db.commit()
+    return await _reply_to(db, student, message_text)
+
+
+@router.post("/student-app/chat/send-document")
+async def send_document_message(
+    file: UploadFile = File(...), db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    PDF/Word worksheet upload — same extract_text_from_document WhatsApp
+    uses. The extracted text goes through the normal message pipeline,
+    which pins it as the student's active document (see
+    app.services.document_client.apply_active_document_pin) so follow-up
+    turns like "now question 5" keep working once it's out of the recent-
+    history window, exactly as on WhatsApp.
+    """
+    if not student.has_feature("documents"):
+        raise HTTPException(status_code=403, detail="PDF/Word file questions aren't available on your account yet")
+    document_bytes = await file.read()
+    message_text = extract_text_from_document(document_bytes, file.filename or "")
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Couldn't read any text in that file — try a different file")
+    return await _reply_to(db, student, message_text)

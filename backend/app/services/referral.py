@@ -27,6 +27,30 @@ REFERRAL_MILESTONES: list[tuple[str, int, int, int, float]] = [
     ("week3", 14, 20, 1, 30.0),
 ]
 
+# "Worth asking to refer a friend" bar — shared between the WhatsApp main
+# menu (see whatsapp.py's MENU_BUTTONS) and scripts/send_referral_nudges.py,
+# so both use the same definition of a credible, high-conversion referrer
+# rather than two independently-tuned thresholds. Asking a brand-new
+# student to vouch for a product they haven't experienced yet reads as
+# growth-hungry rather than confident in its own teaching — this is checked
+# BEFORE ever offering the option, not just before nudging about it later.
+REFERRAL_ACTIVE_WITHIN_DAYS = 7
+REFERRAL_STREAK_THRESHOLD_DAYS = 3
+REFERRAL_WEEKLY_MESSAGE_THRESHOLD = 10
+
+
+def is_worth_asking_to_refer(activity: dict, weekly_messages_sent: int) -> bool:
+    """
+    activity is app.services.progress_report.get_activity_stats' return
+    dict; weekly_messages_sent is get_student_stats(..., days=7)["messages_sent"].
+    """
+    if activity["days_since_last_message"] is None or activity["days_since_last_message"] > REFERRAL_ACTIVE_WITHIN_DAYS:
+        return False
+    return (
+        activity["streak_days"] >= REFERRAL_STREAK_THRESHOLD_DAYS
+        or weekly_messages_sent >= REFERRAL_WEEKLY_MESSAGE_THRESHOLD
+    )
+
 
 def generate_referral_code(student_id: int) -> str:
     # Offset so codes read as a plausible-looking short code rather than

@@ -2,9 +2,13 @@ from sqlalchemy.orm import Session
 
 from app.models.core import ChatHistory, Student, TopicProgress
 from app.services import cost_tracker
+from app.services.document_client import apply_active_document_pin
 from app.services.habit import evaluate_habit_milestones
+from app.services.intent_classifier import classify_intent
 from app.services.llm_client import translate_with_claude
 from app.services.progress_report import get_welcome_back_note
+from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
+from app.services.retrieval import fetch_candidate_chunks
 from app.services.referral import evaluate_referral_milestones
 from app.agents.tutor_agent import TutorAgent
 
@@ -16,19 +20,23 @@ tutor_agent = TutorAgent()
 
 async def process_web_message(db: Session, student: Student, message_text: str) -> str:
     """
-    v1 of the student web app's chat endpoint — text-only (no voice/image/
-    document/quiz handling yet, unlike the WhatsApp path in
-    app.routers.whatsapp._handle_message). Shares the same TutorAgent,
-    credit ledger, weak-topic surfacing, referral milestones, and
-    translation logic as WhatsApp so a student's experience/progress is
-    consistent regardless of which channel they use.
+    The student web/app chat endpoint — shares the same TutorAgent, credit
+    ledger, weak-topic surfacing, referral milestones, translation logic,
+    real scored quiz flow, AND active-document pinning as WhatsApp (see
+    app.services.quiz_flow, app.services.document_client), so a student's
+    experience/progress is consistent regardless of which channel they use.
+    `message_text` is always plain text by the time it gets here — voice
+    notes and photos are transcribed/OCR'd by the caller (see
+    app.routers.student_app's send-voice/send-image endpoints) before being
+    passed in, exactly like app.routers.whatsapp does; this function itself
+    doesn't know or care whether the text was typed, spoken, or read off a
+    photo.
     """
     # Computed BEFORE this message is saved, so "days since last message"
     # reflects the prior session, not this one (same reasoning as the
-    # WhatsApp path in app.routers.whatsapp — this was previously missing
-    # here entirely, so a returning web-app student never got a
-    # welcome-back acknowledgment at all).
+    # WhatsApp path in app.routers.whatsapp).
     welcome_back_note = get_welcome_back_note(db, student.id)
+    apply_active_document_pin(db, student, message_text)
 
     prior_rows = (
         db.query(ChatHistory)
@@ -42,51 +50,102 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     db.add(ChatHistory(student_id=student.id, role="user", message=message_text, agent="tutor"))
     db.commit()
 
-    weak_topic_rows = (
+    # Resolves "quiz on the same"/"quiz on this" — same reasoning as the
+    # WhatsApp path (app.routers.whatsapp).
+    last_topic_row = (
         db.query(TopicProgress.topic)
-        .filter(TopicProgress.student_id == student.id, TopicProgress.is_correct.is_(False))
+        .filter(TopicProgress.student_id == student.id)
         .order_by(TopicProgress.created_at.desc())
-        .limit(WEAK_TOPICS_LIMIT)
-        .all()
+        .first()
     )
-    weak_topics = list(dict.fromkeys(row[0] for row in weak_topic_rows))
+    last_topic_context = student.last_discussed_topic or (last_topic_row[0] if last_topic_row else None)
+    last_assistant_message = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
 
-    result = await tutor_agent.respond(
-        student.as_profile_dict(), message_text, history, weak_topics,
-        image_generation_enabled=False, voice_enabled=False, video_enabled=False,
-        active_document_text=student.active_document_text,
+    # Candidate chunks (cheap Postgres full-text recall, no LLM cost) are
+    # fetched unconditionally here so classify_intent's single call can
+    # also judge their relevance (relevant_excerpts) — see
+    # app.services.retrieval's module docstring for why that judgment
+    # rides along in this call instead of a separate dedicated one.
+    candidate_chunks = fetch_candidate_chunks(db, message_text, student.class_, student.board)
+    classification = await classify_intent(
+        message_text, last_discussed_topic=last_topic_context, last_assistant_message=last_assistant_message,
+        candidate_chunks=candidate_chunks,
     )
-    reply_text = result["reply"]
+    cost_tracker.record_claude_usage(
+        db, classification.llm_result.model, classification.llm_result.input_tokens,
+        classification.llm_result.output_tokens, student.id,
+        cache_write_tokens=classification.llm_result.cache_write_tokens,
+        cache_read_tokens=classification.llm_result.cache_read_tokens,
+    )
+
+    detected_lang = student.preferred_language or "en-IN"
+    result = None
+    citation = None
+    if student.active_quiz_id and classification.intent == "quiz_stop":
+        reply_text = stop_quiz(db, student)
+    elif student.active_quiz_id:
+        reply_text = await handle_quiz_answer(db, student, message_text, classification.quiz_skip)
+    elif classification.wants_mock_test:
+        mock_topic = classification.mock_test_topic or "a mixed review covering everything we've discussed so far"
+        reply_text = await start_mock_test(db, student, mock_topic)
+    elif classification.quiz_topic:
+        reply_text = await start_quiz(db, student, classification.quiz_topic)
+    else:
+        weak_topic_rows = (
+            db.query(TopicProgress.topic)
+            .filter(TopicProgress.student_id == student.id, TopicProgress.is_correct.is_(False))
+            .order_by(TopicProgress.created_at.desc())
+            .limit(WEAK_TOPICS_LIMIT)
+            .all()
+        )
+        weak_topics = list(dict.fromkeys(row[0] for row in weak_topic_rows))
+
+        relevant_chunks = [
+            candidate_chunks[i - 1] for i in classification.relevant_excerpts if 1 <= i <= len(candidate_chunks)
+        ]
+        result = await tutor_agent.respond(
+            student.as_profile_dict(), message_text, history, weak_topics,
+            image_generation_enabled=False, voice_enabled=False, video_enabled=False,
+            active_document_text=student.active_document_text, retrieved_chunks=relevant_chunks,
+        )
+        reply_text = result["reply"]
+        detected_lang = result["lang"]
+        usage = result["usage"]
+        cost_tracker.record_claude_usage(
+            db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
+            cache_write_tokens=usage["main_cache_write_tokens"], cache_read_tokens=usage["main_cache_read_tokens"],
+        )
+        cost_tracker.record_claude_usage(
+            db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id,
+            cache_write_tokens=usage["classify_cache_write_tokens"], cache_read_tokens=usage["classify_cache_read_tokens"],
+        )
+
+        if result["solved_directly"] is True:
+            student.direct_solutions_count = (student.direct_solutions_count or 0) + 1
+            db.commit()
+        elif result["solved_directly"] is False:
+            student.hints_given_count = (student.hints_given_count or 0) + 1
+            db.commit()
+
+        if result["evaluated"]:
+            last_assistant_turn = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
+            db.add(TopicProgress(
+                student_id=student.id, topic=result["topic"] or "unknown",
+                question_text=last_assistant_turn, given_answer=message_text, is_correct=result["correct"],
+            ))
+            db.commit()
+
+        if result["topic"]:
+            student.last_discussed_topic = result["topic"]
+            db.commit()
+
+        citation = result["citation"]
+
     if welcome_back_note:
         reply_text = f"{welcome_back_note}\n\n{reply_text}"
-    detected_lang = result["lang"]
-    usage = result["usage"]
-    cost_tracker.record_claude_usage(
-        db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
-        cache_write_tokens=usage["main_cache_write_tokens"], cache_read_tokens=usage["main_cache_read_tokens"],
-    )
-    cost_tracker.record_claude_usage(
-        db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id,
-        cache_write_tokens=usage["classify_cache_write_tokens"], cache_read_tokens=usage["classify_cache_read_tokens"],
-    )
 
     if detected_lang != student.preferred_language:
         student.preferred_language = detected_lang
-        db.commit()
-
-    if result["solved_directly"] is True:
-        student.direct_solutions_count = (student.direct_solutions_count or 0) + 1
-        db.commit()
-    elif result["solved_directly"] is False:
-        student.hints_given_count = (student.hints_given_count or 0) + 1
-        db.commit()
-
-    if result["evaluated"]:
-        last_assistant_turn = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
-        db.add(TopicProgress(
-            student_id=student.id, topic=result["topic"] or "unknown",
-            question_text=last_assistant_turn, given_answer=message_text, is_correct=result["correct"],
-        ))
         db.commit()
 
     await evaluate_referral_milestones(db, student)
@@ -105,5 +164,12 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
                 student.id, cache_write_tokens=translated_result.cache_write_tokens,
                 cache_read_tokens=translated_result.cache_read_tokens,
             )
+
+    # Appended AFTER translation, not before — a chapter title is a proper
+    # noun, and running it through the translation pass risked mangling it
+    # into awkward Hindi rather than leaving it as-is (see
+    # app.services.retrieval.build_citation_footer).
+    if citation:
+        outgoing_text = f"{outgoing_text}\n\n{citation}"
 
     return outgoing_text

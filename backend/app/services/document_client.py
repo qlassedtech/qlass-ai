@@ -2,6 +2,31 @@ import io
 
 import fitz  # pymupdf
 from docx import Document
+from sqlalchemy.orm import Session
+
+from app.models.core import Student
+
+# A message this long is almost certainly a multi-question problem set (a
+# pasted homework list, an OCR'd photo of one, a transcribed voice note, or
+# an extracted PDF/Word document) rather than a single question — pin it as
+# the student's active document (see Student.active_document_text) so later
+# turns like "now Q5" still work once the original message has scrolled out
+# of the chat-history window. Applied uniformly regardless of which channel
+# (WhatsApp, web, native app) or source (typed, OCR, STT, file) produced the
+# text — see apply_active_document_pin.
+ACTIVE_DOCUMENT_MIN_CHARS = 400
+# Upper bound on what actually gets pinned — confirmed live that a 33,000-
+# char paste got stored with no cap at all, permanently bloating that
+# student's system prompt (and cost) for the rest of the session. 8,000
+# chars comfortably covers a real 20-30 question DPP/homework sheet while
+# still bounding the worst case.
+ACTIVE_DOCUMENT_MAX_CHARS = 8000
+
+
+def apply_active_document_pin(db: Session, student: Student, message_text: str) -> None:
+    if len(message_text) >= ACTIVE_DOCUMENT_MIN_CHARS:
+        student.active_document_text = message_text[:ACTIVE_DOCUMENT_MAX_CHARS]
+        db.commit()
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str | None:
