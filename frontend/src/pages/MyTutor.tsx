@@ -94,7 +94,7 @@ export default function MyTutor() {
       <div className="page-header">
         <div>
           <h1>My AI Tutor</h1>
-          <p>Your own personal tutor account, separate from any student's</p>
+          <p>Your own personal tutor account, separate from any student's — ask anything, send a photo of a question, record a voice note, or share a PDF</p>
         </div>
         {subscriptionPlan !== "unlimited" && balance !== null && <p className="muted">₹{balance.toFixed(2)} credits</p>}
       </div>

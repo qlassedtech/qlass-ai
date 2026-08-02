@@ -878,11 +878,25 @@ async def _handle_message(db: Session, payload: dict) -> None:
             # first "wow" moment that turns out broken (e.g. promising
             # photo help to a student without the OCR feature) is worse
             # than not mentioning it at all.
-            photo_hint = ", send a photo of a tricky homework question," if student.has_feature("ocr") else ""
+            capability_hints = []
+            if student.has_feature("ocr"):
+                capability_hints.append("send a photo of a tricky homework question")
+            if student.has_feature("voice"):
+                capability_hints.append("send a voice note")
+            if student.has_feature("documents"):
+                capability_hints.append("share a PDF or Word file of your homework")
+            if student.has_feature("youtube_videos"):
+                capability_hints.append("ask for a video explanation")
+            if not capability_hints:
+                capability_sentence = ""
+            elif len(capability_hints) == 1:
+                capability_sentence = f" You can also {capability_hints[0]}."
+            else:
+                capability_sentence = f" You can also {', '.join(capability_hints[:-1])}, or {capability_hints[-1]}."
             await send_whatsapp_message(
                 from_phone,
-                f"{greeting} I'm your AI tutor — ask me to explain any topic{photo_hint} or say "
-                "\"quiz me on <topic>\" to test yourself. What would you like to learn today?",
+                f"{greeting} I'm your AI tutor — ask me to explain any topic or say \"quiz me on <topic>\" "
+                f"to test yourself.{capability_sentence} What would you like to learn today?",
             )
             return
         # A returning student saying "Hi" after a gap is the single most

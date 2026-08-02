@@ -14,7 +14,7 @@ export default function Chat() {
       <div className="page-header">
         <div>
           <h1>AI Tutor</h1>
-          <p>Ask anything — homework help, explanations, or a quick quiz</p>
+          <p>Ask anything, send a photo of a question, record a voice note, or share a PDF — homework help, explanations, or a quick quiz</p>
         </div>
         {(balance ?? student?.credit_balance) !== undefined && (
           <p className="muted">₹{(balance ?? student?.credit_balance)?.toFixed(2)} credits</p>

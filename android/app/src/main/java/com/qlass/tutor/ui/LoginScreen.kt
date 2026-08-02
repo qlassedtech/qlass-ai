@@ -58,7 +58,7 @@ fun LoginScreen(
         Text("Qlass AI Tutor", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            "Homework help, explanations, and quizzes — anytime.",
+            "Ask anything, send a photo of a question, record a voice note, or share a PDF — homework help, explanations, and quizzes, anytime.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

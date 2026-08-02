@@ -2,7 +2,9 @@ import httpx
 from app.config import settings
 
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 EDUCATION_CATEGORY_ID = "27"  # YouTube's "Education" category — filters out loosely-matching non-educational content
+CANDIDATE_COUNT = 5  # how many search results to check for a language match before giving up and using the top one
 
 
 def _grade_qualified_query(query: str, student_class: str | None) -> str:
@@ -16,6 +18,36 @@ def _grade_qualified_query(query: str, student_class: str | None) -> str:
     if not student_class or student_class.lower() in query.lower():
         return query
     return f"{query} class {student_class}"
+
+
+async def _pick_language_matched_id(client: httpx.AsyncClient, candidate_ids: list[str], target_language: str) -> str:
+    """
+    search.list's `relevanceLanguage` param is only a ranking hint, not a
+    filter — YouTube's own docs say a highly-relevant result in a different
+    language can still rank first, and confirmed live: relevanceLanguage=en
+    still returned a Telugu video as the top (and only-requested) result.
+    videos.list's snippet DOES carry the uploader-declared audio/caption
+    language, so this fetches that for the top few candidates and picks the
+    first one that actually matches — real metadata, not a guess from the
+    title text. Falls back to the first candidate if none declare a
+    matching language (many videos don't set this field at all), so a
+    missing tag never means "no video" when a decent one was found.
+    """
+    resp = await client.get(
+        YOUTUBE_VIDEOS_URL,
+        params={"key": settings.youtube_api_key, "id": ",".join(candidate_ids), "part": "snippet"},
+    )
+    resp.raise_for_status()
+    items = resp.json().get("items") or []
+    by_id = {item["id"]: item["snippet"] for item in items}
+    for video_id in candidate_ids:
+        snippet = by_id.get(video_id)
+        if not snippet:
+            continue
+        video_language = snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
+        if video_language.lower().startswith(target_language):
+            return video_id
+    return candidate_ids[0]
 
 
 async def find_best_video(
@@ -44,19 +76,19 @@ async def find_best_video(
     if not settings.youtube_api_key:
         return None
 
-    relevance_language = "hi" if (student_language_code or "").startswith("hi") else "en"
+    target_language = "hi" if (student_language_code or "").startswith("hi") else "en"
     params = {
         "key": settings.youtube_api_key,
         "q": _grade_qualified_query(query, student_class),
         "part": "snippet",
         "type": "video",
-        "maxResults": 1,
+        "maxResults": CANDIDATE_COUNT,
         "order": "relevance",
         "safeSearch": "strict",
         "videoEmbeddable": "true",
         "videoDuration": "medium",
         "videoCategoryId": EDUCATION_CATEGORY_ID,
-        "relevanceLanguage": relevance_language,
+        "relevanceLanguage": target_language,
     }
 
     try:
@@ -66,8 +98,13 @@ async def find_best_video(
             items = resp.json().get("items") or []
             if not items:
                 return None
-            video_id = items[0]["id"]["videoId"]
-            title = items[0]["snippet"]["title"]
-            return {"title": title, "url": f"https://www.youtube.com/watch?v={video_id}"}
+            candidates = {item["id"]["videoId"]: item["snippet"]["title"] for item in items}
+            candidate_ids = list(candidates.keys())
+            chosen_id = (
+                await _pick_language_matched_id(client, candidate_ids, target_language)
+                if len(candidate_ids) > 1
+                else candidate_ids[0]
+            )
+            return {"title": candidates[chosen_id], "url": f"https://www.youtube.com/watch?v={chosen_id}"}
     except httpx.HTTPError:
         return None
