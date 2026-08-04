@@ -104,7 +104,7 @@ async def test_non_quiz_message_still_uses_the_tutor_agent(db_session, monkeypat
                 "classify_cache_write_tokens": 0, "classify_cache_read_tokens": 0,
             },
             "solved_directly": None, "evaluated": False, "topic": "photosynthesis", "correct": None,
-            "citation": None,
+            "citation": None, "video_query": None,
         }
 
     # fetch_candidate_chunks runs raw Postgres full-text-search SQL

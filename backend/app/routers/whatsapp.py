@@ -37,6 +37,7 @@ from app.services.document_client import apply_active_document_pin, extract_text
 from app.services.youtube_client import find_best_video
 from app.services import cost_tracker, school_billing
 from app.services.escalation import (
+    QLASS_SUPPORT_PHONE,
     record_hint_outcome,
     get_escalation_recipients,
     format_escalation_message,
@@ -114,11 +115,20 @@ MENU_BUTTON_TO_COMMAND = {
 # "🏫 Ask My School" maps onto the SAME "talk to teacher" command as the
 # main menu button above (reuses get_escalation_recipients — no separate
 # path needed), rather than inventing a new intent for what's really the
-# same underlying action.
-CREDIT_EXHAUSTED_BUTTONS = ["💳 Top Up Credits", "🏫 Ask My School"]
+# same underlying action. "📞 Call Us" is a third, always-available option:
+# "Ask My School" silently notifies nobody for a self-signup student with
+# no real school on file (Teacher.centre_id has zero matches for the
+# "Qlass Direct" fallback centre — confirmed live), so a direct phone
+# number is the one option guaranteed to reach an actual human regardless
+# of whether this student belongs to a partner school at all. Defined
+# once in app.services.escalation (imported below) so every channel's
+# "talk to a human" fallback — WhatsApp, web, Android, teacher's My AI
+# Tutor — points at the same real number.
+CREDIT_EXHAUSTED_BUTTONS = ["💳 Top Up Credits", "🏫 Ask My School", "📞 Call Us"]
 CREDIT_BUTTON_TO_COMMAND = {
     "💳 Top Up Credits": "top up credits",
     "🏫 Ask My School": "talk to teacher",
+    "📞 Call Us": "call qlass",
 }
 
 # Never keep production-cost bypasses for particular phone numbers. Feature
@@ -319,14 +329,34 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     yet (disambiguation) and we just created a fresh profile for a new
     sibling (which needs a "what's your name?" confirmation, not the LLM
     trying to answer what was really a "different child" trigger phrase).
-    For the overwhelmingly common case (one profile per phone) this is a
-    single query with zero extra overhead; the multi-profile path only
-    kicks in for phones that actually have more than one student on them.
+    For the overwhelmingly common case (one profile per phone) this really
+    is a single query with zero extra overhead (see the len(students) == 1
+    check below for why that wasn't actually true until it was fixed); the
+    multi-profile path only kicks in for phones that actually have more
+    than one student on them.
     """
     students = db.query(Student).filter(Student.phone == from_phone).order_by(Student.id).all()
 
     if not students:
         return await _create_new_student(db, from_phone, message_text), None
+
+    # The overwhelming majority of phones have exactly one profile — no
+    # disambiguation is possible, so there's nothing for an LLM call to
+    # resolve. Confirmed live this was NOT actually happening: the call
+    # below fired unconditionally for every text message regardless of
+    # student count, including messages from a student already blocked
+    # by the credit gate further down _handle_message (that gate runs
+    # AFTER this function returns) — silently spending real AI credit on
+    # every single message a single-profile student ever sent, contrary
+    # to this function's own original claim of "zero extra overhead" for
+    # this case. The one capability this trades away is auto-detecting
+    # "actually, add my other child" typed as a plain message on a phone
+    # that currently has only one profile — a second profile can still be
+    # added via the web signup flow, which immediately makes future
+    # messages go through the real (len(students) > 1) disambiguation
+    # path below as normal.
+    if len(students) == 1:
+        return students[0], None
 
     # Skipped entirely for audio/image/document messages (empty probe text
     # at this point — see _handle_message) rather than spending a call on
@@ -361,9 +391,6 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
             new_student.pending_profile_field = missing[0]
             db.commit()
         return resolved(new_student, f"Got it, setting up a new profile! {question}")
-
-    if len(students) == 1:
-        return resolved(students[0])
 
     # Explicit switch request ("switch to Raj", "it's Priya now") overrides
     # any cached active profile — without this, once one sibling's session
@@ -628,6 +655,40 @@ async def _handle_message(db: Session, payload: dict) -> None:
         await send_whatsapp_message(
             from_phone, f"Here's your top-up link — pay directly and credits land instantly:\n{pay_link}",
         )
+        return
+
+    # Same reasoning as "top up credits" above, and the SAME bug it exists
+    # to prevent: without this, tapping "🏫 Ask My School" (which maps to
+    # this exact phrase — see CREDIT_BUTTON_TO_COMMAND) fell straight
+    # back into the wallet-balance gate below and just re-showed the same
+    # "out of credits" notice in an unbreakable loop — confirmed live, a
+    # student tapped it three times and got the identical notice every
+    # time, never actually reaching their teacher. Notifying a teacher
+    # costs no AI credits either, so it must bypass this gate too, not
+    # just the later monthly-limit gate the teacher_help intent already
+    # bypasses further down (that one never even gets a chance to run —
+    # this wallet check happens before intent classification at all).
+    if probe_text == "talk to teacher":
+        recipients = get_escalation_recipients(db, student.centre_id)
+        for recipient in recipients:
+            await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
+        # A self-signup student (default "Qlass Direct" centre) has no
+        # real school/teacher on file at all — confirmed live, this sent
+        # "I've let your teacher know" to a student whose centre had zero
+        # registered teachers, notifying literally nobody while claiming
+        # otherwise. Only make that claim when someone was actually
+        # notified; otherwise point to a real human via Call Us instead.
+        reply = (
+            "I've let your teacher know you'd like some help! 🙋 They'll reach out soon."
+            if recipients
+            else f"You're not linked to a school on our records, so I can't reach a teacher for you — "
+                 f"call Qlass support directly at {QLASS_SUPPORT_PHONE} instead!"
+        )
+        await send_whatsapp_message(from_phone, reply)
+        return
+
+    if probe_text == "call qlass":
+        await send_whatsapp_message(from_phone, f"You can call Qlass support directly at {QLASS_SUPPORT_PHONE} 📞")
         return
 
     # A school marked "churned" in the sales pipeline (see
@@ -968,9 +1029,19 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # from the automatic hint-streak escalation in app.services.
         # escalation — this is the student explicitly asking, not a
         # system-detected struggle pattern.
-        for recipient in get_escalation_recipients(db, student.centre_id):
+        teacher_recipients = get_escalation_recipients(db, student.centre_id)
+        for recipient in teacher_recipients:
             await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
-        reply_text = "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. What else can I help you with in the meantime?"
+        # Same real gap as the credit-exhausted "talk to teacher" bypass
+        # above — a self-signup student with no school on file has zero
+        # registered teachers to notify; don't claim otherwise.
+        reply_text = (
+            "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. "
+            "What else can I help you with in the meantime?"
+            if teacher_recipients
+            else f"You're not linked to a school on our records, so I can't reach a teacher for you — "
+                 f"call Qlass support directly at {QLASS_SUPPORT_PHONE} instead! What else can I help you with?"
+        )
         detected_lang = student.preferred_language or "en-IN"
     elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
         # Monthly ₹ credit limit reached — hard stop before the paid LLM

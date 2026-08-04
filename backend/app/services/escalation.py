@@ -2,6 +2,15 @@ from sqlalchemy.orm import Session
 
 from app.models.core import Student, Teacher
 
+# The one escalation path guaranteed to reach an actual human regardless of
+# whether a student is linked to a real partner school at all — a self-
+# signup "Qlass Direct" student has zero registered teachers to notify
+# (confirmed live: get_escalation_recipients returns [] for that centre),
+# so every "talk to a human" flow across every channel (WhatsApp, web,
+# Android, teacher's My AI Tutor) needs this as the honest fallback rather
+# than claiming a teacher was notified when nobody was.
+QLASS_SUPPORT_PHONE = "9031003985"
+
 # After this many consecutive WRONG check-question answers, the student has
 # made several genuine attempts and still isn't getting it — worth a human
 # teacher's attention. Deliberately NOT based on the tutor giving a hint

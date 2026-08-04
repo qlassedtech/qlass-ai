@@ -10,6 +10,7 @@ from app.services.progress_report import get_welcome_back_note
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
 from app.services.retrieval import fetch_candidate_chunks
 from app.services.referral import evaluate_referral_milestones
+from app.services.youtube_client import find_best_video
 from app.agents.tutor_agent import TutorAgent
 
 HISTORY_TURNS = 12
@@ -81,6 +82,7 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     detected_lang = student.preferred_language or "en-IN"
     result = None
     citation = None
+    video_query = None
     if student.active_quiz_id and classification.intent == "quiz_stop":
         reply_text = stop_quiz(db, student)
     elif student.active_quiz_id:
@@ -105,7 +107,8 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
         ]
         result = await tutor_agent.respond(
             student.as_profile_dict(), message_text, history, weak_topics,
-            image_generation_enabled=False, voice_enabled=False, video_enabled=False,
+            image_generation_enabled=False, voice_enabled=False,
+            video_enabled=student.has_feature("youtube_videos"),
             active_document_text=student.active_document_text, retrieved_chunks=relevant_chunks,
         )
         reply_text = result["reply"]
@@ -140,6 +143,7 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
             db.commit()
 
         citation = result["citation"]
+        video_query = result["video_query"]
 
     if welcome_back_note:
         reply_text = f"{welcome_back_note}\n\n{reply_text}"
@@ -171,5 +175,17 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     # app.services.retrieval.build_citation_footer).
     if citation:
         outgoing_text = f"{outgoing_text}\n\n{citation}"
+
+    # Same "own follow-up line" treatment as WhatsApp (app.routers.whatsapp)
+    # — a real search happens here, not a hypothetical, so this only runs
+    # when video_query was actually set (i.e. the tutor decided THIS reply
+    # genuinely warranted one — see tutor_agent.py's video prompt). Web/app
+    # has no native rich video embed either, so the title+URL is just
+    # appended as plain text, same as WhatsApp's own delivery.
+    if video_query:
+        video = await find_best_video(video_query, student_language_code=detected_lang, student_class=student.class_)
+        cost_tracker.record_youtube_search(db, student.id)
+        if video:
+            outgoing_text = f"{outgoing_text}\n\n📺 {video['title']}\n{video['url']}"
 
     return outgoing_text

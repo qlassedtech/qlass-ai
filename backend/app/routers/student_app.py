@@ -2,11 +2,13 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models.core import ChatHistory, Parent, Student, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.document_client import extract_text_from_document
+from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
@@ -215,7 +217,22 @@ async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
                    "or top up your own AI credits to keep learning!",
         )
     if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail="You're out of AI credits — ask your school to top up your account")
+        # Same real options WhatsApp's credit-exhausted button menu offers
+        # (Top Up / Ask My School / Call Us — see app.routers.whatsapp),
+        # just as plain text since this is a REST error body, not a
+        # WhatsApp interactive message. "Ask your school" is only said
+        # when a school can actually be notified — a self-signup student
+        # with no real school on file (get_escalation_recipients returns
+        # nothing for the "Qlass Direct" fallback centre) was otherwise
+        # told to do something with no way to act on it.
+        pay_link = f"{settings.portal_base_url}/pay?phone={student.phone}&student_id={student.id}"
+        has_school = bool(get_escalation_recipients(db, student.centre_id))
+        school_note = "ask your school to top up your account, or " if has_school else ""
+        raise HTTPException(
+            status_code=402,
+            detail=f"You're out of AI credits — {school_note}top up directly: {pay_link} "
+                   f"(or call Qlass support at {QLASS_SUPPORT_PHONE})",
+        )
     reply = await process_web_message(db, student, message_text)
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 

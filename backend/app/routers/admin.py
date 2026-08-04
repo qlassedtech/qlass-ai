@@ -14,7 +14,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import Centre, Chapter, ChatHistory, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import cost_tracker, school_billing
-from app.services.escalation import get_escalation_recipients
+from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
@@ -1608,7 +1608,11 @@ async def send_my_tutor_message(
 ):
     student = _my_tutor_student(db, teacher)
     if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+        raise HTTPException(
+            status_code=402,
+            detail=f"You're out of AI credits for your personal tutor account — top up from the My AI "
+                   f"Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}",
+        )
     reply = await process_web_message(db, student, body.message)
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 
@@ -1622,7 +1626,11 @@ async def send_my_tutor_image(
     if not student.has_feature("ocr"):
         raise HTTPException(status_code=403, detail="Photo questions aren't available on your personal tutor account yet")
     if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+        raise HTTPException(
+            status_code=402,
+            detail=f"You're out of AI credits for your personal tutor account — top up from the My AI "
+                   f"Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}",
+        )
     image_bytes = await file.read()
     message_text = await extract_text_from_image(image_bytes)
     if not message_text:
@@ -1641,7 +1649,11 @@ async def send_my_tutor_voice(
     if not student.has_feature("voice"):
         raise HTTPException(status_code=403, detail="Voice questions aren't available on your personal tutor account yet")
     if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+        raise HTTPException(
+            status_code=402,
+            detail=f"You're out of AI credits for your personal tutor account — top up from the My AI "
+                   f"Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}",
+        )
     audio_bytes = await file.read()
     message_text = await transcribe_audio(audio_bytes, filename=file.filename or "voice_note.m4a")
     if not message_text:
@@ -1665,7 +1677,11 @@ async def send_my_tutor_document(
     if not student.has_feature("documents"):
         raise HTTPException(status_code=403, detail="PDF/Word file questions aren't available on your personal tutor account yet")
     if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail="You're out of AI credits for your personal tutor account")
+        raise HTTPException(
+            status_code=402,
+            detail=f"You're out of AI credits for your personal tutor account — top up from the My AI "
+                   f"Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}",
+        )
     document_bytes = await file.read()
     message_text = extract_text_from_document(document_bytes, file.filename or "")
     if not message_text:
