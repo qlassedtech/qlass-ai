@@ -135,7 +135,7 @@ class CreateSubscriptionRequest(BaseModel):
 @router.post("/pay/create-subscription")
 def create_student_subscription(body: CreateSubscriptionRequest, db: Session = Depends(get_db)):
     """
-    Self-serve recurring auto-renewal for the ₹1800/yr unlimited plan —
+    Self-serve recurring auto-renewal for the ₹2499/yr unlimited plan —
     distinct from /pay/create-order's one-time top-up. Uses Razorpay's
     Subscriptions API (a recurring mandate the student/parent authorizes
     once via UPI Autopay or card auto-debit), not the Orders API. The

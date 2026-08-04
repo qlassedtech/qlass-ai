@@ -39,6 +39,12 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     welcome_back_note = get_welcome_back_note(db, student.id)
     apply_active_document_pin(db, student, message_text)
 
+    # Captured before this turn's own billing lands, so the end-of-function
+    # 50/75/90% reminder can tell whether THIS turn carried the student
+    # across a threshold — same mechanism as app.routers.whatsapp (see
+    # cost_tracker.get_usage_fraction for what "usage" means per plan).
+    usage_fraction_before = cost_tracker.get_usage_fraction(db, student)
+
     prior_rows = (
         db.query(ChatHistory)
         .filter(ChatHistory.student_id == student.id)
@@ -187,5 +193,13 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
         cost_tracker.record_youtube_search(db, student.id)
         if video:
             outgoing_text = f"{outgoing_text}\n\n📺 {video['title']}\n{video['url']}"
+
+    # This turn's own AI usage just moved the needle on the student's
+    # current usage cap — warn at 50%/75%/90% so hitting it is never a
+    # surprise, same as app.routers.whatsapp.
+    usage_fraction_after = cost_tracker.get_usage_fraction(db, student)
+    usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
+    if usage_notice:
+        outgoing_text = f"{outgoing_text}\n\n{usage_notice}"
 
     return outgoing_text

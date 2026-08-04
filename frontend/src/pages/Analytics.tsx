@@ -184,7 +184,7 @@ export default function Analytics() {
         <div className="card" style={{ marginBottom: 24 }}>
           <h3>Unlimited-Plan Upsell Candidates</h3>
           <p className="muted" style={{ marginBottom: 12 }}>
-            These students have hit (or nearly hit) their monthly credit cap — worth pitching the ₹1800/yr unlimited plan.
+            These students have hit (or nearly hit) their monthly credit cap — worth pitching the ₹2499/yr unlimited plan.
           </p>
           <table className="data-table" style={{ boxShadow: "none", border: "none" }}>
             <thead>

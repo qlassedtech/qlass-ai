@@ -15,7 +15,8 @@ diagrams, YouTube suggestions, structured quizzes and timed mock tests, a
 "my progress" report (accuracy, weak topics, streak, fuzzy NCERT chapter
 coverage), a referral program, safety guardrails, escalation to a human
 teacher, and a per-student credit wallet with a self-serve top-up or a
-₹1800/yr auto-renewing unlimited plan.
+₹2499/yr auto-renewing unlimited plan (see app/business_rules.py for all
+pricing/limit constants).
 
 **Parent** — OTP web login, child's progress view, an automated weekly
 WhatsApp digest, consent management, a data-deletion request flow, and a

@@ -1,13 +1,28 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.business_rules import (
+    MARKUP_MULTIPLIER,
+    TRIAL_CREDITS,
+    UNLIMITED_PERIOD_SPEND_CAPS,
+    UNLIMITED_STUDENT_ANNUAL_DAYS,
+    UNLIMITED_STUDENT_ANNUAL_PRICE,
+    UNLIMITED_TEACHER_MONTHLY_DAYS,
+    UNLIMITED_TEACHER_MONTHLY_PRICE,
+    WALLET_USAGE_WARNING_FRACTIONS,
+)
 from app.models.core import CreditEvent, Student
 
-# Every deduction is charged at (actual provider cost) x MARKUP_MULTIPLIER —
-# covers overhead/margin rather than passing through raw provider cost 1:1.
-MARKUP_MULTIPLIER = 2.0
+# UNLIMITED_STUDENT_ANNUAL_DAYS/PRICE and UNLIMITED_TEACHER_MONTHLY_DAYS/
+# PRICE aren't used inside this file, only re-exported so existing callers
+# (payments.py, admin.py, razorpay_webhook.py) keep working unchanged as
+# cost_tracker.X — listed here so pyflakes doesn't flag them as unused.
+__all__ = [
+    "UNLIMITED_STUDENT_ANNUAL_DAYS", "UNLIMITED_STUDENT_ANNUAL_PRICE",
+    "UNLIMITED_TEACHER_MONTHLY_DAYS", "UNLIMITED_TEACHER_MONTHLY_PRICE",
+]
 
 # Anthropic prompt-caching multipliers on the base input rate: writing to
 # the cache costs MORE than a normal read (1.25x) since Anthropic has to do
@@ -22,23 +37,6 @@ CACHE_READ_MULTIPLIER = 0.1
 # key (i.e. account-wide), NOT per student, so it's deliberately tracked
 # globally rather than per-wallet — see record_youtube_search.
 YOUTUBE_FREE_SEARCHES_PER_DAY = 100
-
-# Every new student wallet starts with this much free trial credit — Qlass
-# covers it (not a real charge to anyone), so a school can try the product
-# before a parent/student ever has to pay. See add_trial_credits. Demo/
-# testing numbers (FULL_ACCESS_PHONES in whatsapp.py) get unlimited credits
-# instead, bypassing this wallet check entirely.
-TRIAL_CREDITS = 50.0
-
-# Flat-fee unlimited plan pricing (see _is_unlimited_active) — a real
-# student's ₹1800/yr, and a teacher's own "My AI Tutor" profile's ₹3500/mo.
-# Used both to price a manual super_admin activation (see admin.py's
-# set_student_subscription/activate_teacher_tutor_subscription) and to
-# prorate it if a shorter/longer duration is granted than the standard term.
-UNLIMITED_STUDENT_ANNUAL_PRICE = 1800.0  # for the standard 365-day term
-UNLIMITED_STUDENT_ANNUAL_DAYS = 365
-UNLIMITED_TEACHER_MONTHLY_PRICE = 3500.0  # for the standard 30-day term
-UNLIMITED_TEACHER_MONTHLY_DAYS = 30
 
 # Referral credits are milestone-based (signup + day1-3 activity + week2/3
 # activity — see app.services.referral) and deliberately uncapped: Qlass
@@ -106,7 +104,7 @@ def get_credit_history(db: Session, student_id: int, limit: int = 50) -> list[Cr
 
 def _is_unlimited_active(student: Student) -> bool:
     """
-    True while a student is on the flat-fee unlimited plan (₹1800/yr for a
+    True while a student is on the flat-fee unlimited plan (₹2499/yr for a
     real student, ₹3500/mo for a teacher's own "My AI Tutor" profile — same
     two columns serve both, since a teacher's personal profile is just a
     Student row with is_staff_profile=True) and that plan hasn't expired.
@@ -125,11 +123,141 @@ def _is_unlimited_active(student: Student) -> bool:
 is_unlimited_active = _is_unlimited_active
 
 
+def get_student_period_cost_equivalent(db: Session, student_id: int, period: str) -> float:
+    """
+    This day/week/month's usage translated into the same ₹ terms a
+    pay-as-you-go student would have been billed (raw_cost ×
+    MARKUP_MULTIPLIER) — the basis for the unlimited-plan period caps
+    below. Computed from raw_cost rather than `amount` because an unlimited
+    student's `amount` is usually 0 while covered by their flat fee (see
+    _deduct), so it can't be summed directly the way
+    get_student_monthly_spend does for wallet students.
+    """
+    total = (
+        db.query(func.coalesce(func.sum(CreditEvent.raw_cost), 0))
+        .filter(CreditEvent.student_id == student_id, CreditEvent.created_at >= _period_start(period))
+        .scalar()
+    )
+    return float(total) * MARKUP_MULTIPLIER
+
+
+def get_unlimited_usage_status(db: Session, student: Student) -> dict[str, dict[str, float]]:
+    role = "teacher" if student.is_staff_profile else "student"
+    caps = UNLIMITED_PERIOD_SPEND_CAPS[role]
+    return {
+        period: {"spent": get_student_period_cost_equivalent(db, student.id, period), "cap": cap}
+        for period, cap in caps.items()
+    }
+
+
+def is_unlimited_over_period_cap(db: Session, student: Student) -> bool:
+    return any(v["spent"] >= v["cap"] for v in get_unlimited_usage_status(db, student).values())
+
+
+def get_last_recharge(db: Session, student_id: int) -> CreditEvent | None:
+    """
+    Most recent balance-increasing event that isn't a small milestone bonus
+    (referral/habit) — the reference "pack" a pay-as-you-go student's
+    low-balance reminder is measured against, mirroring the prepaid-mobile-
+    recharge mental model most students/parents already know (e.g. "you've
+    used 50% of your last recharge"). A wallet has no fixed monthly reset to
+    measure against once topped up, so this is the closest real equivalent.
+    """
+    return (
+        db.query(CreditEvent)
+        .filter(
+            CreditEvent.student_id == student_id, CreditEvent.amount > 0,
+            # NULL-safe: a plain top-up/trial grant has no `service` at all
+            # (see add_trial_credits), and SQL's "NULL NOT IN (...)" is
+            # UNKNOWN rather than TRUE — a bare .notin_() would silently
+            # exclude those rows too, not just referral/habit bonuses.
+            or_(
+                CreditEvent.service.is_(None),
+                CreditEvent.service.notin_([REFERRAL_BONUS_SERVICE, HABIT_BONUS_SERVICE]),
+            ),
+        )
+        .order_by(CreditEvent.created_at.desc())
+        .first()
+    )
+
+
+def get_spend_since(db: Session, student_id: int, since: datetime) -> float:
+    total = (
+        db.query(func.coalesce(func.sum(-CreditEvent.amount), 0))
+        .filter(CreditEvent.student_id == student_id, CreditEvent.amount < 0, CreditEvent.created_at >= since)
+        .scalar()
+    )
+    return float(total)
+
+
 def has_credits(db: Session, student_id: int) -> bool:
     student = db.query(Student).filter(Student.id == student_id).first()
     if student is not None and _is_unlimited_active(student):
-        return True
+        # Still within their flat-fee allotment for this day/week/month —
+        # unmetered, same as always.
+        if not is_unlimited_over_period_cap(db, student):
+            return True
+        # Over the allotment — from here on they're spending real "usage
+        # credits" (the same wallet a pay-as-you-go student uses, just
+        # normally untouched for an unlimited-plan student — see _deduct),
+        # so the gate becomes the same wallet-balance check everyone else
+        # gets, not an outright block until the period resets.
+        return get_balance(db, student_id) > 0
     return get_balance(db, student_id) > 0
+
+
+def get_usage_fraction(db: Session, student: Student) -> float | None:
+    """
+    How "used up" this student's current usage cap is, as a fraction — the
+    basis for a 50/75/90% heads-up reminder before they actually run out.
+    None means there's nothing meaningful to warn about (e.g. no recharge
+    event yet to measure against). Shared across every surface (WhatsApp,
+    student web/app, teacher's My AI Tutor) since it's just billing state,
+    not channel-specific — see app.routers.whatsapp._current_usage_fraction
+    for the one channel-specific wrinkle (skipping FULL_ACCESS_PHONES).
+
+    Two different meanings depending on plan, since they're billed
+    completely differently:
+    - Unlimited-plan student: the most-consumed of their day/week/month
+      flat-fee allotment (see get_unlimited_usage_status) — whichever
+      period is closest to pushing them into spending real "usage credits"
+      (see _deduct) is the one worth warning about.
+    - Pay-as-you-go student: how much of their most recent recharge (trial
+      grant or top-up) they've spent through — there's no fixed monthly
+      reset to measure against once a wallet's been topped up more than
+      once, so the last recharge is the closest real equivalent to "how
+      much of what you paid for is left" (see get_last_recharge).
+    """
+    if is_unlimited_active(student):
+        status = get_unlimited_usage_status(db, student)
+        fractions = [v["spent"] / v["cap"] for v in status.values() if v["cap"] > 0]
+        return max(fractions) if fractions else None
+    recharge = get_last_recharge(db, student.id)
+    if recharge is None or recharge.amount <= 0:
+        return None
+    spent = get_spend_since(db, student.id, recharge.created_at)
+    return spent / float(recharge.amount)
+
+
+def usage_threshold_notice(fraction_before: float | None, fraction_after: float | None) -> str | None:
+    """
+    A fraction is continuous, not an integer count, so it won't land
+    exactly on a 50%/75%/90% boundary — instead, check whether this turn's
+    cost carried it *across* a threshold, and report the highest one
+    crossed (covers an expensive single turn, e.g. voice, jumping past more
+    than one threshold at once, so only one notice goes out per turn). Never
+    fires at/past 100% — running out is its own, more prominent notice with
+    real next-step buttons/payment options, so a plain text reminder here
+    would just be a weaker duplicate of that.
+    """
+    if fraction_after is None:
+        return None
+    before = fraction_before if fraction_before is not None else 0.0
+    crossed = [f for f in WALLET_USAGE_WARNING_FRACTIONS if before < f <= fraction_after]
+    if not crossed:
+        return None
+    fraction = max(crossed)
+    return f"ℹ️ Heads up — you've used {round(fraction * 100)}% of your available AI credits for this period."
 
 
 def add_credits(
@@ -204,12 +332,19 @@ def _deduct(db: Session, service: str, raw_cost: float, student_id: int) -> floa
     if raw_cost <= 0:
         return get_balance(db, student_id)  # nothing actually billed (e.g. a failed/no-op call) — no ledger noise
     student = db.query(Student).filter(Student.id == student_id).first()
-    # Unlimited-plan students (flat ₹1800/yr or ₹3500/mo) never have their
-    # wallet drawn down (amount=0 below) — but raw_cost is always the real,
-    # un-marked-up provider cost regardless of plan, so SUM(raw_cost) per
-    # student is real COGS Qlass can check against the flat fee later, even
-    # though amount alone would show zero spend for these students.
-    amount = 0.0 if (student is not None and _is_unlimited_active(student)) else -raw_cost * MARKUP_MULTIPLIER
+    # Unlimited-plan students (flat ₹2499/yr or ₹3500/mo) have their wallet
+    # drawn down (amount=0 below) only once they've burned through their
+    # day/week/month allotment (see UNLIMITED_PERIOD_RAW_COST_CAPS) — until
+    # then this is real COGS Qlass can check against the flat fee later,
+    # even though amount alone shows zero spend for these students. Past
+    # the allotment, further usage draws from the same wallet a normal
+    # pay-as-you-go student uses (see has_credits) — i.e. bought "usage
+    # credits" — rather than being blocked outright until the period rolls
+    # over, which would just push the student out of the habit loop.
+    covered_by_flat_fee = (
+        student is not None and _is_unlimited_active(student) and not is_unlimited_over_period_cap(db, student)
+    )
+    amount = 0.0 if covered_by_flat_fee else -raw_cost * MARKUP_MULTIPLIER
     db.add(CreditEvent(amount=amount, service=service, raw_cost=raw_cost, student_id=student_id))
     db.commit()
     return get_balance(db, student_id)

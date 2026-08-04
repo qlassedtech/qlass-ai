@@ -147,7 +147,7 @@ class Student(Base):
     # "credits" (default, pay-as-you-go wallet) or "unlimited" (flat-fee
     # subscription — see app.services.cost_tracker for the actual gating).
     # A staff profile's own subscription is the ₹3500/month personal-tutor
-    # plan; a real student's is the ₹1800/year plan — same two columns
+    # plan; a real student's is the ₹2499/year plan — same two columns
     # serve both since the mechanism (bypass the wallet check while active)
     # is identical, just the price/duration differ.
     subscription_plan = Column(Text, default="credits")

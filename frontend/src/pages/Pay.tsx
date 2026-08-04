@@ -49,7 +49,7 @@ export default function Pay() {
         key: subscription.key_id,
         subscription_id: subscription.subscription_id,
         name: "Qlass Learning",
-        description: "Unlimited AI Tutor plan — ₹1800/year, auto-renews",
+        description: "Unlimited AI Tutor plan — ₹2499/year, auto-renews",
         handler: async (response: {
           razorpay_subscription_id: string;
           razorpay_payment_id: string;
@@ -163,10 +163,10 @@ export default function Pay() {
 
         <div style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--border)", textAlign: "center" }}>
           <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
-            Or go unlimited — ₹1800/year, auto-renews, no more topping up.
+            Or go unlimited — ₹2499/year, auto-renews, no more topping up.
           </p>
           <button type="button" onClick={handleSubscribe} disabled={loading} style={{ width: "100%" }}>
-            Subscribe for ₹1800/year
+            Subscribe for ₹2499/year
           </button>
         </div>
 

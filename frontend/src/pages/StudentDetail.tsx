@@ -324,7 +324,7 @@ export default function StudentDetail() {
                 </label>
               )}
               <button type="button" onClick={handleActivateUnlimited} disabled={subLoading}>
-                Activate Unlimited (₹1800/yr)
+                Activate Unlimited (₹2499/yr)
               </button>
             </div>
           )}

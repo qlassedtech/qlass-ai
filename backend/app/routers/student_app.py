@@ -228,11 +228,25 @@ async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
         pay_link = f"{settings.portal_base_url}/pay?phone={student.phone}&student_id={student.id}"
         has_school = bool(get_escalation_recipients(db, student.centre_id))
         school_note = "ask your school to top up your account, or " if has_school else ""
-        raise HTTPException(
-            status_code=402,
-            detail=f"You're out of AI credits — {school_note}top up directly: {pay_link} "
-                   f"(or call Qlass support at {QLASS_SUPPORT_PHONE})",
-        )
+        # An unlimited-plan student reaching this point has burned through
+        # their day/week/month flat-fee allotment (see
+        # cost_tracker.is_unlimited_over_period_cap) AND has no wallet
+        # balance — "out of AI credits" would be confusing for someone
+        # already paying a flat fee, so this is worded as topping up
+        # "usage credits" to keep going until their plan resets, not
+        # paying for the plan itself again (see app.routers.whatsapp for
+        # the same distinction on WhatsApp).
+        if cost_tracker.is_unlimited_active(student):
+            detail = (
+                f"You've used up your plan's included AI usage for this period — top up usage credits to "
+                f"keep going until it resets: {pay_link} (or call Qlass support at {QLASS_SUPPORT_PHONE})"
+            )
+        else:
+            detail = (
+                f"You're out of AI credits — {school_note}top up directly: {pay_link} "
+                f"(or call Qlass support at {QLASS_SUPPORT_PHONE})"
+            )
+        raise HTTPException(status_code=402, detail=detail)
     reply = await process_web_message(db, student, message_text)
     return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
 

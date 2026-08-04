@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.business_rules import FEATURE_LIMITS
 from app.config import settings
 from app.database import SessionLocal
 from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
@@ -156,29 +157,7 @@ def _assistant_voice_gender(student: Student) -> str:
     return "male" if speaker == "shubh" else "female"
 
 
-# Per-feature WEEKLY usage caps (no daily tracking at all) — the actual AI
-# cost per voice-reply/diagram/video (see cost_tracker.PRICING) is high
-# enough that unlimited usage isn't sustainable at a mass-market price;
-# these are the lever that keeps a subscription price profitable. Counted
-# against the existing credit_events ledger (each already writes a row
-# tagged by service), not a separate counter. All soft: hitting one just
-# skips that extra (falling back to plain text, which already stands on its
-# own) rather than blocking the whole conversation — the actual hard stop
-# is the monthly ₹ credit limit below, which covers the core text feature.
-FEATURE_LIMITS = {
-    "voice": {"services": ["sarvam_tts"], "period": "week", "max": 5, "label": "voice replies"},
-    "image_generation": {"services": ["azure_image"], "period": "week", "max": 3, "label": "diagrams"},
-    "youtube_videos": {"services": ["youtube_search", "youtube_search_overage"], "period": "week", "max": 5, "label": "videos"},
-}
-
-# Per-student monthly AI credit allowance — the hard stop for the core
-# (text) tutoring feature. Tracked in ₹ actually spent (at the already-2x
-# ledger rate), not a raw message count, since cost varies a lot per turn
-# (a Hindi translation or an off-level question costs more than a short
-# English answer) — capping by ₹ is the accurate version of "how much of
-# this month's subscription value have they used."
-MONTHLY_STUDENT_CREDIT_LIMIT = 100.0  # INR
-USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]
+USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]  # weekly voice/image/video soft-cap warnings only
 
 
 def _weekly_usage_snapshot(db: Session, student: Student) -> dict[str, int]:
@@ -218,10 +197,17 @@ def _threshold_notice(feature: str, used: int, limit: int, period: str) -> str |
     return None
 
 
-def _monthly_spend_status(db: Session, student: Student) -> float:
+def _current_usage_fraction(db: Session, student: Student) -> float | None:
+    """
+    Thin WhatsApp-specific wrapper around cost_tracker.get_usage_fraction —
+    the only channel-specific wrinkle is skipping FULL_ACCESS_PHONES
+    (internal demo/testing numbers), which has no equivalent concept on the
+    web/app surfaces (see app.services.student_chat, which calls
+    cost_tracker.get_usage_fraction directly).
+    """
     if student.phone in FULL_ACCESS_PHONES:
-        return 0.0  # internal demo/testing numbers aren't metered against the customer credit limit
-    return cost_tracker.get_student_monthly_spend(db, student.id)
+        return None
+    return cost_tracker.get_usage_fraction(db, student)
 
 
 async def _send_localized_notice(db: Session, from_phone: str, student: Student, message: str) -> None:
@@ -244,30 +230,6 @@ async def _send_localized_notice(db: Session, from_phone: str, student: Student,
                 cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
             )
     await send_whatsapp_message(from_phone, message)
-
-
-def _monthly_limit_reached_message() -> str:
-    return f"You've used all ₹{MONTHLY_STUDENT_CREDIT_LIMIT:.0f} of this month's AI credit — resets on the 1st of next month!"
-
-
-def _monthly_threshold_notice(spent_before: float, spent_after: float) -> str | None:
-    """
-    Spend is a continuous ₹ amount, not an integer count, so it won't land
-    exactly on a 50%/90% boundary — instead, check whether this turn's cost
-    carried the running total *across* a threshold, and report the highest
-    one crossed (covers an expensive single turn, e.g. voice, jumping past
-    more than one threshold at once, so only one notice goes out per turn).
-    """
-    crossed = [f for f in USAGE_WARNING_FRACTIONS if spent_before < MONTHLY_STUDENT_CREDIT_LIMIT * f <= spent_after]
-    if not crossed:
-        return None
-    fraction = max(crossed)
-    if fraction >= 1.0:
-        return _monthly_limit_reached_message()
-    return (
-        f"ℹ️ Heads up — you've used ₹{spent_after:.2f} of your ₹{MONTHLY_STUDENT_CREDIT_LIMIT:.0f} "
-        f"monthly AI credit ({round(fraction * 100)}%)."
-    )
 
 
 async def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
@@ -723,7 +685,20 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # A dead-end text notice left a student stuck with no way to act —
         # real options (pay directly, or have the school notified) beat
         # just being told to go ask someone in person.
-        notice = "You're out of AI credits for now — here are your options:"
+        #
+        # An unlimited-plan student reaching this point has burned through
+        # their day/week/month flat-fee allotment (see
+        # cost_tracker.is_unlimited_over_period_cap) AND has no wallet
+        # balance to draw on — the generic "out of AI credits" wording
+        # would be confusing for someone who's already paying a flat fee,
+        # so this is the one thing that differs for them: what buying more
+        # here actually means (topping up "usage credits" to keep going
+        # until their plan's allotment resets, not paying for the plan
+        # itself again).
+        if cost_tracker.is_unlimited_active(student):
+            notice = "You've used up your plan's included AI usage for this period — top up usage credits to keep going until it resets:"
+        else:
+            notice = "You're out of AI credits for now — here are your options:"
         lang = student.preferred_language or "en-IN"
         if lang and not lang.startswith("en"):
             translated_result = await translate_with_claude(
@@ -856,7 +831,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     video_query = None
     citation = None
     did_answer_via_llm = False
-    monthly_spend_before = _monthly_spend_status(db, student)
+    usage_fraction_before = _current_usage_fraction(db, student)
     # Logged once per turn, before the routing ladder below decides which
     # branch handles it — the ladder has grown into ~10 branches across
     # several features (quiz, mock test, escalation, menu, profile
@@ -1043,19 +1018,6 @@ async def _handle_message(db: Session, payload: dict) -> None:
                  f"call Qlass support directly at {QLASS_SUPPORT_PHONE} instead! What else can I help you with?"
         )
         detected_lang = student.preferred_language or "en-IN"
-    elif monthly_spend_before >= MONTHLY_STUDENT_CREDIT_LIMIT:
-        # Monthly ₹ credit limit reached — hard stop before the paid LLM
-        # call, since this is the core metered feature the subscription
-        # price is actually sized against.
-        #
-        # Sent directly and returned early, deliberately NOT saved to
-        # chat_history — a system notice like this isn't tutoring content,
-        # and saving it as an "assistant" turn pollutes the model's own
-        # conversation history: confirmed live, a later real reply echoed
-        # this exact message back verbatim because it was sitting in
-        # history as if it were the tutor's own prior statement.
-        await _send_localized_notice(db, from_phone, student, _monthly_limit_reached_message())
-        return
     elif student.active_quiz_id:
         # Treat this message as the answer to the current quiz question.
         reply_text = await handle_quiz_answer(db, student, message_text, classification.quiz_skip)
@@ -1328,17 +1290,17 @@ async def _handle_message(db: Session, payload: dict) -> None:
         from_phone, student.id, did_answer_via_llm, student.active_quiz_id, reply_text[:200],
     )
 
-    # This turn's own AI usage just added to this month's spend — warn at
-    # 50%/90%/100% of the ₹100 monthly credit so the hard stop is never a
+    # This turn's own AI usage just moved the needle on the student's
+    # current usage cap — warn at 50%/75%/90% so hitting it is never a
     # surprise. Only added to the outgoing message, never to what was just
     # saved to chat_history above. Only relevant when a real LLM call
     # actually happened this turn (not the profile-answer/class-confirm
-    # branches, which never touch the monthly credit).
+    # branches, which never touch billing).
     if did_answer_via_llm:
-        monthly_spend_after = _monthly_spend_status(db, student)
-        monthly_notice = _monthly_threshold_notice(monthly_spend_before, monthly_spend_after)
-        if monthly_notice:
-            reply_text = f"{reply_text}\n\n{monthly_notice}"
+        usage_fraction_after = _current_usage_fraction(db, student)
+        usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
+        if usage_notice:
+            reply_text = f"{reply_text}\n\n{usage_notice}"
 
     # Translate into the student's language for what actually gets sent.
     # Claude (Haiku) does this first — cheap token cost instead of Sarvam
