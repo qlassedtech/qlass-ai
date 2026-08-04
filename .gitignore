@@ -2,6 +2,11 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
+!.env.production.example
+!frontend/.env.example
+!frontend/.env.production.example
 backend/firebase-service-account.json
 rag/chroma_store/
 backend/static/uploads/

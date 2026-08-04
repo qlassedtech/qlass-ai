@@ -199,11 +199,19 @@ on 80/443.
 git clone <your-repo-url> qlass-ai
 cd qlass-ai
 cp .env.production.example .env.production
+cp frontend/.env.production.example frontend/.env.production
 ```
 Fill in every value in `.env.production` — the file itself documents what
 each one needs (a real 32+ char `SECRET_KEY`, matching `POSTGRES_*` and
 `DATABASE_URL` credentials, your real HTTPS `PORTAL_BASE_URL` and exact
-`ALLOWED_ORIGINS`, live Anthropic/Wati/Razorpay keys, etc.).
+`ALLOWED_ORIGINS`, live Anthropic/Wati/Razorpay keys, etc.). Also fill in
+`frontend/.env.production`'s `VITE_API_BASE` — the backend's own public
+HTTPS URL (this is the piece most often skipped: without it, the deployed
+portal silently falls back to `http://localhost:8000` and every request
+from it fails). `PORTAL_BASE_URL` and `VITE_API_BASE` point at each other's
+domains — the backend uses the former to text students a real payment
+link, the frontend is built against the latter to know where its own API
+is.
 
 ### 2. Validate before deploying — every time
 
@@ -226,13 +234,33 @@ way as local dev (`psql` against `DATABASE_URL`, then every file in
 staging first, confirm it's clean, then run the identical ordered set
 against production and record which migration you're on.
 
-### 4. Put a reverse proxy in front
+### 4. Build the frontend
 
-Terminate TLS at nginx/Caddy/Traefik, proxying to `127.0.0.1:8000`. Confirm
-`https://<your-domain>/health` and `/ready` both return 200 before doing
-anything else.
+```bash
+cd frontend
+npm ci
+npm run build   # reads frontend/.env.production, outputs static files to frontend/dist/
+cd ..
+```
+There's no frontend service in `docker-compose.ovh.yml` on purpose — `dist/`
+is a plain static site, so it's served by the same reverse proxy from the
+next step rather than running its own container/process.
 
-### 5. Register the real webhooks
+### 5. Put a reverse proxy in front
+
+Two public HTTPS hosts, terminated at nginx/Caddy/Traefik on the same VM:
+- The domain in `PORTAL_BASE_URL` (e.g. `app.<your-domain>`) serves
+  `frontend/dist/` as static files, with unknown paths falling back to
+  `index.html` (it's a client-side-routed SPA — without this fallback,
+  refreshing on any page but `/` 404s).
+- The domain baked into `frontend/.env.production`'s `VITE_API_BASE`
+  (e.g. `api.<your-domain>`) proxies to `127.0.0.1:8000`.
+
+Confirm `https://api.<your-domain>/health` and `/ready` both return 200,
+and `https://app.<your-domain>/` loads the portal's login page, before
+doing anything else.
+
+### 6. Register the real webhooks
 
 Only now — once you have a real public HTTPS URL — register:
 - **Wati**: point the WhatsApp webhook at `https://<your-domain>/whatsapp/webhook`, then set `WATI_WEBHOOK_SECRET` from what Wati gives you.
@@ -240,14 +268,16 @@ Only now — once you have a real public HTTPS URL — register:
 
 Restart the backend after adding either secret so it picks them up.
 
-### 6. Smoke test before telling anyone it's live
+### 7. Smoke test before telling anyone it's live
 
 - One real WhatsApp message in and a real reply out.
+- Log into the portal at `https://app.<your-domain>/` and confirm it can actually reach the API (open the network tab — requests should hit `https://api.<your-domain>`, not `localhost`).
+- Tap "top up credits" on WhatsApp and confirm the link it sends actually opens the live portal, not `localhost`.
 - One real payment verification (top-up or subscription).
 - One quiz, one workbook generation, one presentation generation.
 - Take a database backup, restore it into a disposable database, and confirm row counts match.
 
-### 7. Scale gradually, not all at once
+### 8. Scale gradually, not all at once
 
 - Start with **one backend replica**. The webhook-processing/retry logic
   uses an atomic database claim specifically so it's safe to run more than

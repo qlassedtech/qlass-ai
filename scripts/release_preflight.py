@@ -1,6 +1,7 @@
 """Fail fast on configuration mistakes before a staging or production deploy.
 
-Run: python scripts/release_preflight.py --env-file .env.production
+Run: python scripts/release_preflight.py --env-file .env.production \
+    --frontend-env-file frontend/.env.production
 
 This intentionally never prints secret values — only which keys are
 missing and which shape-checks failed, so it's safe to run from CI logs.
@@ -37,7 +38,8 @@ def check(values: dict[str, str]) -> list[str]:
     if len(secret_key) < 32 or secret_key == "changeme":
         failures.append("SECRET_KEY must be unique and at least 32 characters")
     portal_url = values.get("PORTAL_BASE_URL", "")
-    if "localhost" in portal_url or "127.0.0.1" in portal_url or not portal_url.startswith("https://"):
+    if "localhost" in portal_url or "127.0.0.1" in portal_url or not portal_url.startswith("https://") \
+            or portal_url == "https://":
         failures.append("PORTAL_BASE_URL must be a public HTTPS URL")
     if "*" in values.get("ALLOWED_ORIGINS", ""):
         failures.append("ALLOWED_ORIGINS must not contain a wildcard *")
@@ -53,15 +55,35 @@ def check(values: dict[str, str]) -> list[str]:
     return failures
 
 
+def check_frontend(values: dict[str, str]) -> list[str]:
+    failures = []
+    api_base = values.get("VITE_API_BASE", "")
+    if not api_base:
+        failures.append("VITE_API_BASE is missing")
+    elif "localhost" in api_base or "127.0.0.1" in api_base or not api_base.startswith("https://") \
+            or api_base == "https://":
+        failures.append("VITE_API_BASE must be a public HTTPS URL")
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", default=".env.production")
+    parser.add_argument("--frontend-env-file", default="frontend/.env.production")
     args = parser.parse_args()
+
     path = Path(args.env_file)
     if not path.exists():
         print(f"FAIL: {path} does not exist")
         return 1
     failures = check(parse_env(path))
+
+    frontend_path = Path(args.frontend_env_file)
+    if not frontend_path.exists():
+        failures.append(f"{frontend_path} does not exist")
+    else:
+        failures.extend(check_frontend(parse_env(frontend_path)))
+
     if failures:
         print("FAIL: " + "; ".join(failures))
         return 1
