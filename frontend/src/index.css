@@ -976,8 +976,8 @@ label {
   border-top-right-radius: 0;
 }
 
-.landing-spotlight {
-  max-width: 480px;
+.landing-feature-grid {
+  max-width: 880px;
   margin: 0 auto 44px;
   text-align: center;
 }
@@ -988,49 +988,39 @@ label {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted);
-  margin: 0 0 14px;
+  margin: 0 0 18px;
 }
 
-.landing-spotlight-card {
+.landing-feature-grid-inner {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 16px;
+  text-align: left;
+}
+
+.landing-feature-tile {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 36px 28px;
+  border-radius: 16px;
+  padding: 22px 20px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.landing-feature-tile:hover {
+  transform: translateY(-2px);
   box-shadow: var(--shadow);
-  min-height: 148px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  animation: landing-spotlight-fade 0.4s ease;
-}
-
-@keyframes landing-spotlight-fade {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .landing-spotlight-card {
-    animation: none;
-  }
 }
 
 .landing-spotlight-icon {
-  width: 56px;
-  height: 56px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   background: rgba(43, 62, 196, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 26px;
+  font-size: 22px;
   margin-bottom: 14px;
 }
 
@@ -1044,66 +1034,16 @@ label {
   }
 }
 
-.landing-spotlight-card h3 {
-  font-size: 17px;
+.landing-feature-tile h3 {
+  font-size: 15.5px;
   margin: 0 0 6px;
 }
 
-.landing-spotlight-card p {
-  font-size: 14px;
+.landing-feature-tile p {
+  font-size: 13.5px;
   color: var(--text-muted);
   margin: 0;
-}
-
-/* Instagram-story-style progress bars instead of dots — the fill itself
-   communicates "this is about to move on", not just "this is item 3 of 9". */
-.landing-spotlight-progress {
-  display: flex;
-  gap: 5px;
-  margin-top: 18px;
-}
-
-.landing-spotlight-bar {
-  flex: 1;
-  height: 3px;
-  border-radius: 2px;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  background: var(--border);
-  overflow: hidden;
-  position: relative;
-}
-
-.landing-spotlight-bar-fill {
-  position: absolute;
-  inset: 0;
-  width: 0%;
-  background: var(--primary, #4f46e5);
-}
-
-.landing-spotlight-bar-fill.filled {
-  width: 100%;
-}
-
-.landing-spotlight-bar-fill.active {
-  animation: landing-spotlight-fill 3.5s linear forwards;
-}
-
-@keyframes landing-spotlight-fill {
-  from {
-    width: 0%;
-  }
-  to {
-    width: 100%;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .landing-spotlight-bar-fill.active {
-    animation: none;
-    width: 100%;
-  }
+  line-height: 1.45;
 }
 
 .landing-form-card {

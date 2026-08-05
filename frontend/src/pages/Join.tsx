@@ -33,47 +33,21 @@ const CHAT_PREVIEW = [
   { from: "ai", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward. Would you like to try a practice question on this?" },
 ];
 
-// One feature at a time, auto-advancing — used only on school-branded join
-// pages (see landing-spotlight CSS) so a school's page feels like a live,
-// premium product tour rather than a static wall of cards.
-function FeatureSpotlight({ features }: { features: typeof FEATURES }) {
-  const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
-
-  useEffect(() => {
-    if (paused) return;
-    const timer = setInterval(() => setIndex((i) => (i + 1) % features.length), 3500);
-    return () => clearInterval(timer);
-  }, [paused, features.length]);
-
-  const active = features[index];
-
+// All nine features shown at once, not one at a time — an auto-rotating
+// single card hid eight of nine features from anyone who didn't sit and
+// wait, which read as "the page has no features." A bento-style grid keeps
+// the premium icon-badge treatment but never hides content.
+function FeatureGrid({ features }: { features: typeof FEATURES }) {
   return (
-    <div
-      className="landing-spotlight"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-    >
+    <div className="landing-feature-grid">
       <p className="landing-spotlight-eyebrow">What You Get</p>
-      <div className="landing-spotlight-card" key={active.title}>
-        <span className="landing-spotlight-icon" aria-hidden="true">{active.icon}</span>
-        <h3>{active.title}</h3>
-        <p>{active.text}</p>
-      </div>
-      <div className="landing-spotlight-progress">
-        {features.map((f, i) => (
-          <button
-            key={f.title}
-            type="button"
-            className="landing-spotlight-bar"
-            aria-label={`Show "${f.title}"`}
-            onClick={() => setIndex(i)}
-          >
-            <span
-              className={`landing-spotlight-bar-fill${i < index ? " filled" : i === index ? " active" : ""}`}
-              style={i === index ? { animationPlayState: paused ? "paused" : "running" } : undefined}
-            />
-          </button>
+      <div className="landing-feature-grid-inner">
+        {features.map((f) => (
+          <div className="landing-feature-tile" key={f.title}>
+            <span className="landing-spotlight-icon" aria-hidden="true">{f.icon}</span>
+            <h3>{f.title}</h3>
+            <p>{f.text}</p>
+          </div>
         ))}
       </div>
     </div>
@@ -227,7 +201,7 @@ export default function Join() {
           <div className="landing-hero-form" id="signup">{registrationForm}</div>
         </div>
 
-        <FeatureSpotlight features={FEATURES} />
+        <FeatureGrid features={FEATURES} />
 
         <div className="landing-closing-cta">
           <h2>Ready to get started?</h2>
