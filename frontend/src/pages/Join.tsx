@@ -194,6 +194,7 @@ export default function Join() {
 
         <div className="landing-hero-split">
           <div className="landing-hero-text">
+            <span className="landing-eyebrow">AI-Powered Academic Support</span>
             <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
             <p>
               {schoolName

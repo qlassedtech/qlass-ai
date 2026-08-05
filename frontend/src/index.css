@@ -706,11 +706,12 @@ label {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 8% -5%, rgba(43, 62, 196, 0.16), transparent 42%),
-    radial-gradient(circle at 100% 8%, rgba(28, 42, 143, 0.10), transparent 38%),
-    radial-gradient(circle at 90% 100%, rgba(43, 62, 196, 0.12), transparent 42%),
+    radial-gradient(circle at 10% -8%, rgba(99, 76, 224, 0.20), transparent 44%),
+    radial-gradient(circle at 88% 4%, rgba(43, 62, 196, 0.16), transparent 40%),
+    radial-gradient(circle at 78% 96%, rgba(196, 76, 160, 0.10), transparent 46%),
+    radial-gradient(circle at 4% 92%, rgba(43, 62, 196, 0.12), transparent 42%),
     var(--bg);
-  padding: 40px 20px 64px;
+  padding: 48px 20px 80px;
 }
 
 .landing-page::before {
@@ -795,13 +796,28 @@ label {
 }
 
 .landing-trust-pills li {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: 999px;
-  padding: 6px 14px;
+  padding: 7px 15px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-muted);
+  box-shadow: 0 1px 2px rgba(16, 24, 68, 0.04);
+}
+
+:root[data-theme="dark"] .landing-trust-pills li {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .landing-trust-pills li {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
 }
 
 /* Signup sits directly beside the hero, not below a full feature grid —
@@ -823,15 +839,37 @@ label {
   }
 }
 
+.landing-eyebrow {
+  display: inline-block;
+  background: linear-gradient(135deg, rgba(99, 76, 224, 0.14), rgba(43, 62, 196, 0.10));
+  border: 1px solid rgba(99, 76, 224, 0.22);
+  color: var(--accent, #4f46e5);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border-radius: 999px;
+}
+
 .landing-hero-text h1 {
-  font-size: 34px;
-  margin: 20px 0 8px;
-  letter-spacing: -0.02em;
+  font-size: 44px;
+  line-height: 1.08;
+  margin: 20px 0 14px;
+  letter-spacing: -0.03em;
+  font-weight: 800;
+}
+
+@media (max-width: 860px) {
+  .landing-hero-text h1 {
+    font-size: 34px;
+  }
 }
 
 .landing-hero-text p {
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: 17px;
+  line-height: 1.5;
   max-width: 480px;
   margin: 0 0 24px;
 }
@@ -849,9 +887,10 @@ label {
 /* A subtle bezel around the chat mockup so it reads as a device screen
    rather than a flat rectangle sitting in the page. */
 .landing-chat-frame {
-  background: linear-gradient(160deg, rgba(43, 62, 196, 0.14), rgba(43, 62, 196, 0.02));
-  border-radius: 22px;
+  background: linear-gradient(160deg, rgba(99, 76, 224, 0.22), rgba(43, 62, 196, 0.03));
+  border-radius: 24px;
   padding: 10px;
+  box-shadow: 0 20px 50px -12px rgba(43, 62, 196, 0.28);
 }
 
 /* A WhatsApp-styled chat preview — the fastest way to signal "this is a
@@ -955,9 +994,9 @@ label {
 .landing-spotlight-card {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 32px 28px;
-  box-shadow: var(--shadow-sm);
+  border-radius: 18px;
+  padding: 36px 28px;
+  box-shadow: var(--shadow);
   min-height: 148px;
   display: flex;
   flex-direction: column;
@@ -1070,7 +1109,8 @@ label {
 .landing-form-card {
   max-width: 420px;
   margin: 0 auto;
-  padding: 36px 32px;
+  padding: 40px 34px;
+  border-radius: 20px;
   text-align: center;
 }
 
