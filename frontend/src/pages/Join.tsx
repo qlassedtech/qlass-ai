@@ -21,17 +21,160 @@ const FEATURES = [
   { icon: "📚", title: "Grounded in Your Textbook", text: "Answers are drawn directly from your syllabus, with the exact chapter cited — never a generic guess." },
 ];
 
-// A realistic exchange — the fastest way to signal "this is a genuine AI
-// tutor" is to show the conversation itself, not describe it (see Character.
-// AI's own landing page: a headline and a sign-up gate, nothing abstract).
-// Kept natural but without slang, since this is meant to read as credible
-// academic help, not a casual chat app.
-const CHAT_PREVIEW = [
-  { from: "user", text: "I don't understand Newton's third law." },
-  { from: "ai", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
-  { from: "user", text: "Is that how a rocket works?" },
-  { from: "ai", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward. Would you like to try a practice question on this?" },
+// A rotating set of realistic exchanges, each demonstrating one capability
+// from FEATURES — the fastest way to signal "this is a genuine AI tutor"
+// is to show the conversation itself (see Character.AI's own landing page:
+// a headline and a sign-up gate, nothing abstract). Animating through
+// several scenarios turns the single static screenshot into something that
+// actually demonstrates the product's breadth, GIF-style, without leaving
+// the hero.
+const CHAT_SCENARIOS = [
+  {
+    icon: "🕐",
+    label: "Round-the-Clock Help",
+    messages: [
+      { from: "user", text: "I don't understand Newton's third law." },
+      { from: "ai", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
+      { from: "user", text: "Is that how a rocket works?" },
+      { from: "ai", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward." },
+    ],
+  },
+  {
+    icon: "📸",
+    label: "Photo Doubt Solving",
+    messages: [
+      { from: "user", text: "📷 Photo attached — Question 4" },
+      { from: "ai", text: "Got it — I can read the question. Here's the solution, step by step:\n1) Identify the given values\n2) Apply the formula\n3) x = 12" },
+    ],
+  },
+  {
+    icon: "🎙️",
+    label: "Ask By Voice",
+    messages: [
+      { from: "user", text: "🎤 Voice note · 0:14" },
+      { from: "ai", text: "Here's the explanation — sending it back as a voice note too 🔊" },
+    ],
+  },
+  {
+    icon: "📄",
+    label: "Full Homework Upload",
+    messages: [
+      { from: "user", text: "📄 Homework.pdf attached" },
+      { from: "ai", text: "Found 8 questions in your worksheet. Starting with Question 1..." },
+    ],
+  },
+  {
+    icon: "📝",
+    label: "Scored Quizzes",
+    messages: [
+      { from: "user", text: "Quiz me on photosynthesis." },
+      { from: "ai", text: "Q1: Which gas do plants release during photosynthesis?\nA) Carbon dioxide  B) Oxygen  C) Nitrogen" },
+    ],
+  },
+  {
+    icon: "🌐",
+    label: "Any Indian Language",
+    messages: [
+      { from: "user", text: "Hindi mein samjhao." },
+      { from: "ai", text: "ज़रूर! प्रकाश संश्लेषण का मतलब है पौधों द्वारा भोजन बनाना।" },
+    ],
+  },
+  {
+    icon: "📚",
+    label: "Textbook-Cited Answers",
+    messages: [
+      { from: "user", text: "Where is this from?" },
+      { from: "ai", text: "NCERT Class 10 Science, Chapter 6 — Life Processes, page 122." },
+    ],
+  },
+  {
+    icon: "📊",
+    label: "Progress Tracking",
+    messages: [
+      { from: "user", text: "my progress" },
+      { from: "ai", text: "📈 82% accuracy this week — up from 74% last week. Keep going!" },
+    ],
+  },
 ];
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Animates through CHAT_SCENARIOS one message at a time, with a typing
+// indicator before each AI reply — turns the static WhatsApp screenshot
+// into a looping, GIF-like demo of the product's range of features.
+function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
+  const [scenarioIndex, setScenarioIndex] = useState(0);
+  const [visible, setVisible] = useState<{ from: string; text: string }[]>([]);
+  const [typing, setTyping] = useState(false);
+  const [fading, setFading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const scenario = scenarios[scenarioIndex];
+    setVisible([]);
+    setFading(false);
+    setTyping(false);
+
+    async function run() {
+      for (const msg of scenario.messages) {
+        if (cancelled) return;
+        if (msg.from === "ai") {
+          setTyping(true);
+          await sleep(900);
+          if (cancelled) return;
+          setTyping(false);
+        } else {
+          await sleep(500);
+          if (cancelled) return;
+        }
+        setVisible((v) => [...v, msg]);
+      }
+      if (cancelled) return;
+      await sleep(2600);
+      if (cancelled) return;
+      setFading(true);
+      await sleep(350);
+      if (cancelled) return;
+      setScenarioIndex((i) => (i + 1) % scenarios.length);
+    }
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [scenarioIndex, scenarios]);
+
+  const scenario = scenarios[scenarioIndex];
+
+  return (
+    <div className="landing-chat-frame">
+      <div className="landing-chat-preview">
+        <div className="landing-chat-header">
+          <span className="landing-chat-avatar" aria-hidden="true">
+            <img src="/q-icon.png" alt="" />
+          </span>
+          Qlass AI Tutor
+          <span className="landing-chat-demo-label">
+            {scenario.icon} {scenario.label}
+          </span>
+        </div>
+        <div className={`landing-chat-body${fading ? " landing-chat-body-fading" : ""}`}>
+          {visible.map((m, i) => (
+            <div key={i} className={`landing-chat-bubble landing-chat-bubble-${m.from}`}>
+              {m.text}
+            </div>
+          ))}
+          {typing && (
+            <div className="landing-chat-bubble landing-chat-bubble-ai landing-chat-typing" aria-label="Typing">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // All nine features shown at once, not one at a time — an auto-rotating
 // single card hid eight of nine features from anyone who didn't sit and
@@ -180,23 +323,7 @@ export default function Join() {
               <li>🎓 Curriculum Aligned</li>
               <li>⏱️ 24/7 Availability</li>
             </ul>
-            <div className="landing-chat-frame">
-              <div className="landing-chat-preview">
-                <div className="landing-chat-header">
-                  <span className="landing-chat-avatar" aria-hidden="true">
-                    <img src="/q-icon.png" alt="" />
-                  </span>
-                  Qlass AI Tutor
-                </div>
-                <div className="landing-chat-body">
-                  {CHAT_PREVIEW.map((m, i) => (
-                    <div key={i} className={`landing-chat-bubble landing-chat-bubble-${m.from}`}>
-                      {m.text}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <AnimatedChatDemo scenarios={CHAT_SCENARIOS} />
           </div>
           <div className="landing-hero-form" id="signup">{registrationForm}</div>
         </div>
