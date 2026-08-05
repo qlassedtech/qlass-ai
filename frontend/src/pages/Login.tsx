@@ -146,16 +146,12 @@ export default function Login() {
       </div>
       <form className="card" onSubmit={submitHandlers[step]}>
         {schoolName ? (
-          <div className="landing-school-logos" style={{ marginBottom: 16 }}>
-            <div className="logo-preview">
-              {schoolLogo ? (
-                <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
-              ) : (
-                <span className="logo-placeholder" aria-hidden="true">🏫</span>
-              )}
-            </div>
-            <span className="landing-logos-x">×</span>
-            <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: 0 }} />
+          <div className="landing-school-logo-large" style={{ width: 96, height: 96, margin: "0 auto 16px" }}>
+            {schoolLogo ? (
+              <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
+            ) : (
+              <span className="logo-placeholder" aria-hidden="true" style={{ fontSize: 40 }}>🏫</span>
+            )}
           </div>
         ) : (
           <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
@@ -241,6 +237,12 @@ export default function Login() {
           </p>
         )}
       </form>
+      {schoolName && (
+        <div className="landing-powered-by" style={{ position: "relative", zIndex: 1 }}>
+          <span>Powered by</span>
+          <img src="/logo.jpeg" alt="Qlass Learning" />
+        </div>
+      )}
     </div>
   );
 }
