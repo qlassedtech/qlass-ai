@@ -32,7 +32,7 @@ export default function Layout() {
     <div className="app-shell">
       <nav className="sidebar">
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-          <img src="/logo.jpeg" alt="Qlass Learning" className="sidebar-logo" />
+          <img src="/logo-tight.png" alt="Qlass Learning" className="sidebar-logo" />
           <ThemeToggle />
         </div>
 

@@ -782,7 +782,7 @@ label {
 }
 
 .landing-powered-by-chip img {
-  height: 16px;
+  height: 26px;
   width: auto;
   border-radius: 3px;
 }
@@ -1561,10 +1561,10 @@ label {
 }
 
 .landing-powered-by img {
-  /* Source JPEG has a baked-in white background (not transparent) — same
+  /* Source image has a baked-in white background (not transparent) — same
      "white badge" treatment as .login-logo/.sidebar-logo so it reads as
      intentional at this small size instead of a stray white rectangle. */
-  height: 22px;
+  height: 32px;
   width: auto;
   background: #ffffff;
   border: 1px solid var(--border);

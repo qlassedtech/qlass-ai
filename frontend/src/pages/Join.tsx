@@ -410,11 +410,11 @@ export default function Join() {
             </div>
             <div className="landing-powered-by-chip">
               <span>Powered by</span>
-              <img src="/logo.jpeg" alt="Qlass Learning" />
+              <img src="/logo-tight.png" alt="Qlass Learning" />
             </div>
           </div>
         ) : (
-          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
+          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
         )}
 
         <div className="landing-hero-split">

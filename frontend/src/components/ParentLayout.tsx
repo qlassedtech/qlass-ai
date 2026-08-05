@@ -14,7 +14,7 @@ export default function ParentLayout({ children }: { children: React.ReactNode }
     <div className="center-page" style={{ alignItems: "flex-start", paddingTop: 60 }}>
       <div className="card" style={{ width: 480 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: 0 }} />
+          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" style={{ margin: 0 }} />
           <ThemeToggle />
         </div>
         {children}

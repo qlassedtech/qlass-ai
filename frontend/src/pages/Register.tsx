@@ -36,7 +36,7 @@ export default function Register() {
   return (
     <div className="center-page">
       <form className="card" onSubmit={handleSubmit}>
-        <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
+        <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
         <h1>Register Your School</h1>
         <p className="login-subtitle">Create your school's console and admin account</p>
         <label>

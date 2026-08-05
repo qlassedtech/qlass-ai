@@ -129,7 +129,7 @@ export default function Pay() {
   return (
     <div className="center-page">
       <div className="card">
-        <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
+        <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
         <h1>Top Up AI Credits</h1>
         <p className="login-subtitle">Add credits to your child's Qlass AI Tutor account on WhatsApp.</p>
 

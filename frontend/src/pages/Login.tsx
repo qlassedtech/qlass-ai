@@ -154,7 +154,7 @@ export default function Login() {
             )}
           </div>
         ) : (
-          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" />
+          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
         )}
         <h1>{schoolName ? `Welcome back, ${schoolName}` : "Welcome to Qlass"}</h1>
         <p className="login-subtitle">
@@ -240,7 +240,7 @@ export default function Login() {
       {schoolName && (
         <div className="landing-powered-by" style={{ position: "relative", zIndex: 1 }}>
           <span>Powered by</span>
-          <img src="/logo.jpeg" alt="Qlass Learning" />
+          <img src="/logo-tight.png" alt="Qlass Learning" />
         </div>
       )}
     </div>
