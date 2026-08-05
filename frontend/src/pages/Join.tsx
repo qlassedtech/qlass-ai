@@ -3,13 +3,16 @@ import { Link, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
 
+// Short, benefit-first tagline + one concrete line — same pattern real AI-
+// tutor competitors use (e.g. "Smarter study, stronger results"), not a
+// plain feature description.
 const FEATURES = [
-  { icon: "💬", title: "Ask Anything, Anytime", text: "Explain any topic in plain language, right on WhatsApp — no app to download." },
-  { icon: "📸", title: "Photo Homework Help", text: "Stuck on a question? Send a photo and get it explained step by step." },
-  { icon: "🎙️", title: "Voice Notes In & Out", text: "Ask out loud and hear the answer back — great for on-the-go learning." },
-  { icon: "📝", title: "Quizzes & Mock Tests", text: "Real scored quizzes and timed, board-exam-style mock tests on any topic." },
-  { icon: "📺", title: "Video Explanations", text: "A well-matched YouTube video whenever a topic needs more than text." },
-  { icon: "📊", title: "Real Progress Tracking", text: "See your accuracy, weak topics, and streak — not guesses, real numbers." },
+  { icon: "💬", title: "Never Stuck Again", text: "Real answers in seconds, on any topic — right inside the chat you already have open." },
+  { icon: "📸", title: "Snap It, Solve It", text: "Photo of a tricky problem in, a step-by-step explanation out." },
+  { icon: "🎙️", title: "Just Talk It Out", text: "Ask out loud, hear it back — studying that fits around your day, not the other way." },
+  { icon: "📝", title: "Prove What You Know", text: "Real scored quizzes and board-exam-style mock tests, the moment you're ready." },
+  { icon: "📺", title: "See It, Not Just Read It", text: "A perfectly matched video the second text alone won't cut it." },
+  { icon: "📊", title: "Watch Yourself Improve", text: "Real accuracy, real streaks, real proof — not a guess at how you're doing." },
 ];
 
 export default function Join() {
@@ -58,25 +61,26 @@ export default function Join() {
       <div className="landing-inner">
         <div className="landing-hero">
           {schoolName ? (
-            <div className="landing-school-logos">
-              <div className="logo-preview">
-                {schoolLogo ? (
-                  <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
-                ) : (
-                  <span className="logo-placeholder" aria-hidden="true">🏫</span>
-                )}
-              </div>
-              <span className="landing-logos-x">×</span>
-              <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: 0 }} />
+            // School branding leads — large, dominant, the actual partner
+            // the student recognizes. Qlass steps back to a small "Powered
+            // by" credit near the form instead of co-branding equally at
+            // the top (see .landing-powered-by below) — this is the
+            // school's own page, not a joint one.
+            <div className="landing-school-logo-large">
+              {schoolLogo ? (
+                <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
+              ) : (
+                <span className="logo-placeholder" aria-hidden="true">🏫</span>
+              )}
             </div>
           ) : (
             <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: "0 auto 8px" }} />
           )}
-          <h1>{schoolName ? `${schoolName} × Qlass AI Tutor` : "Your Personal AI Tutor, on WhatsApp"}</h1>
+          <h1>{schoolName ? `${schoolName}'s Own AI Tutor` : "Your Own AI Tutor. On WhatsApp. Free."}</h1>
           <p>
             {schoolName
-              ? `Free, conversational AI tutoring for ${schoolName} students — explanations, quizzes, and homework help, all on WhatsApp.`
-              : "Free, conversational tutoring for CBSE, ICSE, and State board students — explanations, quizzes, and homework help, all in the app you already use every day."}
+              ? `24/7 AI tutoring built for ${schoolName} students — real explanations, real quizzes, zero app to download.`
+              : "24/7 tutoring for CBSE, ICSE, and State board students — real explanations, real quizzes, zero app to download."}
           </p>
         </div>
 
@@ -104,7 +108,7 @@ export default function Join() {
           ) : (
             <form onSubmit={handleSubmit}>
               <h2>Start Learning Free</h2>
-              <p className="muted">Get ₹50 in free AI credits — no card, no download.</p>
+              <p className="muted">₹50 in free AI credits — no card, no download, no waiting.</p>
               <label>
                 Your name
                 <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" required />
@@ -130,6 +134,13 @@ export default function Join() {
             </form>
           )}
         </div>
+
+        {schoolName && (
+          <div className="landing-powered-by">
+            <span>Powered by</span>
+            <img src="/logo.jpeg" alt="Qlass Learning" />
+          </div>
+        )}
       </div>
     </div>
   );

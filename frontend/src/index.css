@@ -834,6 +834,61 @@ label {
   font-weight: 300;
 }
 
+/* The /join hero, when reached via a school link — the school IS the
+   brand a student recognizes, so its logo leads large and alone; Qlass
+   steps back to a small "Powered by" credit near the form instead (see
+   .landing-powered-by below), rather than co-branding equally at the top
+   the way the narrower Login.tsx card still does. */
+.landing-school-logo-large {
+  width: 140px;
+  height: 140px;
+  margin: 0 auto 20px;
+  border-radius: 24px;
+  overflow: hidden;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.landing-school-logo-large img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.landing-school-logo-large .logo-placeholder {
+  font-size: 56px;
+}
+
+.landing-powered-by {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 32px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.landing-powered-by img {
+  /* Source JPEG has a baked-in white background (not transparent) — same
+     "white badge" treatment as .login-logo/.sidebar-logo so it reads as
+     intentional at this small size instead of a stray white rectangle. */
+  height: 22px;
+  width: auto;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 6px;
+  box-sizing: content-box;
+}
+
 .button-secondary {
   background: transparent;
   background-image: none;
