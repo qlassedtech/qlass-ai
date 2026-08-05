@@ -820,7 +820,7 @@ label {
   flex-wrap: wrap;
   gap: 8px;
   padding: 0;
-  margin: 0 0 24px;
+  margin: 0;
 }
 
 @media (max-width: 860px) {
@@ -869,9 +869,9 @@ label {
   grid-template-areas:
     "headline form"
     "demo     form";
-  gap: 20px 48px;
+  gap: 14px 48px;
   align-items: start;
-  margin-bottom: 48px;
+  margin-bottom: 32px;
 }
 
 .landing-hero-headline {
@@ -884,6 +884,20 @@ label {
 
 .landing-hero-form {
   grid-area: form;
+  /* The left column's total height (headline + demo) is now constant —
+     the chat body is a fixed height regardless of scenario — so the form
+     can be reliably stretched to match it and centered within, instead of
+     top-aligning and leaving its bottom edge floating out of sync with
+     the mockup below it. */
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+@media (max-width: 860px) {
+  .landing-hero-form {
+    align-self: auto;
+  }
 }
 
 @media (max-width: 860px) {
@@ -913,7 +927,7 @@ label {
 .landing-hero-headline h1 {
   font-size: 44px;
   line-height: 1.08;
-  margin: 20px 0 14px;
+  margin: 14px 0 10px;
   letter-spacing: -0.03em;
   font-weight: 800;
 }
@@ -926,20 +940,21 @@ label {
 
 .landing-hero-headline p {
   color: var(--text-muted);
-  font-size: 17px;
-  line-height: 1.5;
+  font-size: 16px;
+  line-height: 1.45;
   max-width: 480px;
-  margin: 0 0 24px;
+  margin: 0 0 14px;
 }
 
 @media (max-width: 860px) {
   .landing-hero-headline p {
-    margin: 0 auto 24px;
+    margin: 0 auto 14px;
   }
 }
 
 .landing-hero-form .landing-form-card {
   margin: 0;
+  width: 100%;
 }
 
 /* A subtle bezel around the chat mockup so it reads as a device screen
@@ -1032,7 +1047,7 @@ label {
      gets extra room since the same text wraps to more lines at that width
      and would otherwise auto-scroll away the top of a photo/video bubble
      before it's even been seen. */
-  height: 320px;
+  height: 346px;
   overflow-y: auto;
   scrollbar-width: thin;
   transition: opacity 0.35s ease;

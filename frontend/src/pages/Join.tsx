@@ -423,8 +423,8 @@ export default function Join() {
             <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
             <p>
               {schoolName
-                ? `${schoolName} students receive round-the-clock academic support from a dedicated AI tutor, directly on WhatsApp.`
-                : "Round-the-clock, step-by-step academic support — directly on WhatsApp. No app to download, no waiting for a reply."}
+                ? `24/7 academic support from a dedicated AI tutor, directly on WhatsApp.`
+                : "Round-the-clock academic support, directly on WhatsApp — no app, no waiting."}
             </p>
             <ul className="landing-trust-pills">
               <li>🔒 Safe &amp; Moderated</li>
