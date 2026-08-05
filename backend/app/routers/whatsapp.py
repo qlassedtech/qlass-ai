@@ -1101,14 +1101,6 @@ async def _handle_message(db: Session, payload: dict) -> None:
     else:
         did_answer_via_llm = True
 
-        # This is a real tutoring question (not onboarding/quiz/profile
-        # noise) — the activity signal the day1-3/week2/week3 referral
-        # milestones are checked against (see evaluate_referral_milestones).
-        # No-ops immediately for non-referred students or once every
-        # milestone's already settled.
-        await evaluate_referral_milestones(db, student)
-        await evaluate_habit_milestones(db, student)
-
         # Whether this message actually answers a pending onboarding question
         # (name/class/board/school) or the class-update nudge is decided by
         # the LLM itself below (pending_profile_field/pending_class_confirm
@@ -1437,3 +1429,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
             video_result = await send_whatsapp_message(from_phone, f"📺 {video['title']}\n{video['url']}")
             if not video_result.get("sent"):
                 logger.error("send video suggestion failed for %s: %s", from_phone, video_result)
+
+    if did_answer_via_llm:
+        # Deliberately last, after the actual reply has already been sent —
+        # this used to run before tutor_agent.respond() and block the real
+        # answer behind an extra Wati round-trip whenever a milestone fired,
+        # so a student asking a genuine question would see "Nice streak!"
+        # arrive before the answer to what they actually asked. Still only
+        # fires for a real tutoring question (see did_answer_via_llm above),
+        # not quiz/progress/credit-usage/referral/teacher_help turns.
+        await evaluate_referral_milestones(db, student)
+        await evaluate_habit_milestones(db, student)
