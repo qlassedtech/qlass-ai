@@ -32,6 +32,47 @@ const CHAT_PREVIEW = [
   { from: "ai", text: "Exactly! Rocket pushes gas down, gas pushes rocket up 🚀 Want to try a quick question on it?" },
 ];
 
+// One feature at a time, auto-advancing — used only on school-branded join
+// pages (see landing-spotlight CSS) so a school's page feels like a live,
+// premium product tour rather than a static wall of cards.
+function FeatureSpotlight({ features }: { features: typeof FEATURES }) {
+  const [index, setIndex] = useState(0);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    if (paused) return;
+    const timer = setInterval(() => setIndex((i) => (i + 1) % features.length), 3500);
+    return () => clearInterval(timer);
+  }, [paused, features.length]);
+
+  const active = features[index];
+
+  return (
+    <div
+      className="landing-spotlight"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+    >
+      <div className="landing-spotlight-card" key={active.title}>
+        <span className="feature-icon">{active.icon}</span>
+        <h3>{active.title}</h3>
+        <p>{active.text}</p>
+      </div>
+      <div className="landing-spotlight-dots">
+        {features.map((f, i) => (
+          <button
+            key={f.title}
+            type="button"
+            className={`landing-spotlight-dot${i === index ? " active" : ""}`}
+            aria-label={`Show "${f.title}"`}
+            onClick={() => setIndex(i)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function Join() {
   const [searchParams] = useSearchParams();
   const schoolSlug = searchParams.get("school") || undefined;
@@ -156,15 +197,7 @@ export default function Join() {
           <div className="landing-hero-form">{registrationForm}</div>
         </div>
 
-        <div className="feature-grid">
-          {FEATURES.map((f) => (
-            <div className="feature-card" key={f.title}>
-              <span className="feature-icon">{f.icon}</span>
-              <h3>{f.title}</h3>
-              <p>{f.text}</p>
-            </div>
-          ))}
-        </div>
+        <FeatureSpotlight features={FEATURES} />
 
         {schoolName && (
           <div className="landing-powered-by">
