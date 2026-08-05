@@ -731,6 +731,79 @@ label {
   margin: 0 auto;
 }
 
+/* A persistent institutional header for school-branded pages — the school's
+   logo and name lead, with a small "Powered by Qlass Learning" chip, rather
+   than a logo floating inside the hero column with no visual frame. */
+.landing-brandbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}
+
+.landing-brandbar-school {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.landing-brandbar .landing-school-logo-large {
+  width: 56px;
+  height: 56px;
+  margin: 0;
+}
+
+.landing-brandbar-name {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.landing-powered-by-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px 6px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.landing-powered-by-chip img {
+  height: 16px;
+  width: auto;
+  border-radius: 3px;
+}
+
+.landing-trust-pills {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  margin: 0 0 24px;
+}
+
+@media (max-width: 860px) {
+  .landing-trust-pills {
+    justify-content: center;
+  }
+}
+
+.landing-trust-pills li {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* Signup sits directly beside the hero, not below a full feature grid —
    Character.AI's own landing page is a headline and a sign-up gate with
    nothing in between; the feature grid here is supporting content for
@@ -771,6 +844,14 @@ label {
 
 .landing-hero-form .landing-form-card {
   margin: 0;
+}
+
+/* A subtle bezel around the chat mockup so it reads as a device screen
+   rather than a flat rectangle sitting in the page. */
+.landing-chat-frame {
+  background: linear-gradient(160deg, rgba(43, 62, 196, 0.14), rgba(43, 62, 196, 0.02));
+  border-radius: 22px;
+  padding: 10px;
 }
 
 /* A WhatsApp-styled chat preview — the fastest way to signal "this is a
@@ -935,27 +1016,55 @@ label {
   margin: 0;
 }
 
-.landing-spotlight-dots {
+/* Instagram-story-style progress bars instead of dots — the fill itself
+   communicates "this is about to move on", not just "this is item 3 of 9". */
+.landing-spotlight-progress {
   display: flex;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 16px;
+  gap: 5px;
+  margin-top: 18px;
 }
 
-.landing-spotlight-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.landing-spotlight-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
   border: none;
-  background: var(--border);
   padding: 0;
   cursor: pointer;
+  background: var(--border);
+  overflow: hidden;
+  position: relative;
 }
 
-.landing-spotlight-dot.active {
+.landing-spotlight-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
   background: var(--primary, #4f46e5);
-  width: 20px;
-  border-radius: 4px;
+}
+
+.landing-spotlight-bar-fill.filled {
+  width: 100%;
+}
+
+.landing-spotlight-bar-fill.active {
+  animation: landing-spotlight-fill 3.5s linear forwards;
+}
+
+@keyframes landing-spotlight-fill {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-spotlight-bar-fill.active {
+    animation: none;
+    width: 100%;
+  }
 }
 
 .landing-form-card {
@@ -971,12 +1080,64 @@ label {
 }
 
 .landing-form-card .muted {
-  margin-bottom: 22px;
+  margin-bottom: 16px;
   font-size: 13px;
 }
 
 .landing-form-card label {
   text-align: left;
+}
+
+.landing-form-checklist {
+  list-style: none;
+  text-align: left;
+  padding: 0;
+  margin: 0 0 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.landing-form-checklist li {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding-left: 22px;
+  position: relative;
+}
+
+.landing-form-checklist li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  color: #1c9a5b;
+  font-weight: 700;
+}
+
+.landing-closing-cta {
+  text-align: center;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 8px 0 4px;
+}
+
+.landing-closing-cta h2 {
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+
+.landing-closing-cta .muted {
+  margin: 0 0 20px;
+}
+
+.button-link {
+  display: inline-block;
+  background: var(--primary, #4f46e5);
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 12px 26px;
+  border-radius: var(--radius);
+  text-decoration: none;
 }
 
 .landing-success {

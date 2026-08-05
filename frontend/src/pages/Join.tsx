@@ -60,15 +60,20 @@ function FeatureSpotlight({ features }: { features: typeof FEATURES }) {
         <h3>{active.title}</h3>
         <p>{active.text}</p>
       </div>
-      <div className="landing-spotlight-dots">
+      <div className="landing-spotlight-progress">
         {features.map((f, i) => (
           <button
             key={f.title}
             type="button"
-            className={`landing-spotlight-dot${i === index ? " active" : ""}`}
+            className="landing-spotlight-bar"
             aria-label={`Show "${f.title}"`}
             onClick={() => setIndex(i)}
-          />
+          >
+            <span
+              className={`landing-spotlight-bar-fill${i < index ? " filled" : i === index ? " active" : ""}`}
+              style={i === index ? { animationPlayState: paused ? "paused" : "running" } : undefined}
+            />
+          </button>
         ))}
       </div>
     </div>
@@ -129,6 +134,11 @@ export default function Join() {
         <form onSubmit={handleSubmit}>
           <h2>Begin Learning for Free</h2>
           <p className="muted">Start with ₹50 in complimentary AI credits — no card required, no download needed.</p>
+          <ul className="landing-form-checklist">
+            <li>Free credits to get started</li>
+            <li>No card or download required</li>
+            <li>Replies arrive on WhatsApp instantly</li>
+          </ul>
           <label>
             Your name
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" required />
@@ -161,9 +171,9 @@ export default function Join() {
         <ThemeToggle />
       </div>
       <div className="landing-inner">
-        <div className="landing-hero-split">
-          <div className="landing-hero-text">
-            {schoolName ? (
+        {schoolName ? (
+          <div className="landing-brandbar">
+            <div className="landing-brandbar-school">
               <div className="landing-school-logo-large">
                 {schoolLogo ? (
                   <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
@@ -171,42 +181,58 @@ export default function Join() {
                   <span className="logo-placeholder" aria-hidden="true">🏫</span>
                 )}
               </div>
-            ) : (
-              <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: "0 0 8px" }} />
-            )}
+              <span className="landing-brandbar-name">{schoolName}</span>
+            </div>
+            <div className="landing-powered-by-chip">
+              <span>Powered by</span>
+              <img src="/logo.jpeg" alt="Qlass Learning" />
+            </div>
+          </div>
+        ) : (
+          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: "0 0 16px" }} />
+        )}
+
+        <div className="landing-hero-split">
+          <div className="landing-hero-text">
             <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
             <p>
               {schoolName
                 ? `${schoolName} students receive round-the-clock academic support from a dedicated AI tutor, directly on WhatsApp.`
                 : "Round-the-clock, step-by-step academic support — directly on WhatsApp. No app to download, no waiting for a reply."}
             </p>
-            <div className="landing-chat-preview">
-              <div className="landing-chat-header">
-                <span className="landing-chat-avatar" aria-hidden="true">
-                  <img src="/q-icon.png" alt="" />
-                </span>
-                Qlass AI Tutor
-              </div>
-              <div className="landing-chat-body">
-                {CHAT_PREVIEW.map((m, i) => (
-                  <div key={i} className={`landing-chat-bubble landing-chat-bubble-${m.from}`}>
-                    {m.text}
-                  </div>
-                ))}
+            <ul className="landing-trust-pills">
+              <li>🔒 Safe &amp; Moderated</li>
+              <li>🎓 Curriculum Aligned</li>
+              <li>⏱️ 24/7 Availability</li>
+            </ul>
+            <div className="landing-chat-frame">
+              <div className="landing-chat-preview">
+                <div className="landing-chat-header">
+                  <span className="landing-chat-avatar" aria-hidden="true">
+                    <img src="/q-icon.png" alt="" />
+                  </span>
+                  Qlass AI Tutor
+                </div>
+                <div className="landing-chat-body">
+                  {CHAT_PREVIEW.map((m, i) => (
+                    <div key={i} className={`landing-chat-bubble landing-chat-bubble-${m.from}`}>
+                      {m.text}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-          <div className="landing-hero-form">{registrationForm}</div>
+          <div className="landing-hero-form" id="signup">{registrationForm}</div>
         </div>
 
         <FeatureSpotlight features={FEATURES} />
 
-        {schoolName && (
-          <div className="landing-powered-by">
-            <span>Powered by</span>
-            <img src="/logo.jpeg" alt="Qlass Learning" />
-          </div>
-        )}
+        <div className="landing-closing-cta">
+          <h2>Ready to get started?</h2>
+          <p className="muted">Registration takes under a minute — your first reply arrives on WhatsApp right away.</p>
+          <a href="#signup" className="button-link">Begin Learning for Free</a>
+        </div>
       </div>
     </div>
   );
