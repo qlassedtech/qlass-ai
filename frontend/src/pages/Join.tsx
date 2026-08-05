@@ -3,33 +3,34 @@ import { Link, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
 
-// Written for the student actually reading this, not a parent or a
-// procurement buyer — casual, specific, relatable moments (11pm before an
-// exam, re-asking the same doubt in class) instead of generic SaaS-speak.
-// Every capability real competitors lead with (see audit: YoLearn.ai —
-// 22+ languages + voice; YoTutor.AI — voice + photo doubt solver;
-// MeraTutor.AI — 24/7, step-by-step, board-aligned) gets its own card here
-// too, explicitly named — nothing left implied.
+// Credible, academic register — this page is often embedded on a school's
+// own website, so the tone needs to read as a serious learning product, not
+// a casual consumer app. Every capability real competitors lead with (see
+// audit: YoLearn.ai — 22+ languages + voice; YoTutor.AI — voice + photo
+// doubt solver; MeraTutor.AI — 24/7, step-by-step, board-aligned) still gets
+// its own card, named plainly rather than implied.
 const FEATURES = [
-  { icon: "😩➡️😌", title: "Stuck at 11pm? Not anymore.", text: "24/7, not just class hours — ask the second you're stuck, get a real answer back." },
-  { icon: "📸", title: "Snap it, solve it", text: "Photo of a tricky problem in, a step-by-step explanation out. No typing the whole thing." },
-  { icon: "🎙️", title: "Too lazy to type? Just talk.", text: "Say it out loud, hear it back — like explaining it to a friend who actually knows the answer." },
-  { icon: "🗣️", title: "In your own language", text: "English, Hindi, Bhojpuri, Magahi, or Maithili — say it however you actually talk." },
-  { icon: "📄", title: "Whole worksheet? No problem", text: "Share a PDF or Word file of your homework, not just one question at a time." },
-  { icon: "🎯", title: "Actually test yourself", text: "Real scored quizzes and board-exam mock tests — find out what you don't know before the exam does." },
-  { icon: "📺", title: "When text isn't enough", text: "A video that matches exactly what you asked, not a random search result." },
-  { icon: "📈", title: "Watch your streak grow", text: "Real accuracy, real progress — proof you're actually getting better, not just busy." },
-  { icon: "📚", title: "Straight from your textbook", text: "Not a guess — when we teach from your syllabus, we cite the actual chapter it came from." },
+  { icon: "🕐", title: "Round-the-Clock Academic Support", text: "Get clear, step-by-step help at any hour — not limited to school or tuition timings." },
+  { icon: "📸", title: "Learn From a Photograph", text: "Share a photo of any question and receive a complete, step-by-step solution within moments." },
+  { icon: "🎙️", title: "Ask Using Your Voice", text: "Speak a question instead of typing it, and receive a spoken explanation in return." },
+  { icon: "🌐", title: "Available in Five Languages", text: "Learn in English, Hindi, Bhojpuri, Magahi, or Maithili — whichever you're most comfortable with." },
+  { icon: "📄", title: "Submit a Full Assignment", text: "Upload an entire worksheet or homework file as a PDF or Word document, not one question at a time." },
+  { icon: "📝", title: "Practice With Real Assessments", text: "Attempt scored quizzes and board-exam-style mock tests to identify exactly where you need to improve." },
+  { icon: "🎬", title: "Video Explanations on Demand", text: "Receive a video explanation matched precisely to your question, not a generic search result." },
+  { icon: "📊", title: "Track Academic Progress", text: "Monitor accuracy and improvement over time, backed by a clear record of performance." },
+  { icon: "📚", title: "Grounded in Your Textbook", text: "Answers are drawn directly from your syllabus, with the exact chapter cited — never a generic guess." },
 ];
 
-// A fake but realistic exchange — the fastest way to signal "this is an AI
-// chat product" is to just show the chat, not describe it (see Character.
+// A realistic exchange — the fastest way to signal "this is a genuine AI
+// tutor" is to show the conversation itself, not describe it (see Character.
 // AI's own landing page: a headline and a sign-up gate, nothing abstract).
+// Kept natural but without slang, since this is meant to read as credible
+// academic help, not a casual chat app.
 const CHAT_PREVIEW = [
-  { from: "user", text: "I don't get Newton's third law 😩" },
-  { from: "ai", text: "Easy — for every action, there's an equal and opposite reaction. Push a wall, it pushes back just as hard 💪" },
-  { from: "user", text: "ohh so like a rocket?" },
-  { from: "ai", text: "Exactly! Rocket pushes gas down, gas pushes rocket up 🚀 Want to try a quick question on it?" },
+  { from: "user", text: "I don't understand Newton's third law." },
+  { from: "ai", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
+  { from: "user", text: "Is that how a rocket works?" },
+  { from: "ai", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward. Would you like to try a practice question on this?" },
 ];
 
 // One feature at a time, auto-advancing — used only on school-branded join
@@ -53,8 +54,9 @@ function FeatureSpotlight({ features }: { features: typeof FEATURES }) {
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
     >
+      <p className="landing-spotlight-eyebrow">What You Get</p>
       <div className="landing-spotlight-card" key={active.title}>
-        <span className="feature-icon">{active.icon}</span>
+        <span className="landing-spotlight-icon" aria-hidden="true">{active.icon}</span>
         <h3>{active.title}</h3>
         <p>{active.text}</p>
       </div>
@@ -116,17 +118,17 @@ export default function Join() {
       {registered ? (
         <div className="landing-success">
           <span className="landing-success-icon">✅</span>
-          <h2>{registered.alreadyRegistered ? "You're already set up!" : "You're in! 🎉"}</h2>
+          <h2>{registered.alreadyRegistered ? "Your Account Is Already Active" : "Registration Complete"}</h2>
           <p className="muted">
             {registered.alreadyRegistered
               ? "Check your WhatsApp — we've sent you a message to pick up where you left off."
-              : "Check your WhatsApp for a welcome message with your free AI credits — just reply to start learning."}
+              : "Check your WhatsApp for a welcome message with your free AI credits, and reply to begin learning."}
           </p>
         </div>
       ) : (
         <form onSubmit={handleSubmit}>
-          <h2>Start Learning Free</h2>
-          <p className="muted">₹50 in free AI credits — no card, no download, no waiting.</p>
+          <h2>Begin Learning for Free</h2>
+          <p className="muted">Start with ₹50 in complimentary AI credits — no card required, no download needed.</p>
           <label>
             Your name
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" required />
@@ -143,7 +145,7 @@ export default function Join() {
           </label>
           {error && <p className="error">{error}</p>}
           <button type="submit" disabled={loading}>
-            {loading ? "Please wait..." : "Start Learning Free"}
+            {loading ? "Please wait..." : "Begin Learning for Free"}
           </button>
           <p className="auth-links">
             Already learning with us? <Link to={schoolSlug ? `/login?school=${schoolSlug}` : "/login"}>Log in</Link>
@@ -172,11 +174,11 @@ export default function Join() {
             ) : (
               <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: "0 0 8px" }} />
             )}
-            <h1>{schoolName ? `${schoolName}'s Own AI Tutor` : "Your Own AI Tutor. On WhatsApp. Free."}</h1>
+            <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
             <p>
               {schoolName
-                ? `Stuck on homework at 11pm? ${schoolName} students get a real AI tutor, 24/7, right on WhatsApp.`
-                : "Stuck on homework at 11pm? Get a real AI tutor, 24/7, right on WhatsApp — no app, no waiting."}
+                ? `${schoolName} students receive round-the-clock academic support from a dedicated AI tutor, directly on WhatsApp.`
+                : "Round-the-clock, step-by-step academic support — directly on WhatsApp. No app to download, no waiting for a reply."}
             </p>
             <div className="landing-chat-preview">
               <div className="landing-chat-header">
