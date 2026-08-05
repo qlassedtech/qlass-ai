@@ -1175,6 +1175,14 @@ label {
   padding: 6px 4px 2px;
 }
 
+.landing-chat-time {
+  display: block;
+  text-align: right;
+  font-size: 10px;
+  color: rgba(17, 17, 17, 0.45);
+  margin-top: 2px;
+}
+
 .landing-chat-typing {
   display: flex;
   align-items: center;
@@ -1240,24 +1248,75 @@ label {
 }
 
 .landing-feature-tile {
+  position: relative;
+  overflow: hidden;
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 16px;
-  padding: 22px 20px;
+  padding: 24px 20px 22px;
   box-shadow: var(--shadow-sm);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
+.landing-feature-tile::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--tile-accent, #4f46e5);
+}
+
 .landing-feature-tile:hover {
-  transform: translateY(-2px);
+  transform: translateY(-3px);
   box-shadow: var(--shadow);
+}
+
+/* A different accent color per tile — cycling through a small palette —
+   so the grid reads as lively and varied rather than nine identical
+   purple-icon cards in a row. */
+.landing-feature-tile:nth-child(9n + 1) {
+  --tile-accent: #4f46e5;
+}
+
+.landing-feature-tile:nth-child(9n + 2) {
+  --tile-accent: #0891b2;
+}
+
+.landing-feature-tile:nth-child(9n + 3) {
+  --tile-accent: #db2777;
+}
+
+.landing-feature-tile:nth-child(9n + 4) {
+  --tile-accent: #16a34a;
+}
+
+.landing-feature-tile:nth-child(9n + 5) {
+  --tile-accent: #ea580c;
+}
+
+.landing-feature-tile:nth-child(9n + 6) {
+  --tile-accent: #7c3aed;
+}
+
+.landing-feature-tile:nth-child(9n + 7) {
+  --tile-accent: #0d9488;
+}
+
+.landing-feature-tile:nth-child(9n + 8) {
+  --tile-accent: #ca8a04;
+}
+
+.landing-feature-tile:nth-child(9n + 9) {
+  --tile-accent: #dc2626;
 }
 
 .landing-spotlight-icon {
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  background: rgba(43, 62, 196, 0.08);
+  background: color-mix(in srgb, var(--tile-accent, #4f46e5) 14%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1266,7 +1325,7 @@ label {
 }
 
 :root[data-theme="dark"] .landing-spotlight-icon {
-  background: rgba(120, 138, 255, 0.14);
+  background: color-mix(in srgb, var(--tile-accent, #7b8bf5) 24%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {

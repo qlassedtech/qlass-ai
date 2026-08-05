@@ -18,15 +18,15 @@ const FEATURES = [
   { icon: "📝", title: "Practice With Real Assessments", text: "Attempt scored quizzes and board-exam-style mock tests to identify exactly where you need to improve." },
   { icon: "🎬", title: "Video Explanations on Demand", text: "Receive a video explanation matched precisely to your question, not a generic search result." },
   { icon: "📊", title: "Track Academic Progress", text: "Monitor accuracy and improvement over time, backed by a clear record of performance." },
-  { icon: "📚", title: "Grounded in Your Textbook", text: "Answers are drawn directly from your syllabus, with the exact chapter cited — never a generic guess." },
+  { icon: "📚", title: "Grounded in Your NCERT Textbook", text: "Answers are drawn directly from your NCERT syllabus, with the exact chapter cited — never a generic guess." },
 ];
 
 type ChatMsg =
-  | { from: string; kind: "text"; text: string }
-  | { from: string; kind: "image"; caption: string }
-  | { from: string; kind: "voice"; duration: string }
-  | { from: string; kind: "pdf"; filename: string; meta: string }
-  | { from: string; kind: "video"; title: string; duration: string };
+  | { from: string; kind: "text"; text: string; time: string }
+  | { from: string; kind: "image"; caption: string; time: string }
+  | { from: string; kind: "voice"; duration: string; time: string }
+  | { from: string; kind: "pdf"; filename: string; meta: string; time: string }
+  | { from: string; kind: "video"; title: string; duration: string; time: string };
 
 // A rotating set of realistic exchanges, each demonstrating one capability
 // from FEATURES — the fastest way to signal "this is a genuine AI tutor"
@@ -34,80 +34,83 @@ type ChatMsg =
 // a headline and a sign-up gate, nothing abstract). Animating through
 // several scenarios turns the single static screenshot into something that
 // actually demonstrates the product's breadth, GIF-style, without leaving
-// the hero.
+// the hero. Timestamps are real WhatsApp-style clock times — the first
+// scenario deliberately uses a near-midnight time so "24/7" is something
+// you can see, not just read.
 const CHAT_SCENARIOS: { icon: string; label: string; messages: ChatMsg[] }[] = [
   {
     icon: "🕐",
     label: "Round-the-Clock Help",
     messages: [
-      { from: "user", kind: "text", text: "I don't understand Newton's third law." },
-      { from: "ai", kind: "text", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
-      { from: "user", kind: "text", text: "Is that how a rocket works?" },
-      { from: "ai", kind: "text", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward." },
+      { from: "user", kind: "text", time: "11:47 PM", text: "I don't understand Newton's third law." },
+      { from: "ai", kind: "text", time: "11:47 PM", text: "Good question! For every action, there's an equal and opposite reaction — push on a wall, and it pushes back on you with equal force." },
+      { from: "user", kind: "text", time: "11:52 PM", text: "Is that how a rocket works?" },
+      { from: "ai", kind: "text", time: "11:52 PM", text: "Exactly right. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward. Does that make sense now?" },
     ],
   },
   {
     icon: "📸",
     label: "Photo Doubt Solving",
     messages: [
-      { from: "user", kind: "image", caption: "Question 4" },
-      { from: "ai", kind: "text", text: "Got it — I can read the question. Here's the solution, step by step:\n1) Identify the given values\n2) Apply the formula\n3) x = 12" },
+      { from: "user", kind: "image", time: "4:12 PM", caption: "A ball is thrown upward at 20 m/s. Find the time to reach maximum height. (g = 10 m/s²)" },
+      { from: "ai", kind: "text", time: "4:13 PM", text: "Nice one — let's solve it together.\nAt maximum height, final velocity v = 0.\nUsing v = u − gt: 0 = 20 − 10t\nSo t = 2 seconds." },
     ],
   },
   {
     icon: "🎙️",
     label: "Ask By Voice",
     messages: [
-      { from: "user", kind: "voice", duration: "0:14" },
-      { from: "ai", kind: "voice", duration: "0:22" },
+      { from: "user", kind: "voice", time: "6:05 PM", duration: "0:14" },
+      { from: "ai", kind: "voice", time: "6:05 PM", duration: "0:18" },
+      { from: "ai", kind: "text", time: "6:05 PM", text: "Sending that as text too: speed is distance over time, velocity also includes direction — that's the key difference." },
     ],
   },
   {
     icon: "📄",
     label: "Full Homework Upload",
     messages: [
-      { from: "user", kind: "pdf", filename: "Homework.pdf", meta: "8 questions" },
-      { from: "ai", kind: "text", text: "Found 8 questions in your worksheet. Starting with Question 1..." },
+      { from: "user", kind: "pdf", time: "8:05 PM", filename: "Homework.pdf", meta: "8 questions" },
+      { from: "ai", kind: "text", time: "8:06 PM", text: "Got your worksheet — I can see 8 questions. Let's work through them one at a time, starting with Question 1..." },
     ],
   },
   {
     icon: "📝",
     label: "Scored Quizzes",
     messages: [
-      { from: "user", kind: "text", text: "Quiz me on photosynthesis." },
-      { from: "ai", kind: "text", text: "Q1: Which gas do plants release during photosynthesis?\nA) Carbon dioxide  B) Oxygen  C) Nitrogen" },
+      { from: "user", kind: "text", time: "6:30 PM", text: "Quiz me on photosynthesis." },
+      { from: "ai", kind: "text", time: "6:30 PM", text: "Sure — let's see what you know!\nQ1: Which gas do plants release during photosynthesis?\nA) Carbon dioxide  B) Oxygen  C) Nitrogen" },
     ],
   },
   {
     icon: "🎬",
     label: "Video Explanations",
     messages: [
-      { from: "user", kind: "text", text: "Can you show me a video on this?" },
-      { from: "ai", kind: "video", title: "Diffusion Explained Simply", duration: "3:12" },
+      { from: "user", kind: "text", time: "7:15 PM", text: "Can you show me a video on this?" },
+      { from: "ai", kind: "video", time: "7:16 PM", title: "Diffusion Explained Simply", duration: "3:12" },
     ],
   },
   {
     icon: "🌐",
     label: "Any Indian Language",
     messages: [
-      { from: "user", kind: "text", text: "Hindi mein samjhao." },
-      { from: "ai", kind: "text", text: "ज़रूर! प्रकाश संश्लेषण का मतलब है पौधों द्वारा भोजन बनाना।" },
+      { from: "user", kind: "text", time: "5:40 PM", text: "Hindi mein samjhao." },
+      { from: "ai", kind: "text", time: "5:40 PM", text: "ज़रूर! प्रकाश संश्लेषण का मतलब है पौधों द्वारा भोजन बनाना।" },
     ],
   },
   {
     icon: "📚",
-    label: "Textbook-Cited Answers",
+    label: "NCERT-Grounded Answers",
     messages: [
-      { from: "user", kind: "text", text: "Where is this from?" },
-      { from: "ai", kind: "text", text: "NCERT Class 10 Science, Chapter 6 — Life Processes, page 122." },
+      { from: "user", kind: "text", time: "5:42 PM", text: "Where is this from?" },
+      { from: "ai", kind: "text", time: "5:42 PM", text: "Straight from your NCERT textbook — Class 10 Science, Chapter 6: Life Processes, page 122." },
     ],
   },
   {
     icon: "📊",
     label: "Progress Tracking",
     messages: [
-      { from: "user", kind: "text", text: "my progress" },
-      { from: "ai", kind: "text", text: "📈 82% accuracy this week — up from 74% last week. Keep going!" },
+      { from: "user", kind: "text", time: "9:00 AM", text: "my progress" },
+      { from: "ai", kind: "text", time: "9:00 AM", text: "📈 82% accuracy this week — up from 74% last week. Keep up the great work!" },
     ],
   },
 ];
@@ -237,6 +240,7 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
               className={`landing-chat-bubble landing-chat-bubble-${m.from}${m.kind !== "text" ? " landing-chat-bubble-media" : ""}`}
             >
               <ChatBubbleContent msg={m} />
+              <span className="landing-chat-time">{m.time}</span>
             </div>
           ))}
           {typing && (
@@ -396,7 +400,7 @@ export default function Join() {
             </p>
             <ul className="landing-trust-pills">
               <li>🔒 Safe &amp; Moderated</li>
-              <li>🎓 Curriculum Aligned</li>
+              <li>🎓 NCERT Aligned</li>
               <li>⏱️ 24/7 Availability</li>
             </ul>
             <AnimatedChatDemo scenarios={CHAT_SCENARIOS} />
