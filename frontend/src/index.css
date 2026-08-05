@@ -899,6 +899,11 @@ label {
    green/white bubble scheme and header bar deliberately echo WhatsApp's
    own visual language since that's literally where this product lives. */
 .landing-chat-preview {
+  /* Pins this as an intentionally light-styled component so Chromium's
+     forced/auto-dark-mode heuristics (present on some Android Chrome
+     configs) don't wash out the hardcoded white/WhatsApp-green bubble
+     colors below — real WhatsApp bubbles never respond to OS dark mode. */
+  color-scheme: light;
   background: #e5ddd5;
   border-radius: 16px;
   overflow: hidden;
