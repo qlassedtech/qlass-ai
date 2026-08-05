@@ -1129,21 +1129,36 @@ label {
   color: #667;
 }
 
-/* Video reply — a thumbnail with a centered play glyph and a duration
-   badge, plus a title line, mirroring how the bot actually links a
-   matched YouTube video today. */
+/* Video reply — a topic-illustrated thumbnail (a large watermark icon for
+   what the video is actually about, e.g. 🧪 for a diffusion explainer)
+   with a centered play glyph and a duration badge, plus a title line,
+   mirroring how the bot actually links a matched YouTube video today. */
 .landing-chat-video-thumb {
   width: 100%;
   height: 110px;
   border-radius: 6px;
   background: linear-gradient(135deg, #2b3ec4, #4f46e5);
   position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+.landing-chat-video-thumb-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  opacity: 0.35;
+  filter: grayscale(1) brightness(2);
+}
+
 .landing-chat-video-play {
+  position: relative;
+  z-index: 1;
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -1154,6 +1169,7 @@ label {
   justify-content: center;
   font-size: 13px;
   padding-left: 2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .landing-chat-video-duration {

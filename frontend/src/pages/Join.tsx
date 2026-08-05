@@ -26,7 +26,7 @@ type ChatMsg =
   | { from: string; kind: "image"; caption: string; time: string }
   | { from: string; kind: "voice"; duration: string; time: string }
   | { from: string; kind: "pdf"; filename: string; meta: string; time: string }
-  | { from: string; kind: "video"; title: string; duration: string; time: string };
+  | { from: string; kind: "video"; title: string; duration: string; time: string; thumb: string };
 
 // A rotating set of realistic exchanges, each demonstrating one capability
 // from FEATURES — the fastest way to signal "this is a genuine AI tutor"
@@ -86,7 +86,7 @@ const CHAT_SCENARIOS: { icon: string; label: string; messages: ChatMsg[] }[] = [
     label: "Video Explanations",
     messages: [
       { from: "user", kind: "text", time: "7:15 PM", text: "Can you show me a video on this?" },
-      { from: "ai", kind: "video", time: "7:16 PM", title: "Diffusion Explained Simply", duration: "3:12" },
+      { from: "ai", kind: "video", time: "7:16 PM", title: "Diffusion Explained Simply", duration: "3:12", thumb: "🧪" },
     ],
   },
   {
@@ -163,6 +163,7 @@ function ChatBubbleContent({ msg }: { msg: ChatMsg }) {
     return (
       <div className="landing-chat-video">
         <div className="landing-chat-video-thumb" aria-hidden="true">
+          <span className="landing-chat-video-thumb-icon">{msg.thumb}</span>
           <span className="landing-chat-video-play">▶</span>
           <span className="landing-chat-video-duration">{msg.duration}</span>
         </div>
