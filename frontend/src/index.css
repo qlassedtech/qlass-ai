@@ -746,9 +746,36 @@ label {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   margin-bottom: 32px;
-  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  .landing-brandbar {
+    gap: 8px;
+  }
+
+  /* School stays left, "Powered by" stays right — matching the desktop
+     layout — instead of wrapping to a stacked second row on narrow
+     screens, which read as broken rather than intentional. */
+  .landing-brandbar-school {
+    min-width: 0;
+  }
+
+  .landing-brandbar-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .landing-powered-by-chip {
+    flex-shrink: 0;
+    padding: 5px 10px 5px 8px;
+  }
+
+  .landing-powered-by-chip span {
+    display: none;
+  }
 }
 
 .landing-brandbar-school {
@@ -831,20 +858,41 @@ label {
    Character.AI's own landing page is a headline and a sign-up gate with
    nothing in between; the feature grid here is supporting content for
    people who scroll further, not a gate the primary action sits behind. */
+/* Three grid areas instead of two — headline, form, and demo (trust pills
+   + chat mockup) can each be positioned independently per breakpoint. On
+   mobile this puts the signup form right after the headline, ahead of the
+   large chat demo, so the primary action doesn't require scrolling past
+   the whole mockup first. */
 .landing-hero-split {
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
-  gap: 48px;
-  /* start, not center — with a fixed-height chat body this no longer
-     matters for stability, but it also means the form's top edge lines up
-     with the headline instead of floating at an arbitrary vertical offset. */
+  grid-template-areas:
+    "headline form"
+    "demo     form";
+  gap: 20px 48px;
   align-items: start;
   margin-bottom: 48px;
+}
+
+.landing-hero-headline {
+  grid-area: headline;
+}
+
+.landing-hero-demo {
+  grid-area: demo;
+}
+
+.landing-hero-form {
+  grid-area: form;
 }
 
 @media (max-width: 860px) {
   .landing-hero-split {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "headline"
+      "form"
+      "demo";
     text-align: center;
   }
 }
@@ -862,7 +910,7 @@ label {
   border-radius: 999px;
 }
 
-.landing-hero-text h1 {
+.landing-hero-headline h1 {
   font-size: 44px;
   line-height: 1.08;
   margin: 20px 0 14px;
@@ -871,12 +919,12 @@ label {
 }
 
 @media (max-width: 860px) {
-  .landing-hero-text h1 {
+  .landing-hero-headline h1 {
     font-size: 34px;
   }
 }
 
-.landing-hero-text p {
+.landing-hero-headline p {
   color: var(--text-muted);
   font-size: 17px;
   line-height: 1.5;
@@ -885,7 +933,7 @@ label {
 }
 
 @media (max-width: 860px) {
-  .landing-hero-text p {
+  .landing-hero-headline p {
     margin: 0 auto 24px;
   }
 }
@@ -976,13 +1024,24 @@ label {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* Fixed (not min-) height, with scroll for the rare overflow — some
+  /* Fixed (not min-) height, with scroll as a safety net only — some
      scenarios show 2 messages, others 4, and letting the box grow/shrink
      with content changed the hero column's height every few seconds,
-     which visibly shifted the signup form up and down beside it. */
-  height: 280px;
+     which visibly shifted the signup form up and down beside it. Tall
+     enough that every scenario fits without scrolling on desktop; mobile
+     gets extra room since the same text wraps to more lines at that width
+     and would otherwise auto-scroll away the top of a photo/video bubble
+     before it's even been seen. */
+  height: 320px;
   overflow-y: auto;
+  scrollbar-width: thin;
   transition: opacity 0.35s ease;
+}
+
+@media (max-width: 480px) {
+  .landing-chat-body {
+    height: 450px;
+  }
 }
 
 .landing-chat-body-fading {

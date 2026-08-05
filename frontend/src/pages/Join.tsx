@@ -418,7 +418,7 @@ export default function Join() {
         )}
 
         <div className="landing-hero-split">
-          <div className="landing-hero-text">
+          <div className="landing-hero-headline">
             <span className="landing-eyebrow">AI-Powered Academic Support</span>
             <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
             <p>
@@ -426,6 +426,13 @@ export default function Join() {
                 ? `${schoolName} students receive round-the-clock academic support from a dedicated AI tutor, directly on WhatsApp.`
                 : "Round-the-clock, step-by-step academic support — directly on WhatsApp. No app to download, no waiting for a reply."}
             </p>
+          </div>
+          {/* On mobile this sits right after the headline, before the trust
+              pills/demo — a signup form buried below a full chat mockup
+              meant scrolling past the whole demo before any action was
+              possible. Desktop keeps it beside the hero via grid areas. */}
+          <div className="landing-hero-form" id="signup">{registrationForm}</div>
+          <div className="landing-hero-demo">
             <ul className="landing-trust-pills">
               <li>🔒 Safe &amp; Moderated</li>
               <li>🎓 NCERT Aligned</li>
@@ -433,7 +440,6 @@ export default function Join() {
             </ul>
             <AnimatedChatDemo scenarios={CHAT_SCENARIOS} />
           </div>
-          <div className="landing-hero-form" id="signup">{registrationForm}</div>
         </div>
 
         <FeatureGrid features={FEATURES} />
