@@ -11,6 +11,7 @@ from app.services.document_client import extract_text_from_document
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.phone import normalize_phone
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
 from app.services.rate_limit import is_otp_rate_limited
 from app.services.referral import REFERRAL_SIGNUP_BONUS
@@ -59,23 +60,25 @@ def check_phone(body: CheckPhoneRequest, db: Session = Depends(get_db)):
     than one role over time (e.g. a teacher who later becomes a parent
     contact) — teacher login always takes priority.
     """
-    if db.query(Teacher).filter(Teacher.phone == body.phone).first():
+    phone = normalize_phone(body.phone)
+    if db.query(Teacher).filter(Teacher.phone == phone).first():
         return {"login_type": "password"}
-    if db.query(Parent).filter(Parent.phone == body.phone).first():
+    if db.query(Parent).filter(Parent.phone == phone).first():
         return {"login_type": "parent_otp"}
     return {"login_type": "otp"}
 
 
 @router.post("/student-app/auth/request-otp")
 async def request_otp(body: CheckPhoneRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("student_login_request", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("student_login_request", phone):
         raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
-    if db.query(Teacher).filter(Teacher.phone == body.phone).first():
+    if db.query(Teacher).filter(Teacher.phone == phone).first():
         raise HTTPException(status_code=400, detail="This number has a teacher account — use password login instead")
-    if db.query(Parent).filter(Parent.phone == body.phone).first():
+    if db.query(Parent).filter(Parent.phone == phone).first():
         raise HTTPException(status_code=400, detail="This number is registered as a parent contact — use the parent login instead")
-    otp = await generate_and_store_otp("student_login", body.phone)
-    await send_whatsapp_message(body.phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
+    otp = await generate_and_store_otp("student_login", phone)
+    await send_whatsapp_message(phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
     return {"sent": True}
 
 
@@ -88,19 +91,20 @@ class VerifyOtpRequest(BaseModel):
 
 @router.post("/student-app/auth/verify-otp")
 async def verify_student_otp(body: VerifyOtpRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("student_login_verify", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("student_login_verify", phone):
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
-    if not await verify_otp("student_login", body.phone, body.otp):
+    if not await verify_otp("student_login", phone, body.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
     student = (
         db.query(Student)
-        .filter(Student.phone == body.phone, Student.is_staff_profile.is_(False))
+        .filter(Student.phone == phone, Student.is_staff_profile.is_(False))
         .order_by(Student.id.desc())
         .first()
     )
     if not student:
-        student = create_student_profile(db, body.phone, body.name or "New Student", get_qlass_direct_centre_id(db))
+        student = create_student_profile(db, phone, body.name or "New Student", get_qlass_direct_centre_id(db))
         if body.referral_code:
             referrer = db.query(Student).filter(Student.referral_code == body.referral_code).first()
             if referrer:

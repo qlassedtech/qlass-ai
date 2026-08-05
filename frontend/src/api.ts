@@ -2,6 +2,22 @@
 // see .env.example. Falls back to localhost for local dev with no .env.
 export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
+// Mirrors app.services.phone.normalize_phone exactly — every phone stored
+// in this codebase is 91-prefixed, digits only. Without this, a real
+// teacher/parent/student typing their number without "91" gets silently
+// treated as an unrecognized phone (confirmed live: an admin who typed
+// "9031003985" instead of "919031003985" was routed into the STUDENT
+// signup flow instead of being recognized as a teacher). Applied before
+// any phone leaves the login page, but the backend re-applies the same
+// normalization independently — never trust client-side normalization
+// alone for something a lookup depends on.
+export function normalizePhone(raw: string): string {
+  const digits = Array.from(raw)
+    .filter((ch) => ch >= "0" && ch <= "9")
+    .join("");
+  return digits.length === 10 ? `91${digits}` : digits;
+}
+
 function getToken(): string | null {
   return localStorage.getItem("token");
 }

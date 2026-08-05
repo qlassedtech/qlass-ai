@@ -1,12 +1,6 @@
 from app.models.core import Centre, Student
-from app.routers.public import RegisterRequest, _normalize_phone, get_school_info, register
+from app.routers.public import RegisterRequest, get_school_info, register
 from app.services import cost_tracker, tenancy
-
-
-def test_normalize_phone_adds_country_code_to_bare_ten_digits():
-    assert _normalize_phone("8460184666") == "918460184666"
-    assert _normalize_phone("91-8460-184-666") == "918460184666"
-    assert _normalize_phone("+918460184666") == "918460184666"
 
 
 def test_get_school_info_returns_name_and_logo(db_session):

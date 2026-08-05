@@ -20,6 +20,7 @@ from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilo
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
 from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
 from app.services.school_statement import generate_school_statement_pdf
@@ -176,7 +177,7 @@ def _get_scoped_student_or_404(db: Session, teacher: Teacher, student_id: int) -
 
 @router.post("/auth/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    teacher = db.query(Teacher).filter(Teacher.phone == normalize_phone(body.phone)).first()
     if not teacher or not teacher.password_hash or not verify_password(body.password, teacher.password_hash):
         raise HTTPException(status_code=401, detail="Invalid phone or password")
     token = create_access_token(teacher.id)
@@ -198,13 +199,14 @@ async def request_teacher_otp(body: TeacherPhoneRequest, db: Session = Depends(g
     them), since OTP-only signup for a portal role with real permissions
     would let anyone claim an account just by knowing a phone number.
     """
-    if await is_otp_rate_limited("teacher_login_request", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("teacher_login_request", phone):
         raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
-    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
-    otp = await generate_and_store_otp("teacher_login", body.phone)
-    await send_whatsapp_message(body.phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
+    otp = await generate_and_store_otp("teacher_login", phone)
+    await send_whatsapp_message(phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
     return {"sent": True}
 
 
@@ -215,11 +217,12 @@ class VerifyTeacherOtpRequest(BaseModel):
 
 @router.post("/auth/verify-teacher-otp")
 async def verify_teacher_otp(body: VerifyTeacherOtpRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("teacher_login_verify", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("teacher_login_verify", phone):
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
-    if not await verify_otp("teacher_login", body.phone, body.otp):
+    if not await verify_otp("teacher_login", phone, body.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
-    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
     token = create_access_token(teacher.id)
@@ -244,7 +247,8 @@ def register_school(body: RegisterSchoolRequest, db: Session = Depends(get_db)):
     afterward from the portal (see POST /admin/teachers), not through this
     endpoint again.
     """
-    if db.query(Teacher).filter(Teacher.phone == body.admin_phone).first():
+    admin_phone = normalize_phone(body.admin_phone)
+    if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
     centre = Centre(name=body.school_name, city=body.city)
@@ -254,7 +258,7 @@ def register_school(body: RegisterSchoolRequest, db: Session = Depends(get_db)):
     school_billing.add_trial_credits(db, centre.id)
 
     teacher = Teacher(
-        name=body.admin_name, phone=body.admin_phone,
+        name=body.admin_name, phone=admin_phone,
         password_hash=hash_password(body.password), role="admin", centre_id=centre.id,
     )
     db.add(teacher)
@@ -921,7 +925,8 @@ async def create_teacher(
         raise HTTPException(status_code=403, detail="Only admins can add teacher accounts")
     if body.role not in ("teacher", "admin"):
         raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'admin'")
-    if db.query(Teacher).filter(Teacher.phone == body.phone).first():
+    phone = normalize_phone(body.phone)
+    if db.query(Teacher).filter(Teacher.phone == phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
     if teacher.role == "admin":
@@ -936,7 +941,7 @@ async def create_teacher(
                 raise HTTPException(status_code=403, detail="That school is not part of your organization")
 
     new_teacher = Teacher(
-        name=body.name, phone=body.phone, password_hash=hash_password(body.password),
+        name=body.name, phone=phone, password_hash=hash_password(body.password),
         role=body.role, centre_id=centre_id,
     )
     db.add(new_teacher)
@@ -948,9 +953,9 @@ async def create_teacher(
     # itself fails.
     try:
         await send_whatsapp_message(
-            body.phone,
+            phone,
             f"Welcome to Qlass, {body.name}! 🎉 An account has been set up for you on the Qlass "
-            f"Partner Console.\n\nLog in with:\nPhone: {body.phone}\nPassword: {body.password}\n\n"
+            f"Partner Console.\n\nLog in with:\nPhone: {phone}\nPassword: {body.password}\n\n"
             f"You can change your password any time from the login page's \"Forgot password?\" link.",
         )
     except Exception:

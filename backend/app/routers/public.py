@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.core import Student
 from app.services import cost_tracker, tenancy
+from app.services.phone import normalize_phone
 from app.services.whatsapp_client import send_broadcast_template, send_whatsapp_message
 
 router = APIRouter()
@@ -24,18 +25,6 @@ REGISTRATION_TEMPLATE_NAME = "student_signup_activation"
 # school-provisioned OTP web signups (see tenancy.DEFAULT_FEATURES).
 SELF_SIGNUP_FEATURES = {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
 
-
-def _normalize_phone(raw: str) -> str:
-    """
-    Stored consistently with every other phone in this codebase — 91-
-    prefixed, digits only, no +/spaces/dashes. Accepts a bare 10-digit
-    Indian mobile number (what a signup form realistically collects) or
-    one already carrying the country code.
-    """
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) == 10:
-        return f"91{digits}"
-    return digits
 
 
 @router.get("/public/school-info")
@@ -60,7 +49,7 @@ class RegisterRequest(BaseModel):
 @router.post("/public/register")
 async def register(body: RegisterRequest, db: Session = Depends(get_db)):
     name = body.name.strip() or "New Student"
-    phone = _normalize_phone(body.phone)
+    phone = normalize_phone(body.phone)
     if len(phone) < 12:  # "91" + 10 digits
         return {"success": False, "error": "Please enter a valid 10-digit WhatsApp number"}
 

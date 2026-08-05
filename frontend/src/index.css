@@ -833,3 +833,18 @@ label {
   color: var(--text-muted);
   font-weight: 300;
 }
+
+.button-secondary {
+  background: transparent;
+  background-image: none;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  width: 100%;
+  margin-top: 10px;
+}
+
+.button-secondary:hover {
+  background: var(--accent-lighter);
+  box-shadow: none;
+}

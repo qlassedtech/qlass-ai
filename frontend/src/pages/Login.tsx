@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { absoluteUrl, api, parentApi, publicApi, setParentToken, setStudentToken, setToken } from "../api";
+import { absoluteUrl, api, normalizePhone, parentApi, publicApi, setParentToken, setStudentToken, setToken } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
 
 type Step = "phone" | "password" | "otp" | "parent_otp" | "teacher_otp";
@@ -32,15 +32,17 @@ export default function Login() {
     e.preventDefault();
     setError(null);
     setLoading(true);
+    const normalized = normalizePhone(phone);
+    setPhone(normalized);
     try {
-      const { login_type } = await api.checkPhone(phone);
+      const { login_type } = await api.checkPhone(normalized);
       if (login_type === "password") {
         setStep("password");
       } else if (login_type === "parent_otp") {
-        await parentApi.requestOtp(phone);
+        await parentApi.requestOtp(normalized);
         setStep("parent_otp");
       } else {
-        await api.requestStudentOtp(phone);
+        await api.requestStudentOtp(normalized);
         setStep("otp");
       }
     } catch (err) {
@@ -212,17 +214,9 @@ export default function Login() {
         </button>
 
         {step === "password" && (
-          <p className="auth-links">
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                handleTeacherOtpRequest();
-              }}
-            >
-              Login with WhatsApp OTP instead
-            </a>
-          </p>
+          <button type="button" className="button-secondary" disabled={loading} onClick={handleTeacherOtpRequest}>
+            Login with WhatsApp OTP instead
+          </button>
         )}
 
         {step !== "phone" && (

@@ -10,6 +10,7 @@ from app.services import cost_tracker
 from app.services.consent import CONSENT_STATEMENT, has_given_consent, record_consent
 from app.services.otp import generate_and_store_otp, verify_otp
 from app.services.parent_auth import create_parent_access_token, get_current_parent
+from app.services.phone import normalize_phone
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage
 from app.services.rate_limit import is_otp_rate_limited
 from app.services.whatsapp_client import send_whatsapp_message
@@ -29,15 +30,16 @@ async def request_parent_otp(body: PhoneRequest, db: Session = Depends(get_db)):
     so an unrecognized phone here just means "not linked yet," not "create
     a new account."
     """
-    if await is_otp_rate_limited("parent_login_request", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("parent_login_request", phone):
         raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
-    parent = db.query(Parent).filter(Parent.phone == body.phone).first()
+    parent = db.query(Parent).filter(Parent.phone == phone).first()
     if not parent:
         raise HTTPException(
             status_code=404, detail="This number isn't linked to a student yet — ask your school to add it"
         )
-    otp = await generate_and_store_otp("parent_login", body.phone)
-    await send_whatsapp_message(body.phone, f"Your Qlass Learning parent login code is *{otp}*. It expires in 10 minutes.")
+    otp = await generate_and_store_otp("parent_login", phone)
+    await send_whatsapp_message(phone, f"Your Qlass Learning parent login code is *{otp}*. It expires in 10 minutes.")
     return {"sent": True}
 
 
@@ -48,12 +50,13 @@ class VerifyOtpRequest(BaseModel):
 
 @router.post("/parent-app/auth/verify-otp")
 async def verify_parent_otp(body: VerifyOtpRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("parent_login_verify", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("parent_login_verify", phone):
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
-    if not await verify_otp("parent_login", body.phone, body.otp):
+    if not await verify_otp("parent_login", phone, body.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
-    parent = db.query(Parent).filter(Parent.phone == body.phone).first()
+    parent = db.query(Parent).filter(Parent.phone == phone).first()
     if not parent:
         raise HTTPException(status_code=404, detail="Parent account not found")
 
