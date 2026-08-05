@@ -21,6 +21,13 @@ const FEATURES = [
   { icon: "📚", title: "Grounded in Your Textbook", text: "Answers are drawn directly from your syllabus, with the exact chapter cited — never a generic guess." },
 ];
 
+type ChatMsg =
+  | { from: string; kind: "text"; text: string }
+  | { from: string; kind: "image"; caption: string }
+  | { from: string; kind: "voice"; duration: string }
+  | { from: string; kind: "pdf"; filename: string; meta: string }
+  | { from: string; kind: "video"; title: string; duration: string };
+
 // A rotating set of realistic exchanges, each demonstrating one capability
 // from FEATURES — the fastest way to signal "this is a genuine AI tutor"
 // is to show the conversation itself (see Character.AI's own landing page:
@@ -28,74 +35,140 @@ const FEATURES = [
 // several scenarios turns the single static screenshot into something that
 // actually demonstrates the product's breadth, GIF-style, without leaving
 // the hero.
-const CHAT_SCENARIOS = [
+const CHAT_SCENARIOS: { icon: string; label: string; messages: ChatMsg[] }[] = [
   {
     icon: "🕐",
     label: "Round-the-Clock Help",
     messages: [
-      { from: "user", text: "I don't understand Newton's third law." },
-      { from: "ai", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
-      { from: "user", text: "Is that how a rocket works?" },
-      { from: "ai", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward." },
+      { from: "user", kind: "text", text: "I don't understand Newton's third law." },
+      { from: "ai", kind: "text", text: "For every action, there is an equal and opposite reaction. When you push against a wall, it pushes back on you with equal force." },
+      { from: "user", kind: "text", text: "Is that how a rocket works?" },
+      { from: "ai", kind: "text", text: "Exactly. The rocket pushes exhaust gas downward, and the gas pushes the rocket upward." },
     ],
   },
   {
     icon: "📸",
     label: "Photo Doubt Solving",
     messages: [
-      { from: "user", text: "📷 Photo attached — Question 4" },
-      { from: "ai", text: "Got it — I can read the question. Here's the solution, step by step:\n1) Identify the given values\n2) Apply the formula\n3) x = 12" },
+      { from: "user", kind: "image", caption: "Question 4" },
+      { from: "ai", kind: "text", text: "Got it — I can read the question. Here's the solution, step by step:\n1) Identify the given values\n2) Apply the formula\n3) x = 12" },
     ],
   },
   {
     icon: "🎙️",
     label: "Ask By Voice",
     messages: [
-      { from: "user", text: "🎤 Voice note · 0:14" },
-      { from: "ai", text: "Here's the explanation — sending it back as a voice note too 🔊" },
+      { from: "user", kind: "voice", duration: "0:14" },
+      { from: "ai", kind: "voice", duration: "0:22" },
     ],
   },
   {
     icon: "📄",
     label: "Full Homework Upload",
     messages: [
-      { from: "user", text: "📄 Homework.pdf attached" },
-      { from: "ai", text: "Found 8 questions in your worksheet. Starting with Question 1..." },
+      { from: "user", kind: "pdf", filename: "Homework.pdf", meta: "8 questions" },
+      { from: "ai", kind: "text", text: "Found 8 questions in your worksheet. Starting with Question 1..." },
     ],
   },
   {
     icon: "📝",
     label: "Scored Quizzes",
     messages: [
-      { from: "user", text: "Quiz me on photosynthesis." },
-      { from: "ai", text: "Q1: Which gas do plants release during photosynthesis?\nA) Carbon dioxide  B) Oxygen  C) Nitrogen" },
+      { from: "user", kind: "text", text: "Quiz me on photosynthesis." },
+      { from: "ai", kind: "text", text: "Q1: Which gas do plants release during photosynthesis?\nA) Carbon dioxide  B) Oxygen  C) Nitrogen" },
+    ],
+  },
+  {
+    icon: "🎬",
+    label: "Video Explanations",
+    messages: [
+      { from: "user", kind: "text", text: "Can you show me a video on this?" },
+      { from: "ai", kind: "video", title: "Diffusion Explained Simply", duration: "3:12" },
     ],
   },
   {
     icon: "🌐",
     label: "Any Indian Language",
     messages: [
-      { from: "user", text: "Hindi mein samjhao." },
-      { from: "ai", text: "ज़रूर! प्रकाश संश्लेषण का मतलब है पौधों द्वारा भोजन बनाना।" },
+      { from: "user", kind: "text", text: "Hindi mein samjhao." },
+      { from: "ai", kind: "text", text: "ज़रूर! प्रकाश संश्लेषण का मतलब है पौधों द्वारा भोजन बनाना।" },
     ],
   },
   {
     icon: "📚",
     label: "Textbook-Cited Answers",
     messages: [
-      { from: "user", text: "Where is this from?" },
-      { from: "ai", text: "NCERT Class 10 Science, Chapter 6 — Life Processes, page 122." },
+      { from: "user", kind: "text", text: "Where is this from?" },
+      { from: "ai", kind: "text", text: "NCERT Class 10 Science, Chapter 6 — Life Processes, page 122." },
     ],
   },
   {
     icon: "📊",
     label: "Progress Tracking",
     messages: [
-      { from: "user", text: "my progress" },
-      { from: "ai", text: "📈 82% accuracy this week — up from 74% last week. Keep going!" },
+      { from: "user", kind: "text", text: "my progress" },
+      { from: "ai", kind: "text", text: "📈 82% accuracy this week — up from 74% last week. Keep going!" },
     ],
   },
 ];
+
+// A short WhatsApp-style voice-note waveform — a fixed bar-height pattern
+// rather than random per render, so it looks the same every time a voice
+// message appears instead of jittering.
+const VOICE_WAVE_HEIGHTS = [6, 12, 18, 10, 20, 14, 8, 16, 22, 12, 9, 17, 11, 6];
+
+function ChatBubbleContent({ msg }: { msg: ChatMsg }) {
+  if (msg.kind === "image") {
+    return (
+      <div className="landing-chat-media">
+        <div className="landing-chat-media-thumb" aria-hidden="true">
+          🖼️
+        </div>
+        <span className="landing-chat-media-caption">{msg.caption}</span>
+      </div>
+    );
+  }
+  if (msg.kind === "voice") {
+    return (
+      <div className="landing-chat-voice">
+        <span className="landing-chat-voice-play" aria-hidden="true">
+          ▶
+        </span>
+        <span className="landing-chat-voice-wave" aria-hidden="true">
+          {VOICE_WAVE_HEIGHTS.map((h, i) => (
+            <span key={i} style={{ height: `${h}px` }} />
+          ))}
+        </span>
+        <span className="landing-chat-voice-duration">{msg.duration}</span>
+      </div>
+    );
+  }
+  if (msg.kind === "pdf") {
+    return (
+      <div className="landing-chat-file">
+        <span className="landing-chat-file-icon" aria-hidden="true">
+          📄
+        </span>
+        <div className="landing-chat-file-info">
+          <span className="landing-chat-file-name">{msg.filename}</span>
+          <span className="landing-chat-file-meta">{msg.meta}</span>
+        </div>
+      </div>
+    );
+  }
+  if (msg.kind === "video") {
+    return (
+      <div className="landing-chat-video">
+        <div className="landing-chat-video-thumb" aria-hidden="true">
+          <span className="landing-chat-video-play">▶</span>
+          <span className="landing-chat-video-duration">{msg.duration}</span>
+        </div>
+        <span className="landing-chat-video-title">{msg.title}</span>
+      </div>
+    );
+  }
+  return <>{msg.text}</>;
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -104,7 +177,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // into a looping, GIF-like demo of the product's range of features.
 function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
   const [scenarioIndex, setScenarioIndex] = useState(0);
-  const [visible, setVisible] = useState<{ from: string; text: string }[]>([]);
+  const [visible, setVisible] = useState<ChatMsg[]>([]);
   const [typing, setTyping] = useState(false);
   const [fading, setFading] = useState(false);
 
@@ -159,8 +232,11 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
         </div>
         <div className={`landing-chat-body${fading ? " landing-chat-body-fading" : ""}`}>
           {visible.map((m, i) => (
-            <div key={i} className={`landing-chat-bubble landing-chat-bubble-${m.from}`}>
-              {m.text}
+            <div
+              key={i}
+              className={`landing-chat-bubble landing-chat-bubble-${m.from}${m.kind !== "text" ? " landing-chat-bubble-media" : ""}`}
+            >
+              <ChatBubbleContent msg={m} />
             </div>
           ))}
           {typing && (
