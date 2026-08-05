@@ -3,7 +3,7 @@ Regression tests for the cross-tenant bugs found during the post-build
 audit — these must never silently come back.
 """
 from app.models.core import Centre, Student, Teacher
-from app.services.tenancy import get_or_create_linked_student, create_student_profile
+from app.services.tenancy import find_centre_by_slug, get_or_create_linked_student, create_student_profile, slugify_centre_name
 
 
 def _make_school(db_session, name):
@@ -11,6 +11,20 @@ def _make_school(db_session, name):
     db_session.add(centre)
     db_session.commit()
     return centre
+
+
+def test_slugify_centre_name_matches_url_friendly_form():
+    assert slugify_centre_name("Sunrise Public School") == "sunrise-public-school"
+    assert slugify_centre_name("Qlass Direct") == "qlass-direct"
+
+
+def test_find_centre_by_slug_matches_case_insensitively(db_session):
+    centre = _make_school(db_session, "Sunrise Public School")
+
+    found = find_centre_by_slug(db_session, "Sunrise-Public-School")
+    assert found is not None
+    assert found.id == centre.id
+    assert find_centre_by_slug(db_session, "no-such-school") is None
 
 
 def test_bulk_upload_style_lookup_is_scoped_to_own_school(db_session):

@@ -6,7 +6,7 @@ from app.services.retrieval import RetrievedChunk
 # set (not open-ended labels) so a classifier miss degrades safely to
 # "other" (treated as a normal tutoring message) rather than an
 # unrecognized label breaking downstream routing.
-INTENTS = ("menu", "progress", "referral", "teacher_help", "quiz_stop", "other")
+INTENTS = ("menu", "progress", "credit_usage", "referral", "teacher_help", "quiz_stop", "other")
 
 _CLASSIFY_MAX_TOKENS = 100
 _EXCERPT_PREVIEW_CHARS = 300
@@ -29,6 +29,10 @@ _SYSTEM_PROMPT = (
     "progress — asking how they're doing, their score, or a progress/performance "
     "report (e.g. \"how am I doing\", \"my progress\", \"what is my performance\", "
     "\"kaisa kar raha hoon\", \"mera score kya hai\").\n"
+    "credit_usage — asking about their AI credit/wallet balance, how much they've "
+    "used or have left, or their plan status (e.g. \"credit usage\", \"how many "
+    "credits do I have\", \"my balance\", \"kitna credit bacha hai\") — NOT the same "
+    "as progress above (that's about learning performance, this is about billing).\n"
     "referral — asking about referring/inviting a friend for credits (e.g. "
     "\"refer a friend\", \"referral code\", \"invite karna hai\").\n"
     "teacher_help — explicitly asking to talk to, contact, or get help from "
@@ -47,13 +51,20 @@ _SYSTEM_PROMPT = (
     "choose other.\n\n"
     "wants_quiz / quiz_topic — true if the student is asking to be QUIZZED (a short "
     "ad-hoc test) on something right now (e.g. \"quiz me on circular motion\", \"test "
-    "me on this\", \"give me a quiz\"). quiz_topic is the actual topic to quiz on: if "
+    "me on this\", \"give me a quiz\"). Look for this request ANYWHERE in the message, "
+    "not just as the whole message — a leading acknowledgment of something else first "
+    "(\"Got it. Please provide me a quiz\", \"Thanks! Now quiz me\", \"Ok, give me a "
+    "quiz on this\") is still a real quiz request and must not be missed just because "
+    "it isn't the only thing said (confirmed live: \"Got it. Please provide me a quiz\" "
+    "was wrongly classified as wants_quiz=no, so the student never got the real scored "
+    "quiz — instead the tutor just improvised a fake one in plain chat, with no real "
+    "scoring or progress tracking). quiz_topic is the actual topic to quiz on: if "
     "the student named a specific topic, use it; if they used a vague reference "
     "(\"quiz on the same\", \"quiz me on this\") or gave no topic at all (\"quiz me "
-    "now\", \"give me the quiz\"), resolve it yourself using the \"Last discussed "
-    "topic\" context provided in the message below — output that resolved topic "
-    "name directly, never the literal vague words. If wants_quiz is no, or no topic "
-    "can be resolved at all, quiz_topic is NONE.\n\n"
+    "now\", \"give me the quiz\", \"Got it. Please provide me a quiz\"), resolve it "
+    "yourself using the \"Last discussed topic\" context provided in the message below "
+    "— output that resolved topic name directly, never the literal vague words. If "
+    "wants_quiz is no, or no topic can be resolved at all, quiz_topic is NONE.\n\n"
     "wants_mock_test / mock_test_topic — true if the student is asking for a longer, "
     "timed, board-exam-style practice test (e.g. \"mock test\", \"give me a full mock "
     "exam\", \"board exam practice on optics\"), as opposed to the short ad-hoc quiz "

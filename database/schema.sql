@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS students (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_students_phone ON students(phone);
+CREATE INDEX IF NOT EXISTS idx_students_centre_id ON students(centre_id);
 
 CREATE TABLE IF NOT EXISTS parents (
     id SERIAL PRIMARY KEY,
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS teachers (
     photo_url TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_teachers_organization ON teachers(organization_id);
+CREATE INDEX IF NOT EXISTS idx_teachers_centre_id ON teachers(centre_id);
 
 CREATE TABLE IF NOT EXISTS subjects (
     id SERIAL PRIMARY KEY,
@@ -265,6 +267,7 @@ CREATE TABLE IF NOT EXISTS credit_events (
     external_ref TEXT UNIQUE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_credit_events_student_created ON credit_events(student_id, created_at);
 
 -- Separate ledger from credit_events (per-student) — teacher-facing tools
 -- like the workbook PDF generator and Gamma presentations are billed to

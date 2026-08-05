@@ -5,7 +5,7 @@ from app.services.llm_client import LLMResult
 
 
 def test_every_intent_label_is_in_the_closed_set():
-    assert set(INTENTS) == {"menu", "progress", "referral", "teacher_help", "quiz_stop", "other"}
+    assert set(INTENTS) == {"menu", "progress", "credit_usage", "referral", "teacher_help", "quiz_stop", "other"}
 
 
 def _fake_classify(raw_text):

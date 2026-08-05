@@ -698,3 +698,138 @@ label {
   background-clip: text;
   color: transparent;
 }
+
+/* --- Public self-registration landing page (pages/Join.tsx) --- */
+
+.landing-page {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 8% -5%, rgba(43, 62, 196, 0.16), transparent 42%),
+    radial-gradient(circle at 100% 8%, rgba(28, 42, 143, 0.10), transparent 38%),
+    radial-gradient(circle at 90% 100%, rgba(43, 62, 196, 0.12), transparent 42%),
+    var(--bg);
+  padding: 40px 20px 64px;
+}
+
+.landing-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(43, 62, 196, 0.16) 1px, transparent 1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: radial-gradient(circle at 50% 20%, black, transparent 62%);
+  mask-image: radial-gradient(circle at 50% 20%, black, transparent 62%);
+  pointer-events: none;
+}
+
+.landing-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+.landing-hero {
+  text-align: center;
+  margin-bottom: 40px;
+}
+
+.landing-hero h1 {
+  font-size: 34px;
+  margin: 20px 0 8px;
+  letter-spacing: -0.02em;
+}
+
+.landing-hero p {
+  color: var(--text-muted);
+  font-size: 16px;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 44px;
+}
+
+.feature-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.feature-card .feature-icon {
+  font-size: 26px;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.feature-card h3 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.feature-card p {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.landing-form-card {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 36px 32px;
+  text-align: center;
+}
+
+.landing-form-card h2 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+.landing-form-card .muted {
+  margin-bottom: 22px;
+  font-size: 13px;
+}
+
+.landing-form-card label {
+  text-align: left;
+}
+
+.landing-success {
+  text-align: center;
+  padding: 12px 0;
+}
+
+.landing-success .landing-success-icon {
+  font-size: 40px;
+  display: block;
+  margin-bottom: 12px;
+}
+
+.landing-school-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.landing-school-logos .logo-preview {
+  width: 76px;
+  height: 76px;
+  border-radius: 14px;
+}
+
+.landing-logos-x {
+  font-size: 20px;
+  color: var(--text-muted);
+  font-weight: 300;
+}

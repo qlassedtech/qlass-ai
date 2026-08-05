@@ -664,3 +664,22 @@ export const parentApi = {
       body: JSON.stringify({ confirm: true }),
     }) as Promise<{ requested: boolean; requested_at: string }>,
 };
+
+// No auth token attached on purpose — the self-registration landing page
+// (see pages/Join.tsx) is reachable by anyone with the link, logged in or
+// not, so it deliberately doesn't go through request()'s token-attaching
+// logic (harmless either way since the backend endpoints don't check auth,
+// but this keeps intent obvious).
+export const publicApi = {
+  schoolInfo: (school: string) =>
+    fetch(`${API_BASE}/public/school-info?school=${encodeURIComponent(school)}`).then((res) => res.json()) as Promise<{
+      name: string | null;
+      logo_url: string | null;
+    }>,
+  register: (data: { name: string; phone: string; school?: string }) =>
+    fetch(`${API_BASE}/public/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }).then((res) => res.json()) as Promise<{ success: boolean; already_registered?: boolean; error?: string }>,
+};

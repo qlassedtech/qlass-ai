@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.models.core import Centre, Student
 from app.services import cost_tracker
 from app.services.referral import generate_referral_code
+from app.services.text_utils import tokenize_words
 
 # A student who signs up directly (via WhatsApp or the web app) without any
 # school having enrolled them first still needs a tenant to belong to —
@@ -21,6 +22,27 @@ def get_qlass_direct_centre_id(db: Session) -> int | None:
         centre = db.query(Centre).filter(Centre.name == QLASS_DIRECT_CENTRE_NAME).first()
         _qlass_direct_centre_id = centre.id if centre else None
     return _qlass_direct_centre_id
+
+
+def slugify_centre_name(name: str) -> str:
+    """
+    URL/text-friendly form of a centre name (e.g. "Sunrise Public School"
+    -> "sunrise-public-school") — shared by the public landing-page link
+    (app.routers.public) and the WhatsApp click-to-chat link (app.routers.
+    whatsapp's "Hi school:<slug>" pre-filled greeting), so a school gets
+    exactly one identifier regardless of which channel's link it uses.
+    Reuses the existing plain-character-scan tokenizer rather than a
+    regex, same as every other text-processing helper in this codebase.
+    """
+    return "-".join(tokenize_words(name))
+
+
+def find_centre_by_slug(db: Session, slug: str) -> Centre | None:
+    slug = slug.lower()
+    for centre in db.query(Centre).all():
+        if slugify_centre_name(centre.name) == slug:
+            return centre
+    return None
 
 
 def default_board_for_centre(db: Session, centre_id: int | None) -> str | None:
@@ -55,14 +77,20 @@ def default_school_for_centre(db: Session, centre_id: int | None) -> str | None:
 
 
 def create_student_profile(
-    db: Session, phone: str, name: str, centre_id: int | None, is_staff_profile: bool = False
+    db: Session, phone: str, name: str, centre_id: int | None, is_staff_profile: bool = False,
+    features: dict | None = None,
 ) -> Student:
-    """Shared by the student web app's OTP signup and a teacher's own
+    """Shared by the student web app's OTP signup, a teacher's own
     lazily-created personal tutor profile (see app.routers.student_app and
-    the /admin/my-tutor endpoints)."""
+    the /admin/my-tutor endpoints), and the public landing-page self-
+    registration form (see app.routers.public). `features` defaults to the
+    conservative DEFAULT_FEATURES (all off) used for school-provisioned
+    signups — pass an explicit dict for a self-signup channel that should
+    unlock everything, same as app.routers.whatsapp's own first-contact
+    flow."""
     student = Student(
-        name=name, phone=phone, features=dict(DEFAULT_FEATURES), centre_id=centre_id,
-        is_staff_profile=is_staff_profile, board=default_board_for_centre(db, centre_id),
+        name=name, phone=phone, features=dict(features) if features is not None else dict(DEFAULT_FEATURES),
+        centre_id=centre_id, is_staff_profile=is_staff_profile, board=default_board_for_centre(db, centre_id),
         school=default_school_for_centre(db, centre_id),
     )
     db.add(student)

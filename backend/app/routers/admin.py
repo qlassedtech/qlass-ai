@@ -7,12 +7,13 @@ import razorpay
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query as QueryParam
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.query import Query
 
 from app.config import settings
 from app.database import get_db
-from app.models.core import Centre, Chapter, ChatHistory, Parent, Question, Quiz, Student, Subject, Teacher
+from app.models.core import Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
@@ -81,8 +82,26 @@ class StudentUpdateRequest(BaseModel):
     parent_name: str | None = None
 
 
-def _student_to_dict(db: Session, student: Student) -> dict:
-    parent = db.query(Parent).filter(Parent.student_id == student.id).first()
+def _student_to_dict(
+    db: Session, student: Student, balance: float | None = None, referral_credits: float | None = None,
+    parent: Parent | None | bool = False,
+) -> dict:
+    """
+    balance/referral_credits/parent are optional pre-fetched values — pass
+    them when serializing a whole page of students (see list_students,
+    which batch-fetches all three in 3 queries total instead of each
+    student here re-querying credit_events/parents individually; confirmed
+    live via a scale audit that a 500-row page was issuing ~1500 queries
+    and taking 1.5-2.3s before this). `parent` uses False (not None) as its
+    "not supplied" sentinel since None is itself a valid pre-fetched
+    "no parent linked" result.
+    """
+    if balance is None:
+        balance = cost_tracker.get_balance(db, student.id)
+    if referral_credits is None:
+        referral_credits = cost_tracker.get_referral_credits_earned(db, student.id)
+    if parent is False:
+        parent = db.query(Parent).filter(Parent.student_id == student.id).first()
     return {
         "id": student.id,
         "name": student.name,
@@ -95,10 +114,10 @@ def _student_to_dict(db: Session, student: Student) -> dict:
         "features": student.features or {},
         "hints_given_count": student.hints_given_count or 0,
         "direct_solutions_count": student.direct_solutions_count or 0,
-        "credit_balance": cost_tracker.get_balance(db, student.id),
+        "credit_balance": balance,
         "centre_id": student.centre_id,
         "referral_code": student.referral_code,
-        "referral_credits_earned": cost_tracker.get_referral_credits_earned(db, student.id),
+        "referral_credits_earned": referral_credits,
         "photo_url": student.photo_url,
         "parent_phone": parent.phone if parent else None,
         "parent_name": parent.name if parent else None,
@@ -259,7 +278,32 @@ def list_students(
     teacher: Teacher = Depends(get_current_teacher),
 ):
     students = _scoped_students(db, teacher).order_by(Student.id).offset(offset).limit(limit).all()
-    return [_student_to_dict(db, s) for s in students]
+    student_ids = [s.id for s in students]
+
+    # Batched — 3 queries total for the whole page instead of 3 per
+    # student (see _student_to_dict's docstring for the scale-audit finding
+    # this replaces).
+    balances = dict(
+        db.query(CreditEvent.student_id, func.coalesce(func.sum(CreditEvent.amount), 0))
+        .filter(CreditEvent.student_id.in_(student_ids))
+        .group_by(CreditEvent.student_id)
+        .all()
+    )
+    referral_credits = dict(
+        db.query(CreditEvent.student_id, func.coalesce(func.sum(CreditEvent.amount), 0))
+        .filter(CreditEvent.student_id.in_(student_ids), CreditEvent.service == cost_tracker.REFERRAL_BONUS_SERVICE)
+        .group_by(CreditEvent.student_id)
+        .all()
+    )
+    parents = {p.student_id: p for p in db.query(Parent).filter(Parent.student_id.in_(student_ids)).all()}
+
+    return [
+        _student_to_dict(
+            db, s, balance=float(balances.get(s.id, 0)), referral_credits=float(referral_credits.get(s.id, 0)),
+            parent=parents.get(s.id),
+        )
+        for s in students
+    ]
 
 
 @router.post("/admin/students")

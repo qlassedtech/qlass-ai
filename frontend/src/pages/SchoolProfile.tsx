@@ -1,10 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import { api, absoluteUrl, type School } from "../api";
 
+// The bot's real WhatsApp Business number (connected via Wati) — the
+// click-to-chat link below opens a chat with this number pre-filled, so a
+// student never has to know or type it themselves.
+const BOT_WHATSAPP_NUMBER = "917827740390";
+
+// Mirrors app.services.tenancy.slugify_centre_name exactly (lowercase
+// letter-runs, joined with hyphens) — a plain character scan rather than a
+// regex, same as the backend's own tokenizer. Computed client-side purely
+// for display; the backend is the actual source of truth when a
+// /join?school=... link is submitted (see tenancy.find_centre_by_slug).
+function slugify(name: string): string {
+  const words: string[] = [];
+  let current = "";
+  for (const ch of name.toLowerCase()) {
+    if (ch >= "a" && ch <= "z") {
+      current += ch;
+    } else if (current) {
+      words.push(current);
+      current = "";
+    }
+  }
+  if (current) words.push(current);
+  return words.join("-");
+}
+
 export default function SchoolProfile() {
   const [school, setSchool] = useState<School | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [waLinkCopied, setWaLinkCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
@@ -29,6 +56,11 @@ export default function SchoolProfile() {
   }
 
   if (!school) return error ? <p className="error">{error}</p> : <p>Loading...</p>;
+
+  const registrationLink = `${window.location.origin}/join?school=${slugify(school.name)}`;
+  const whatsappLink = `https://wa.me/${BOT_WHATSAPP_NUMBER}?text=${encodeURIComponent(
+    `Hi, I am a student from ${school.name}. I am excited to get access to AI tutor`,
+  )}`;
 
   return (
     <div>
@@ -64,6 +96,50 @@ export default function SchoolProfile() {
           <p className="muted" style={{ marginTop: 12, fontSize: 13 }}>
             Shown in your sidebar and stamped on practice-set PDFs generated for your students.
           </p>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 20 }}>
+        <h3 style={{ marginTop: 0 }}>Student Registration Link</h3>
+        <p className="muted" style={{ marginTop: -8, marginBottom: 16, fontSize: 13 }}>
+          Share this with your students — anyone who signs up through it is automatically linked to{" "}
+          {school.name}, gets free AI credits, and an activation message on WhatsApp.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input readOnly value={registrationLink} onFocus={(e) => e.target.select()} />
+          <button
+            type="button"
+            style={{ flexShrink: 0 }}
+            onClick={() => {
+              navigator.clipboard.writeText(registrationLink);
+              setLinkCopied(true);
+              setTimeout(() => setLinkCopied(false), 2000);
+            }}
+          >
+            {linkCopied ? "Copied!" : "Copy Link"}
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 20 }}>
+        <h3 style={{ marginTop: 0 }}>WhatsApp Link</h3>
+        <p className="muted" style={{ marginTop: -8, marginBottom: 16, fontSize: 13 }}>
+          A one-tap alternative to the registration link above — opens WhatsApp directly with a message
+          pre-filled, so a student never fills out a form at all. Attributed to {school.name} automatically.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input readOnly value={whatsappLink} onFocus={(e) => e.target.select()} />
+          <button
+            type="button"
+            style={{ flexShrink: 0 }}
+            onClick={() => {
+              navigator.clipboard.writeText(whatsappLink);
+              setWaLinkCopied(true);
+              setTimeout(() => setWaLinkCopied(false), 2000);
+            }}
+          >
+            {waLinkCopied ? "Copied!" : "Copy Link"}
+          </button>
         </div>
       </div>
     </div>

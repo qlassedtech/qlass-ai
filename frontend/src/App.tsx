@@ -18,6 +18,7 @@ import MyTutor from "./pages/MyTutor";
 import Chat from "./pages/Chat";
 import ParentDashboard from "./pages/ParentDashboard";
 import Pay from "./pages/Pay";
+import Join from "./pages/Join";
 import Layout from "./components/Layout";
 import StudentLayout from "./components/StudentLayout";
 
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/pay" element={<Pay />} />
+        <Route path="/join" element={<Join />} />
         <Route
           element={
             <ProtectedRoute>

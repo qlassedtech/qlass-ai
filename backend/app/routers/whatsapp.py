@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.business_rules import FEATURE_LIMITS
 from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
+from app.models.core import Centre, Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -105,9 +105,10 @@ OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before sugges
 # credibly vouch for the product (asking a brand-new student to refer a
 # friend before they've experienced any value reads as growth-hungry, not
 # confident in the teaching itself).
-MENU_BUTTONS_BASE = ["📊 My Progress"]
+MENU_BUTTONS_BASE = ["📊 My Progress", "💳 Credit Usage"]
 MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
+    "💳 Credit Usage": "credit usage",
     "🎁 Refer a Friend": "refer a friend",
 }
 
@@ -232,6 +233,26 @@ async def _send_localized_notice(db: Session, from_phone: str, student: Student,
     await send_whatsapp_message(from_phone, message)
 
 
+def _extract_school_centre_from_greeting(db: Session, message_text: str) -> Centre | None:
+    """
+    Matches a school's own name appearing in a first-contact WhatsApp
+    message — the school's own click-to-chat link (see SchoolProfile.tsx's
+    "WhatsApp Link") pre-fills "Hi, I am a student from <School Name>. I am
+    excited to get access to AI tutor", deliberately worded as something a
+    real student could plausibly have typed themselves rather than a
+    machine-looking code, so a brand-new signup's very first message
+    attributes them to the right school without needing any web form at
+    all. "Qlass Direct" is excluded — it's Qlass's own internal fallback
+    label (see tenancy.QLASS_DIRECT_CENTRE_NAME), never a real school a
+    student would actually name.
+    """
+    text_lower = message_text.lower()
+    for centre in db.query(Centre).filter(Centre.name != tenancy.QLASS_DIRECT_CENTRE_NAME).all():
+        if centre.name.lower() in text_lower:
+            return centre
+    return None
+
+
 async def _create_new_student(db: Session, from_phone: str, message_text: str = "") -> Student:
     # All features unlocked during the trial (spent down from TRIAL_CREDITS)
     # rather than the conservative all-off default used for school-
@@ -247,7 +268,8 @@ async def _create_new_student(db: Session, from_phone: str, message_text: str = 
         if referrer:
             referred_by_id = referrer.id
 
-    centre_id = get_qlass_direct_centre_id(db)
+    school_centre = _extract_school_centre_from_greeting(db, message_text)
+    centre_id = school_centre.id if school_centre else get_qlass_direct_centre_id(db)
     student = Student(
         name="New Student", phone=from_phone, features=features,
         centre_id=centre_id, referred_by_id=referred_by_id,
@@ -949,7 +971,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
         button_result = await send_whatsapp_buttons(from_phone, menu_greeting, menu_buttons)
         if not button_result.get("sent"):
             fallback_prefix = f"{welcome_back_note}\n\n" if welcome_back_note else ""
-            fallback_commands = "'my progress'" + (", 'refer a friend'," if len(menu_buttons) > 1 else "")
+            fallback_commands = ", ".join(f"'{MENU_BUTTON_TO_COMMAND[b]}'" for b in menu_buttons)
             await send_whatsapp_message(
                 from_phone,
                 f"{fallback_prefix}Just ask me anything to start learning! Or reply with {fallback_commands} "
@@ -981,6 +1003,31 @@ async def _handle_message(db: Session, payload: dict) -> None:
         activity = get_activity_stats(db, student.id)
         coverage = get_chapter_coverage(db, student)
         reply_text = format_progress_message(stats, activity, coverage)
+        detected_lang = student.preferred_language or "en-IN"
+    elif intent == "credit_usage":
+        # No on-demand way to check this used to exist at all — a student
+        # only ever found out their balance passively, via a proactive
+        # 50/75/90% reminder or by hitting zero (see cost_tracker.
+        # get_usage_fraction/usage_threshold_notice). Computed directly
+        # from the real ledger, same "no model-invented numbers" principle
+        # as the progress branch above.
+        if cost_tracker.is_unlimited_active(student):
+            status = cost_tracker.get_unlimited_usage_status(db, student)
+            usage_lines = "\n".join(
+                f"- This {period}: ₹{v['spent']:.2f} of ₹{v['cap']:.0f} used" for period, v in status.items()
+            )
+            wallet_balance = cost_tracker.get_balance(db, student.id)
+            overage_note = (
+                f"\n\nYou also have ₹{wallet_balance:.2f} in usage credits available if you go past "
+                f"your plan's included usage." if wallet_balance > 0 else ""
+            )
+            reply_text = f"You're on the unlimited plan ✨\n\n{usage_lines}{overage_note}"
+        else:
+            balance = cost_tracker.get_balance(db, student.id)
+            reply_text = (
+                f"💳 Your current AI credit balance: ₹{balance:.2f}\n\n"
+                f"Reply \"top up credits\" anytime to add more."
+            )
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "referral":
         # Generated lazily here too (not just at signup) so students
@@ -1300,7 +1347,12 @@ async def _handle_message(db: Session, payload: dict) -> None:
         usage_fraction_after = _current_usage_fraction(db, student)
         usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
         if usage_notice:
-            reply_text = f"{reply_text}\n\n{usage_notice}"
+            # Exactly the moment a student would want the full breakdown,
+            # not just the headline percentage — a natural, low-noise place
+            # to surface the on-demand command rather than a separate
+            # periodic nag (see MENU_BUTTONS_BASE for the other place this
+            # is discoverable, the returning-user "Hi" menu).
+            reply_text = f"{reply_text}\n\n{usage_notice} Reply \"credit usage\" anytime for the full breakdown."
 
     # Translate into the student's language for what actually gets sent.
     # Claude (Haiku) does this first — cheap token cost instead of Sarvam
