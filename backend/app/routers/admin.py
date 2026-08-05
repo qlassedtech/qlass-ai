@@ -3,6 +3,7 @@ import io
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import razorpay
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query as QueryParam
@@ -1541,7 +1542,10 @@ async def generate_presentation(
         context_parts.append(f"({body.board} curriculum)")
     input_text = " ".join(context_parts)
 
-    generation_id = await create_presentation_generation(input_text, body.num_cards)
+    try:
+        generation_id = await create_presentation_generation(input_text, body.num_cards)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Presentation service is temporarily unavailable — please try again shortly")
     return {"generation_id": generation_id}
 
 
@@ -1551,7 +1555,10 @@ async def presentation_status(
 ):
     if not settings.gamma_api_key:
         raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Qlass support")
-    result = await get_generation_status(generation_id)
+    try:
+        result = await get_generation_status(generation_id)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Presentation service is temporarily unavailable — please try again shortly")
 
     # Billed here (from Gamma's own reported credit cost) rather than a
     # flat guess at creation time — real cost varies a lot by slide count
