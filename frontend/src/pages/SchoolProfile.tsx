@@ -76,7 +76,7 @@ export default function SchoolProfile() {
           {school.logo_url ? (
             <img src={absoluteUrl(school.logo_url) || undefined} alt={school.name} />
           ) : (
-            <span className="logo-placeholder">{school.name.charAt(0)}</span>
+            <span className="logo-placeholder" aria-hidden="true">🏫</span>
           )}
         </div>
         <div style={{ flex: 1 }}>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
 
@@ -63,7 +63,7 @@ export default function Join() {
                 {schoolLogo ? (
                   <img src={absoluteUrl(schoolLogo) || undefined} alt={schoolName} />
                 ) : (
-                  <span className="logo-placeholder">{schoolName.charAt(0)}</span>
+                  <span className="logo-placeholder" aria-hidden="true">🏫</span>
                 )}
               </div>
               <span className="landing-logos-x">×</span>
@@ -123,6 +123,10 @@ export default function Join() {
               <button type="submit" disabled={loading}>
                 {loading ? "Please wait..." : "Start Learning Free"}
               </button>
+              <p className="auth-links">
+                Already learning with us?{" "}
+                <Link to={schoolSlug ? `/login?school=${schoolSlug}` : "/login"}>Log in</Link>
+              </p>
             </form>
           )}
         </div>

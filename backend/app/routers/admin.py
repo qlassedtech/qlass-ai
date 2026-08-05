@@ -183,6 +183,49 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
+class TeacherPhoneRequest(BaseModel):
+    phone: str
+
+
+@router.post("/auth/request-teacher-otp")
+async def request_teacher_otp(body: TeacherPhoneRequest, db: Session = Depends(get_db)):
+    """
+    WhatsApp OTP login for teacher/admin accounts — sits ALONGSIDE password
+    login (see /auth/login above), not a replacement; a teacher who forgets
+    their password, or just prefers it, can use this instead. Unlike the
+    student OTP flow, this never creates a new account — a teacher/admin
+    row must already exist (via /auth/register-school or an admin adding
+    them), since OTP-only signup for a portal role with real permissions
+    would let anyone claim an account just by knowing a phone number.
+    """
+    if await is_otp_rate_limited("teacher_login_request", body.phone):
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
+    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
+    otp = await generate_and_store_otp("teacher_login", body.phone)
+    await send_whatsapp_message(body.phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
+    return {"sent": True}
+
+
+class VerifyTeacherOtpRequest(BaseModel):
+    phone: str
+    otp: str
+
+
+@router.post("/auth/verify-teacher-otp")
+async def verify_teacher_otp(body: VerifyTeacherOtpRequest, db: Session = Depends(get_db)):
+    if await is_otp_rate_limited("teacher_login_verify", body.phone):
+        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+    if not await verify_otp("teacher_login", body.phone, body.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
+    token = create_access_token(teacher.id)
+    return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
+
+
 class RegisterSchoolRequest(BaseModel):
     school_name: str
     city: str | None = None

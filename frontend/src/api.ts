@@ -461,6 +461,17 @@ export const api = {
     request("/student-app/auth/check-phone", { method: "POST", body: JSON.stringify({ phone }) }) as Promise<{
       login_type: "password" | "otp" | "parent_otp";
     }>,
+  // Sits alongside password login (api.login) for teacher/admin accounts —
+  // an alternative, not a replacement.
+  requestTeacherOtp: (phone: string) =>
+    request("/auth/request-teacher-otp", { method: "POST", body: JSON.stringify({ phone }) }) as Promise<{
+      sent: boolean;
+    }>,
+  verifyTeacherOtp: (phone: string, otp: string) =>
+    request("/auth/verify-teacher-otp", { method: "POST", body: JSON.stringify({ phone, otp }) }) as Promise<{
+      access_token: string;
+      teacher: { id: number; name: string; role: string };
+    }>,
   requestStudentOtp: (phone: string) =>
     request("/student-app/auth/request-otp", { method: "POST", body: JSON.stringify({ phone }) }) as Promise<{
       sent: boolean;
