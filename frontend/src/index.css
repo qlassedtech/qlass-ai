@@ -330,6 +330,13 @@ label {
   margin: 0 auto 28px;
 }
 
+/* The generic (non-school) /join hero sits beside a large 44px headline —
+   the shared 152px login-page logo size reads as tiny next to it. */
+.landing-logo-large {
+  width: 220px;
+  padding: 14px 24px;
+}
+
 .sidebar-logo {
   width: 132px;
   padding: 8px 14px;
@@ -828,7 +835,10 @@ label {
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
   gap: 48px;
-  align-items: center;
+  /* start, not center — with a fixed-height chat body this no longer
+     matters for stability, but it also means the form's top edge lines up
+     with the headline instead of floating at an arbitrary vertical offset. */
+  align-items: start;
   margin-bottom: 48px;
 }
 
@@ -966,7 +976,12 @@ label {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 220px;
+  /* Fixed (not min-) height, with scroll for the rare overflow — some
+     scenarios show 2 messages, others 4, and letting the box grow/shrink
+     with content changed the hero column's height every few seconds,
+     which visibly shifted the signup form up and down beside it. */
+  height: 280px;
+  overflow-y: auto;
   transition: opacity 0.35s ease;
 }
 
@@ -1020,18 +1035,62 @@ label {
   padding: 8px;
 }
 
-/* Image attachment — a placeholder thumbnail box (no real photo asset,
-   just enough visual weight to read as "a photo was sent") plus a caption,
-   matching WhatsApp's own image-message layout. */
+/* Image attachment — mocked as a photographed worksheet (a paper card with
+   handwriting-like lines and a formula) rather than a generic picture-frame
+   icon, so it reads as "a photo of a real question" instead of an empty
+   placeholder frame. */
 .landing-chat-media-thumb {
   width: 100%;
   height: 110px;
   border-radius: 6px;
-  background: linear-gradient(135deg, #cbd5f5, #e9edfb);
+  background: linear-gradient(160deg, #dfe4ee, #c7ceDe);
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 32px;
+  padding: 12px;
+}
+
+.landing-chat-media-page {
+  width: 100%;
+  height: 100%;
+  background: #fbfaf6;
+  border-radius: 3px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  transform: rotate(-1.2deg);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
+}
+
+.landing-chat-media-line {
+  height: 5px;
+  border-radius: 2px;
+  background: #b7bcc6;
+}
+
+.landing-chat-media-formula {
+  font-size: 10.5px;
+  font-family: "Courier New", monospace;
+  color: #2b3ec4;
+  font-weight: 700;
+}
+
+.landing-chat-media-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .landing-chat-media-caption {
@@ -1434,6 +1493,18 @@ label {
   padding: 12px 26px;
   border-radius: var(--radius);
   text-decoration: none;
+}
+
+.landing-support-line {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 32px 0 0;
+}
+
+.landing-support-line a {
+  color: var(--text-muted);
+  text-decoration: underline;
 }
 
 .landing-success {

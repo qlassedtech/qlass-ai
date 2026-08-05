@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
@@ -125,7 +125,14 @@ function ChatBubbleContent({ msg }: { msg: ChatMsg }) {
     return (
       <div className="landing-chat-media">
         <div className="landing-chat-media-thumb" aria-hidden="true">
-          🖼️
+          <div className="landing-chat-media-page">
+            <span className="landing-chat-media-line" style={{ width: "70%" }} />
+            <span className="landing-chat-media-line" style={{ width: "92%" }} />
+            <span className="landing-chat-media-line" style={{ width: "55%" }} />
+            <span className="landing-chat-media-formula">v = u − gt</span>
+            <span className="landing-chat-media-line" style={{ width: "80%" }} />
+          </div>
+          <span className="landing-chat-media-badge">📷</span>
         </div>
         <span className="landing-chat-media-caption">{msg.caption}</span>
       </div>
@@ -184,6 +191,11 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
   const [visible, setVisible] = useState<ChatMsg[]>([]);
   const [typing, setTyping] = useState(false);
   const [fading, setFading] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: "smooth" });
+  }, [visible, typing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -234,7 +246,7 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
             {scenario.icon} {scenario.label}
           </span>
         </div>
-        <div className={`landing-chat-body${fading ? " landing-chat-body-fading" : ""}`}>
+        <div ref={bodyRef} className={`landing-chat-body${fading ? " landing-chat-body-fading" : ""}`}>
           {visible.map((m, i) => (
             <div
               key={i}
@@ -285,6 +297,7 @@ export default function Join() {
   const [schoolLogo, setSchoolLogo] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [studentClass, setStudentClass] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [registered, setRegistered] = useState<{ alreadyRegistered: boolean } | null>(null);
@@ -303,7 +316,7 @@ export default function Join() {
     setError(null);
     setLoading(true);
     try {
-      const result = await publicApi.register({ name, phone, school: schoolSlug });
+      const result = await publicApi.register({ name, phone, school: schoolSlug, student_class: studentClass || undefined });
       if (!result.success) {
         setError(result.error || "Something went wrong — please try again");
         return;
@@ -351,6 +364,20 @@ export default function Join() {
               required
             />
           </label>
+          <label>
+            Class
+            <select value={studentClass} onChange={(e) => setStudentClass(e.target.value)} required>
+              <option value="" disabled>
+                Select your class
+              </option>
+              {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((c) => (
+                <option key={c} value={c}>
+                  Class {c}
+                </option>
+              ))}
+              <option value="Other">Other</option>
+            </select>
+          </label>
           {error && <p className="error">{error}</p>}
           <button type="submit" disabled={loading}>
             {loading ? "Please wait..." : "Begin Learning for Free"}
@@ -387,7 +414,7 @@ export default function Join() {
             </div>
           </div>
         ) : (
-          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo" style={{ margin: "0 0 16px" }} />
+          <img src="/logo.jpeg" alt="Qlass Learning" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
         )}
 
         <div className="landing-hero-split">
@@ -416,6 +443,15 @@ export default function Join() {
           <p className="muted">Registration takes under a minute — your first reply arrives on WhatsApp right away.</p>
           <a href="#signup" className="button-link">Begin Learning for Free</a>
         </div>
+
+        <p className="landing-support-line">
+          <span>📞 Enquiry/Technical Support —</span>{" "}
+          <a href="tel:+919031003985">+91 9031003985</a>
+          <span> / </span>
+          <a href="tel:+919031003982">+91 9031003982</a>
+          <span> | ✉️ </span>
+          <a href="mailto:mailus@qlass.in">mailus@qlass.in</a>
+        </p>
       </div>
     </div>
   );

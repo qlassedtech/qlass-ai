@@ -44,6 +44,7 @@ class RegisterRequest(BaseModel):
     name: str
     phone: str
     school: str | None = None
+    student_class: str | None = None
 
 
 @router.post("/public/register")
@@ -74,7 +75,9 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
         )
         return {"success": True, "already_registered": True}
 
-    student = tenancy.create_student_profile(db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES))
+    student = tenancy.create_student_profile(
+        db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES), class_name=(body.student_class or "").strip() or None
+    )
 
     await send_broadcast_template(
         REGISTRATION_TEMPLATE_NAME,

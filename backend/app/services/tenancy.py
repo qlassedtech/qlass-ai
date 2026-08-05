@@ -78,7 +78,7 @@ def default_school_for_centre(db: Session, centre_id: int | None) -> str | None:
 
 def create_student_profile(
     db: Session, phone: str, name: str, centre_id: int | None, is_staff_profile: bool = False,
-    features: dict | None = None,
+    features: dict | None = None, class_name: str | None = None,
 ) -> Student:
     """Shared by the student web app's OTP signup, a teacher's own
     lazily-created personal tutor profile (see app.routers.student_app and
@@ -91,7 +91,7 @@ def create_student_profile(
     student = Student(
         name=name, phone=phone, features=dict(features) if features is not None else dict(DEFAULT_FEATURES),
         centre_id=centre_id, is_staff_profile=is_staff_profile, board=default_board_for_centre(db, centre_id),
-        school=default_school_for_centre(db, centre_id),
+        school=default_school_for_centre(db, centre_id), class_=class_name,
     )
     db.add(student)
     db.commit()

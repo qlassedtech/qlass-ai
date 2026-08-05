@@ -703,7 +703,7 @@ export const publicApi = {
       name: string | null;
       logo_url: string | null;
     }>,
-  register: (data: { name: string; phone: string; school?: string }) =>
+  register: (data: { name: string; phone: string; school?: string; student_class?: string }) =>
     fetch(`${API_BASE}/public/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
