@@ -37,7 +37,9 @@ FUN_FACT_MODEL = "claude-haiku-4-5-20251001"  # short, narrow task — cheap tie
 # gone quiet, so it's always outside that window. Needs a real Marketing-
 # category template submitted via the Wati dashboard with exactly one body
 # variable ({{1}}) carrying the nudge text itself, e.g.:
-#   "Hi! {{1}}"
+#   "Hi! {{1}} — Your Qlass AI Tutor"
+# A variable can't be the first or last thing in the body (Meta rejects
+# that) — there must be real static text on both sides.
 # Blank/unapproved template name here means scripts/send_engagement_nudges.py
 # simply can't send yet — not a code bug, an external approval step.
 ENGAGEMENT_NUDGE_TEMPLATE_NAME = "student_engagement_nudge"
