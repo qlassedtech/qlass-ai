@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.models.core import Centre, Document, DocumentChunk, Student
 from app.services import nudges
-from app.services.nudges import NUDGE_TYPES, pick_next_nudge, record_nudge_sent
+from app.services.nudges import NUDGE_TYPES, get_know_more_reply, pick_next_nudge, record_nudge_sent
 
 
 def _make_student(pg_db_session, **overrides):
@@ -27,11 +27,13 @@ def _add_chunk(pg_db_session, content="Water expands when it freezes.", class_="
     pg_db_session.commit()
 
 
-async def test_record_nudge_sent_stamps_the_type_with_a_timestamp(pg_db_session):
+async def test_record_nudge_sent_stamps_the_type_with_a_timestamp_and_detail(pg_db_session):
     student = _make_student(pg_db_session)
-    record_nudge_sent(pg_db_session, student, "social_proof")
-    assert "social_proof" in student.nudges_sent
-    datetime.fromisoformat(student.nudges_sent["social_proof"])  # doesn't raise
+    record_nudge_sent(pg_db_session, student, "feature_highlight", detail="voice")
+    assert "feature_highlight" in student.nudges_sent
+    entry = student.nudges_sent["feature_highlight"]
+    datetime.fromisoformat(entry["sent_at"])  # doesn't raise
+    assert entry["detail"] == "voice"
 
 
 async def test_a_type_sent_recently_is_not_picked_again_within_cooldown(pg_db_session):
@@ -43,9 +45,10 @@ async def test_a_type_sent_recently_is_not_picked_again_within_cooldown(pg_db_se
     fallback to a type still on cooldown.
     """
     student = _make_student(pg_db_session)  # no features enabled, no chunks ingested for class 9
+    now = datetime.now(timezone.utc).isoformat()
     student.nudges_sent = {
-        "social_proof": datetime.now(timezone.utc).isoformat(),
-        "feature_highlight": datetime.now(timezone.utc).isoformat(),
+        "social_proof": {"sent_at": now, "detail": None},
+        "feature_highlight": {"sent_at": now, "detail": None},
     }
     pg_db_session.commit()
 
@@ -56,12 +59,28 @@ async def test_a_type_sent_recently_is_not_picked_again_within_cooldown(pg_db_se
 async def test_a_type_sent_long_ago_is_eligible_again(pg_db_session):
     student = _make_student(pg_db_session)
     old = (datetime.now(timezone.utc) - timedelta(days=nudges.NUDGE_COOLDOWN_DAYS + 1)).isoformat()
-    student.nudges_sent = {t: old for t in NUDGE_TYPES}
+    student.nudges_sent = {t: {"sent_at": old, "detail": None} for t in NUDGE_TYPES}
     pg_db_session.commit()
 
     picked = await pick_next_nudge(pg_db_session, student)
     assert picked is not None
-    assert picked[0] in NUDGE_TYPES
+    nudge_type, message, detail = picked
+    assert nudge_type in NUDGE_TYPES
+
+
+async def test_a_legacy_plain_string_timestamp_is_still_readable(pg_db_session):
+    """
+    nudges_sent used to store a plain ISO string per type before the
+    "Know More" detail tracking was added — existing rows written before
+    that change must not break cooldown checks.
+    """
+    student = _make_student(pg_db_session)
+    old = (datetime.now(timezone.utc) - timedelta(days=nudges.NUDGE_COOLDOWN_DAYS + 1)).isoformat()
+    student.nudges_sent = {t: old for t in NUDGE_TYPES}  # legacy plain-string shape
+    pg_db_session.commit()
+
+    picked = await pick_next_nudge(pg_db_session, student)
+    assert picked is not None
 
 
 async def test_feature_highlight_skips_a_feature_the_student_has_no_access_to(pg_db_session):
@@ -74,7 +93,9 @@ async def test_feature_highlight_offers_an_enabled_unused_feature(pg_db_session)
     student = _make_student(pg_db_session, features={"voice": True, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False})
     highlight = nudges._next_feature_highlight(pg_db_session, student)
     assert highlight is not None
-    assert "voice note" in highlight.lower()
+    feature_key, pitch = highlight
+    assert feature_key == "voice"
+    assert "voice note" in pitch.lower()
 
 
 async def test_fun_fact_returns_none_without_ingested_content_for_the_class(pg_db_session):
@@ -100,5 +121,46 @@ async def test_fun_fact_is_grounded_in_a_real_retrieved_chunk(pg_db_session, mon
         return FakeResult()
 
     monkeypatch.setattr(nudges, "call_llm", fake_call_llm)
-    fact = await nudges._generate_fun_fact(pg_db_session, student)
-    assert fact == FakeResult.text
+    picked = await nudges._generate_fun_fact(pg_db_session, student)
+    assert picked is not None
+    message, chapter = picked
+    assert message == FakeResult.text
+    assert chapter == "States of Matter"
+
+
+async def test_know_more_answers_a_fun_fact_nudge(pg_db_session):
+    student = _make_student(pg_db_session)
+    record_nudge_sent(pg_db_session, student, "fun_fact", detail="States of Matter")
+    reply = get_know_more_reply(student)
+    assert reply is not None
+    assert "States of Matter" in reply
+
+
+async def test_know_more_is_skipped_for_a_feature_highlight_nudge(pg_db_session):
+    """
+    The actual product decision: "Know More" only means something for real
+    knowledge (fun_fact) — a feature pitch or a marketing claim isn't
+    something to "know more" about, so app.routers.whatsapp should let the
+    tap fall through to normal chat instead of getting a canned reply here.
+    """
+    student = _make_student(pg_db_session)
+    record_nudge_sent(pg_db_session, student, "feature_highlight", detail="voice")
+    assert get_know_more_reply(student) is None
+
+
+async def test_know_more_is_skipped_for_a_social_proof_nudge(pg_db_session):
+    student = _make_student(pg_db_session)
+    record_nudge_sent(pg_db_session, student, "social_proof", detail=None)
+    assert get_know_more_reply(student) is None
+
+
+async def test_know_more_uses_the_most_recently_sent_type(pg_db_session):
+    student = _make_student(pg_db_session)
+    record_nudge_sent(pg_db_session, student, "fun_fact", detail="Old Chapter")
+    record_nudge_sent(pg_db_session, student, "feature_highlight", detail="voice")  # most recent
+    assert get_know_more_reply(student) is None
+
+
+async def test_know_more_returns_none_with_no_nudge_history(pg_db_session):
+    student = _make_student(pg_db_session)
+    assert get_know_more_reply(student) is None

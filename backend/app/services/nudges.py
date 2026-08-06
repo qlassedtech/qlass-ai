@@ -18,7 +18,11 @@ app.services.chat_core). Three rotating types:
   attribute a stat to Qlass that isn't one Qlass has actually published.
 
 scripts/send_engagement_nudges.py is the actual cron entry point that
-calls pick_next_nudge per inactive student and sends the result.
+calls pick_next_nudge per inactive student and sends the result. The
+template (see ENGAGEMENT_NUDGE_TEMPLATE_NAME) carries a "Know More" Quick
+Reply button — get_know_more_reply below is what answers that tap (see
+app.routers.whatsapp), tailored to whichever specific nudge was actually
+sent, not a generic reply.
 """
 import random
 from datetime import datetime, timedelta, timezone
@@ -34,15 +38,28 @@ FUN_FACT_MODEL = "claude-haiku-4-5-20251001"  # short, narrow task — cheap tie
 # WhatsApp requires an approved template to message a student outside an
 # active 24h session (see the OTP saga in app.services.otp for the same
 # constraint) — a re-engagement nudge is by definition to someone who's
-# gone quiet, so it's always outside that window. Needs a real Marketing-
-# category template submitted via the Wati dashboard with exactly one body
-# variable ({{1}}) carrying the nudge text itself, e.g.:
-#   "Hi! {{1}} — Your Qlass AI Tutor"
-# A variable can't be the first or last thing in the body (Meta rejects
-# that) — there must be real static text on both sides.
-# Blank/unapproved template name here means scripts/send_engagement_nudges.py
-# simply can't send yet — not a code bug, an external approval step.
+# gone quiet, so it's always outside that window. TWO approved Marketing-
+# category templates, both with one body variable ({{1}}, carrying the
+# nudge text — a variable can't be the first or last thing in the body,
+# Meta rejects that):
+#
+# - ENGAGEMENT_NUDGE_TEMPLATE_NAME ("student_engagement_nudge"): has a
+#   "Know More" Quick Reply button (see get_know_more_reply, called from
+#   app.routers.whatsapp when a student taps it) — used ONLY for a
+#   "fun_fact" nudge, where tapping it actually goes somewhere.
+# - ENGAGEMENT_NUDGE_PLAIN_TEMPLATE_NAME ("student_engagement_nudge_plain"):
+#   same body, no button at all — used for feature_highlight/social_proof,
+#   where "Know More" wouldn't lead anywhere (a pitch or a marketing claim,
+#   not knowledge to go deeper on). Wati has no per-send conditional
+#   button on one template, so this needed to be a second, separately
+#   submitted template rather than a code-level toggle.
 ENGAGEMENT_NUDGE_TEMPLATE_NAME = "student_engagement_nudge"
+ENGAGEMENT_NUDGE_PLAIN_TEMPLATE_NAME = "student_engagement_nudge_plain"
+KNOW_MORE_BUTTON_TEXT = "Know More"
+
+
+def template_for_nudge_type(nudge_type: str) -> str:
+    return ENGAGEMENT_NUDGE_TEMPLATE_NAME if nudge_type == "fun_fact" else ENGAGEMENT_NUDGE_PLAIN_TEMPLATE_NAME
 
 # A type sent recently doesn't repeat until this many days have passed —
 # keeps the rotation varied rather than the same type every single nudge.
@@ -66,18 +83,29 @@ FEATURE_HIGHLIGHTS: list[tuple[str, str]] = [
 # invented, so nothing claimed here is a number Qlass hasn't actually
 # stood behind publicly.
 SOCIAL_PROOF_MESSAGES: list[str] = [
-    "🌟 Qlass students have gone from 40% to 88% in just 45 days. Keep showing up — that could be you!",
-    "🚀 You're one of 10,000+ students learning with Qlass across India. Let's keep your streak going!",
-    "🧠 Students who practice regularly with Qlass show 2× faster retention and 3× longer recall. Consistency is the real secret.",
-    "⏱️ Your AI tutor is here 24×7 with under 30-second replies — no doubt has to wait until tomorrow.",
-    "📈 One Qlass student went 45% → 92% in 45 days: Day 14 was \"concepts click, doubts cleared,\" Day 28 hit a 75% mock score. Small consistent days add up.",
-    "🗣️ You can talk to me in Hindi, Bhojpuri, and 10+ other languages — voice-enabled, so language is never the thing standing between you and understanding.",
-    "✅ 92% of consistent Qlass students hit their target scores. Today's question could be part of getting you there.",
+    "🌟 Students using Qlass AI have gone from 40% to 88% in just 45 days. Keep showing up — that could be you!",
+    "🚀 You're one of 10,000+ students learning with Qlass AI across India. Let's keep your streak going!",
+    "🧠 Students who practice regularly with Qlass AI show 2× faster retention and 3× longer recall. Consistency is the real secret.",
+    "⏱️ Your Qlass AI tutor is here 24×7 with under 30-second replies — no doubt has to wait until tomorrow.",
+    "📈 One Qlass AI student went 45% → 92% in 45 days: Day 14 was \"concepts click, doubts cleared,\" Day 28 hit a 75% mock score. Small consistent days add up.",
+    "🗣️ You can talk to your Qlass AI tutor in Hindi, Bhojpuri, and 10+ other languages — voice-enabled, so language is never the thing standing between you and understanding.",
+    "✅ 92% of consistent Qlass AI students hit their target scores. Today's question could be part of getting you there.",
 ]
-
 
 def _cooldown_cutoff() -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=NUDGE_COOLDOWN_DAYS)
+
+
+def _parse_sent_entry(entry) -> tuple[datetime, str | None]:
+    """
+    nudges_sent values used to be a plain ISO timestamp string; now they're
+    {"sent_at": ..., "detail": ...} so a "Know More" tap can look up what
+    was actually sent (see get_know_more_reply). Reads either shape so
+    existing rows written before this change don't break.
+    """
+    if isinstance(entry, dict):
+        return datetime.fromisoformat(entry["sent_at"]), entry.get("detail")
+    return datetime.fromisoformat(entry), None
 
 
 def _eligible_types(student: Student) -> list[str]:
@@ -85,20 +113,21 @@ def _eligible_types(student: Student) -> list[str]:
     cutoff = _cooldown_cutoff()
     eligible = []
     for nudge_type in NUDGE_TYPES:
-        last_sent = sent.get(nudge_type)
-        if not last_sent:
+        entry = sent.get(nudge_type)
+        if not entry:
             eligible.append(nudge_type)
             continue
-        last_sent_dt = datetime.fromisoformat(last_sent)
+        last_sent_dt, _ = _parse_sent_entry(entry)
         if last_sent_dt < cutoff:
             eligible.append(nudge_type)
     return eligible
 
 
-def _next_feature_highlight(db: Session, student: Student) -> str | None:
+def _next_feature_highlight(db: Session, student: Student) -> tuple[str, str] | None:
     """The first feature this student has access to but hasn't paid for a
     usage event on yet (see app.services.cost_tracker's credit_events
-    ledger — every voice/OCR/image/video/document use writes a row there)."""
+    ledger — every voice/OCR/image/video/document use writes a row there).
+    Returns (feature_key, pitch) so the caller can record which one."""
     for feature_key, pitch in FEATURE_HIGHLIGHTS:
         if not student.has_feature(feature_key):
             continue
@@ -111,17 +140,19 @@ def _next_feature_highlight(db: Session, student: Student) -> str | None:
             # text extraction, no external API cost) — always eligible once
             # the feature flag is on, since there's no usage signal to
             # check against.
-            return pitch
+            return feature_key, pitch
         used = db.execute(
             text("SELECT 1 FROM credit_events WHERE student_id = :sid AND service = ANY(:services) LIMIT 1"),
             {"sid": student.id, "services": list(service_names)},
         ).first()
         if used is None:
-            return pitch
+            return feature_key, pitch
     return None
 
 
-async def _generate_fun_fact(db: Session, student: Student) -> str | None:
+async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] | None:
+    """Returns (message, chapter) so the chapter can be recorded as this
+    nudge's detail — see get_know_more_reply."""
     if not student.class_:
         return None
     row = db.execute(
@@ -147,33 +178,65 @@ async def _generate_fun_fact(db: Session, student: Student) -> str | None:
         [{"role": "user", "content": f"Subject: {subject}\nChapter: {chapter}\n\nExcerpt:\n{content[:1200]}"}],
         model=FUN_FACT_MODEL,
     )
-    return result.text.strip() or None
+    message = result.text.strip()
+    return (message, chapter) if message else None
 
 
-async def pick_next_nudge(db: Session, student: Student) -> tuple[str, str] | None:
+async def pick_next_nudge(db: Session, student: Student) -> tuple[str, str, str | None] | None:
     """
-    Returns (nudge_type, message_text) for the next nudge this student
-    should get, or None if nothing is eligible right now (every type on
-    cooldown, or the only remaining type has no real content to send —
-    e.g. fun_fact with no ingested chunks for this student's class, or
-    feature_highlight when every enabled feature is already in active use).
+    Returns (nudge_type, message_text, detail) for the next nudge this
+    student should get, or None if nothing is eligible right now (every
+    type on cooldown, or the only remaining type has no real content to
+    send — e.g. fun_fact with no ingested chunks for this student's class,
+    or feature_highlight when every enabled feature is already in active
+    use). `detail` is what record_nudge_sent should store alongside the
+    timestamp, so a later "Know More" tap knows what was actually sent.
     """
     eligible = _eligible_types(student)
     random.shuffle(eligible)  # don't always try the same type first when several are eligible
     for nudge_type in eligible:
         if nudge_type == "feature_highlight":
-            message = _next_feature_highlight(db, student)
+            picked = _next_feature_highlight(db, student)
+            if picked:
+                feature_key, message = picked
+                return nudge_type, message, feature_key
         elif nudge_type == "social_proof":
-            message = random.choice(SOCIAL_PROOF_MESSAGES)
+            return nudge_type, random.choice(SOCIAL_PROOF_MESSAGES), None
         else:
-            message = await _generate_fun_fact(db, student)
-        if message:
-            return nudge_type, message
+            picked = await _generate_fun_fact(db, student)
+            if picked:
+                message, chapter = picked
+                return nudge_type, message, chapter
     return None
 
 
-def record_nudge_sent(db: Session, student: Student, nudge_type: str) -> None:
+def record_nudge_sent(db: Session, student: Student, nudge_type: str, detail: str | None = None) -> None:
     sent = dict(student.nudges_sent or {})
-    sent[nudge_type] = datetime.now(timezone.utc).isoformat()
+    sent[nudge_type] = {"sent_at": datetime.now(timezone.utc).isoformat(), "detail": detail}
     student.nudges_sent = sent
     db.commit()
+
+
+def get_know_more_reply(student: Student) -> str | None:
+    """
+    Answers a tap on the nudge template's "Know More" Quick Reply button
+    (see app.routers.whatsapp) — but ONLY when the most recent nudge this
+    student got was an actual "fun_fact" (real knowledge shared, something
+    there's genuinely more to learn about). A feature_highlight or
+    social_proof nudge is a pitch, not knowledge — "know more" doesn't
+    mean anything there, and the button is on every send regardless of
+    type only because it's baked into one shared WhatsApp template (Wati
+    doesn't support a per-send conditional button). Returns None for those
+    cases so app.routers.whatsapp just lets the tap fall through to normal
+    chat instead of forcing a canned reply that doesn't fit.
+    """
+    sent = student.nudges_sent or {}
+    latest_type, latest_dt, latest_detail = None, None, None
+    for nudge_type, entry in sent.items():
+        dt, detail = _parse_sent_entry(entry)
+        if latest_dt is None or dt > latest_dt:
+            latest_type, latest_dt, latest_detail = nudge_type, dt, detail
+
+    if latest_type == "fun_fact" and latest_detail:
+        return f"Want to go deeper on *{latest_detail}*? Just ask me anything about it — I'm ready when you are! 📚"
+    return None

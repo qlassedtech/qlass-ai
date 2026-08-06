@@ -223,7 +223,10 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
     """
     Returns (from_phone, button_text) when an inbound webhook payload is a
     tap on an interactive button/list reply sent by send_whatsapp_buttons,
-    or None otherwise.
+    OR a tap on a Quick Reply button attached to an approved template (see
+    send_template_message/app.services.nudges — a template button is a
+    different message component from our own interactive send, so Wati
+    reports it with a different `type`), or None otherwise.
 
     Confirmed against a real live button tap (2026-07-29): Wati sends
     {"type": "interactive", "text": "<button title>", "waId": "...",
@@ -231,6 +234,11 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
     "listReply": None, ...} — "text" at the top level already carries the
     tapped button's title too, but interactiveButtonReply/listReply are
     checked first since they're the more explicit/structured source.
+
+    A template Quick Reply tap instead arrives as {"type": "button",
+    "text": "<button title>", "waId": "...", "button": {"text": "...",
+    "payload": "..."}} per Wati's webhook docs — same "text" carries the
+    title" pattern, just a different top-level `type`.
     """
     if payload.get("owner") is True:
         return None
@@ -245,7 +253,7 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
         if text:
             return from_phone, text
 
-    if payload.get("type") == "interactive" and payload.get("text"):
+    if payload.get("type") in ("interactive", "button") and payload.get("text"):
         return from_phone, payload["text"]
 
     return None

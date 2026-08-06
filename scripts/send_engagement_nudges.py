@@ -10,11 +10,12 @@ Finds students who've gone quiet for INACTIVITY_DAYS+, skips anyone who's
 opted out, churned, out of credits, or a teacher's own staff profile (a
 teacher testing their own "My AI Tutor" isn't a re-engagement target), and
 sends whichever nudge type app.services.nudges.pick_next_nudge picks for
-each. Requires ENGAGEMENT_NUDGE_TEMPLATE_NAME to be an approved Wati
-template — see app.services.nudges' module docstring for the exact
-{{1}}-variable format needed. Until that template is approved, this script
-runs but every send attempt fails cleanly (send_template_message returns
-{"sent": False, ...}) and is logged, not silently swallowed.
+each — via one of TWO approved Wati templates depending on the type (see
+app.services.nudges.template_for_nudge_type and its module docstring for
+why: only a "fun_fact" nudge's "Know More" button actually goes anywhere).
+Until both templates are approved, this script runs but every send attempt
+fails cleanly (send_template_message returns {"sent": False, ...}) and is
+logged, not silently swallowed.
 """
 import asyncio
 import sys
@@ -28,7 +29,7 @@ from sqlalchemy import text  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Student  # noqa: E402
 from app.services import cost_tracker, school_billing  # noqa: E402
-from app.services.nudges import ENGAGEMENT_NUDGE_TEMPLATE_NAME, pick_next_nudge, record_nudge_sent  # noqa: E402
+from app.services.nudges import pick_next_nudge, record_nudge_sent, template_for_nudge_type  # noqa: E402
 from app.services.whatsapp_client import send_template_message  # noqa: E402
 
 INACTIVITY_DAYS = 2
@@ -89,11 +90,12 @@ async def run() -> None:
             if picked is None:
                 skipped_no_content += 1
                 continue
-            nudge_type, message = picked
+            nudge_type, message, detail = picked
 
-            result = await send_template_message(student.phone, ENGAGEMENT_NUDGE_TEMPLATE_NAME, [{"name": "1", "value": message}])
+            template_name = template_for_nudge_type(nudge_type)
+            result = await send_template_message(student.phone, template_name, [{"name": "1", "value": message}])
             if result.get("sent"):
-                record_nudge_sent(db, student, nudge_type)
+                record_nudge_sent(db, student, nudge_type, detail)
                 sent += 1
             else:
                 print(f"FAILED to send {nudge_type} nudge to student_id={student.id}: {result.get('reason')}")

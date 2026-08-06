@@ -21,6 +21,17 @@ def test_parse_button_reply_returns_none_for_plain_text_message():
     assert parse_incoming_button_reply(payload) is None
 
 
+def test_parse_button_reply_from_template_quick_reply_button_shape():
+    """
+    A tap on a Quick Reply button attached to an approved template (see
+    app.services.nudges' "Know More" button) is a different message
+    component from our own interactive send — Wati reports it with
+    type="button" rather than type="interactive", per Wati's webhook docs.
+    """
+    payload = {"owner": False, "waId": "919000000001", "type": "button", "text": "Know More", "button": {"text": "Know More", "payload": "know-more"}}
+    assert parse_incoming_button_reply(payload) == ("919000000001", "Know More")
+
+
 def test_parse_button_reply_matches_real_confirmed_wati_payload():
     """
     The exact real payload Wati sent for a live button tap on 2026-07-29

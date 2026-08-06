@@ -31,7 +31,7 @@ from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
-from app.services import cost_tracker, school_billing
+from app.services import cost_tracker, nudges, school_billing
 from app.services.escalation import (
     QLASS_SUPPORT_PHONE,
     get_escalation_recipients,
@@ -595,6 +595,27 @@ async def _handle_message(db: Session, payload: dict) -> None:
             from_phone, "Got it — you won't get any more check-in messages from me. You can still chat anytime you like! 👋"
         )
         return
+
+    # A tap on the engagement nudge template's "Know More" Quick Reply
+    # button (see app.services.nudges/scripts/send_engagement_nudges.py) —
+    # arrives as plain button-title text, not through MENU_BUTTON_TO_COMMAND
+    # (this button belongs to an external WhatsApp template, not our own
+    # interactive send), so it's matched directly here rather than via that
+    # dict. Case-insensitive since Wati echoes back the exact button title
+    # rather than anything this codebase controls the casing of.
+    #
+    # The button is on every nudge send regardless of type (one shared
+    # template, no per-send conditional button) but only means something
+    # for a "fun_fact" nudge — get_know_more_reply returns None for a
+    # feature_highlight/social_proof nudge (a pitch, not knowledge), and
+    # this deliberately does NOT `return` in that case: the tap just falls
+    # through into the normal flow below and gets handled like any other
+    # message, rather than forcing a canned reply that wouldn't fit.
+    if probe_text.strip().lower() == nudges.KNOW_MORE_BUTTON_TEXT.lower():
+        know_more_reply = nudges.get_know_more_reply(student)
+        if know_more_reply:
+            await send_whatsapp_message(from_phone, know_more_reply)
+            return
 
     # A school marked "churned" in the sales pipeline (see
     # app.services.sales) is no longer a paying customer — its students
