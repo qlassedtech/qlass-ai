@@ -52,7 +52,7 @@ from app.services.progress_report import (
 )
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
 from app.services.referral import generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer
-from app.services.retrieval import fetch_candidate_chunks
+from app.services.retrieval import fetch_hybrid_candidates
 from app.services.sarvam_client import translate_text
 from app.services.youtube_client import find_best_video
 from app.agents.tutor_agent import TutorAgent
@@ -180,7 +180,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # judge their relevance (relevant_excerpts) — see app.services.
     # retrieval's module docstring for why that judgment rides along here
     # instead of a separate dedicated call.
-    candidate_chunks = fetch_candidate_chunks(db, message_text, student.class_, student.board)
+    candidate_chunks = await fetch_hybrid_candidates(db, message_text, student.class_, student.board)
     classification = await classify_intent(
         message_text, last_discussed_topic=last_topic_context, last_assistant_message=last_assistant_message,
         candidate_chunks=candidate_chunks,

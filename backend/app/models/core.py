@@ -318,6 +318,34 @@ event.listen(
     .execute_if(dialect="postgresql"),
 )
 
+# Voyage-embedding vector column for semantic retrieval (see
+# app.services.embeddings/app.services.retrieval.fetch_semantic_candidates)
+# — same "raw DDL event, not a mapped Column" reasoning as content_tsv
+# above: pgvector's `vector` type is Postgres-only, and the pgvector
+# Python/SQLAlchemy package isn't a dependency here, so this column is
+# written/read via raw SQL (text()) rather than the ORM. Dimension (1024)
+# must match settings.voyage_embedding_dimensions — see
+# database/migrations/0041_add_document_chunk_embeddings.sql, which is the
+# version of this DDL actually applied to any database that already
+# existed before this column did (this event only fires for a table
+# CREATEd fresh via Base.metadata.create_all, e.g. local dev/tests).
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL("CREATE EXTENSION IF NOT EXISTS vector").execute_if(dialect="postgresql"),
+)
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL("ALTER TABLE document_chunks ADD COLUMN embedding vector(1024)").execute_if(dialect="postgresql"),
+)
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL("CREATE INDEX idx_document_chunks_embedding_hnsw ON document_chunks USING hnsw (embedding vector_cosine_ops)")
+    .execute_if(dialect="postgresql"),
+)
+
 
 class ChatHistory(Base):
     __tablename__ = "chat_history"

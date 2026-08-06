@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.embeddings import embed_text, format_vector_literal
 from app.services.text_utils import tokenize_words
 
 # Retrieval uses Postgres full-text search rather than real vector
@@ -98,6 +99,95 @@ def fetch_candidate_chunks(
         RetrievedChunk(content=row[0][:MAX_CHUNK_CHARS], class_=row[1], subject=row[2], chapter=row[3], board=row[4])
         for row in rows
     ]
+
+
+async def fetch_semantic_candidates(
+    db: Session, query_text: str, class_: str | None, board: str | None, limit: int = MAX_CANDIDATES,
+) -> list[RetrievedChunk]:
+    """
+    Same candidate-recall role as fetch_candidate_chunks above, but by
+    cosine similarity over Voyage embeddings (see app.services.embeddings)
+    instead of shared keywords — catches a paraphrased or conceptual
+    question ("why does ice float") that shares no real keyword with the
+    chunk that actually answers it ("density of water in its solid vs
+    liquid state"), which pure full-text search structurally can't.
+
+    Returns [] (never raises) whenever semantic search isn't usable right
+    now — Voyage not configured, the embedding call fails, or this
+    database's document_chunks table has no embedded rows yet (a fresh
+    ingest before scripts/ingest_document.py's embedding step has run, or
+    before the 0041 migration). Full-text search (fetch_candidate_chunks)
+    is always the fallback that keeps working regardless — see
+    app.services.chat_core, which calls both and merges them.
+    """
+    query_embedding = await embed_text(query_text, input_type="query")
+    if query_embedding is None:
+        return []
+    vector_literal = format_vector_literal(query_embedding)
+
+    base_query = """
+        SELECT dc.content, d.class, d.subject, d.chapter, d.board
+        FROM document_chunks dc
+        JOIN documents d ON d.id = dc.document_id
+        WHERE dc.embedding IS NOT NULL
+    """
+    params: dict = {"vector": vector_literal, "limit": limit}
+    scoping = []
+    if class_:
+        scoping.append("d.class = :class_")
+        params["class_"] = class_
+    if board:
+        scoping.append("d.board = :board")
+        params["board"] = board
+
+    sql = (
+        f"{base_query} AND {' AND '.join(scoping)} ORDER BY dc.embedding <=> CAST(:vector AS vector) LIMIT :limit"
+        if scoping
+        else f"{base_query} ORDER BY dc.embedding <=> CAST(:vector AS vector) LIMIT :limit"
+    )
+    try:
+        rows = db.execute(text(sql), params).fetchall()
+    except Exception:
+        # Covers a database that hasn't run the 0041 migration yet (no
+        # `embedding` column at all — a real, expected state for any
+        # environment that hasn't been migrated, not a bug) — full-text
+        # search alone still works in that case.
+        db.rollback()
+        return []
+    return [
+        RetrievedChunk(content=row[0][:MAX_CHUNK_CHARS], class_=row[1], subject=row[2], chapter=row[3], board=row[4])
+        for row in rows
+    ]
+
+
+async def fetch_hybrid_candidates(
+    db: Session, query_text: str, class_: str | None, board: str | None, limit: int = MAX_CANDIDATES,
+) -> list[RetrievedChunk]:
+    """
+    The actual entry point app.services.chat_core uses — merges keyword
+    (fetch_candidate_chunks) and semantic (fetch_semantic_candidates)
+    recall into one deduped candidate list, keyword results first (cheap,
+    always available, and exact-term matches tend to be the most literally
+    on-topic) then semantic results filling any remaining slots. The
+    combined list still only ever produces CANDIDATES — classify_intent's
+    relevant_excerpts judgment (see this module's own docstring) is what
+    decides which of these actually get cited, same as before.
+    """
+    keyword_chunks = fetch_candidate_chunks(db, query_text, class_, board, limit=limit)
+    remaining = limit - len(keyword_chunks)
+    if remaining <= 0:
+        return keyword_chunks
+    semantic_chunks = await fetch_semantic_candidates(db, query_text, class_, board, limit=limit)
+    seen = {chunk.content for chunk in keyword_chunks}
+    merged = list(keyword_chunks)
+    for chunk in semantic_chunks:
+        if len(merged) >= limit:
+            break
+        if chunk.content in seen:
+            continue
+        seen.add(chunk.content)
+        merged.append(chunk)
+    return merged
 
 
 def build_citation_footer(chunks: list[RetrievedChunk]) -> str | None:

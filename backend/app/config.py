@@ -79,6 +79,22 @@ class Settings(BaseSettings):
     # feature can go live. See app.services.gamma_service.
     gamma_api_key: str | None = None
 
+    # Voyage AI (text embeddings for semantic textbook retrieval) — see
+    # app.services.embeddings/app.services.retrieval.fetch_semantic_candidates.
+    # Free tier at https://voyageai.com. Blank until then; semantic
+    # retrieval silently no-ops and the tutor falls back to the existing
+    # Postgres full-text search alone (see app.services.retrieval's module
+    # docstring) — never a hard failure just because this isn't set yet.
+    voyage_api_key: str | None = None
+    voyage_embedding_model: str = "voyage-3.5-lite"
+    # Matryoshka embeddings — Voyage supports truncating to a smaller
+    # dimension at request time without a separate model. 1024 is a
+    # reasonable quality/storage tradeoff for short (~1000-char) textbook
+    # chunks; must match the `vector(N)` column width in
+    # database/migrations/0041_add_document_chunk_embeddings.sql if ever
+    # changed (changing it requires re-embedding every existing chunk).
+    voyage_embedding_dimensions: int = 1024
+
     # Where the frontend portal is actually reachable — needed server-side
     # to build a /pay link to text a parent (the backend has no notion of
     # "the current browser's origin" the way frontend code does).

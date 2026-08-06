@@ -1,5 +1,6 @@
 from app.models.core import Document, DocumentChunk
-from app.services.retrieval import RetrievedChunk, build_citation_footer, fetch_candidate_chunks
+from app.services import retrieval
+from app.services.retrieval import RetrievedChunk, build_citation_footer, fetch_candidate_chunks, fetch_hybrid_candidates
 
 
 def _add_chunk(db, content, class_="9", subject="Science", board="CBSE", chapter="Cell Structure"):
@@ -47,6 +48,48 @@ def test_returns_empty_list_when_nothing_matches(pg_db_session):
 def test_empty_query_returns_empty_list_without_querying(pg_db_session):
     chunks = fetch_candidate_chunks(pg_db_session, "   ", class_="9", board="CBSE")
     assert chunks == []
+
+
+async def test_hybrid_candidates_falls_back_to_keyword_only_when_voyage_not_configured(pg_db_session, monkeypatch):
+    """
+    settings.voyage_api_key is unset in every test/dev environment by
+    default — fetch_hybrid_candidates must still work exactly like plain
+    fetch_candidate_chunks in that case (embed_text short-circuits to None,
+    see app.services.embeddings), not raise or silently drop results.
+    """
+    _add_chunk(pg_db_session, "The cell is the basic structural and functional unit of all living organisms.", class_="9", board="CBSE")
+
+    async def fake_embed_text(text, input_type):
+        return None  # what embed_text actually returns when voyage_api_key isn't set
+
+    monkeypatch.setattr(retrieval, "embed_text", fake_embed_text)
+    chunks = await fetch_hybrid_candidates(pg_db_session, "what is a cell", class_="9", board="CBSE")
+    assert len(chunks) == 1
+    assert "structural and functional unit" in chunks[0].content
+
+
+async def test_hybrid_candidates_adds_semantic_matches_keyword_search_missed(pg_db_session, monkeypatch):
+    """
+    The actual point of adding semantic search: a paraphrase that shares no
+    keyword with the source chunk (so plain full-text search would return
+    nothing for it) still surfaces here once Voyage is "configured" (mocked
+    — no real network call in a unit test).
+    """
+    _add_chunk(pg_db_session, "Water expands when it freezes, so ice is less dense than liquid water.", class_="9", board="CBSE")
+    monkeypatch.setattr(
+        retrieval, "fetch_semantic_candidates",
+        lambda db, q, c, b, limit=8: _fake_semantic_result(),
+    )
+    chunks = await fetch_hybrid_candidates(pg_db_session, "why does ice float", class_="9", board="CBSE")
+    assert len(chunks) == 1
+    assert "less dense" in chunks[0].content
+
+
+async def _fake_semantic_result():
+    return [RetrievedChunk(
+        content="Water expands when it freezes, so ice is less dense than liquid water.",
+        class_="9", subject="Science", chapter="States of Matter", board="CBSE",
+    )]
 
 
 def _chunk(class_="9", subject="Science", chapter="Cell Structure", board="CBSE") -> RetrievedChunk:
