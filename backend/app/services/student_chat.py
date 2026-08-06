@@ -158,9 +158,6 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
         student.preferred_language = detected_lang
         db.commit()
 
-    await evaluate_referral_milestones(db, student)
-    await evaluate_habit_milestones(db, student)
-
     db.add(ChatHistory(student_id=student.id, role="assistant", message=reply_text, agent="tutor"))
     db.commit()
 
@@ -201,5 +198,18 @@ async def process_web_message(db: Session, student: Student, message_text: str) 
     usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
     if usage_notice:
         outgoing_text = f"{outgoing_text}\n\n{usage_notice}"
+
+    if result is not None:
+        # Deliberately last, after outgoing_text is fully built (translation
+        # + citation + video + usage notice) and the reply is about to be
+        # returned to the caller — same fix as app.routers.whatsapp: these
+        # send their own separate WhatsApp message on top of whatever
+        # channel this reply is being returned through (web/app/teacher's
+        # My AI Tutor), and used to run mid-function, adding an extra
+        # blocking WhatsApp round-trip before the actual reply was ready.
+        # Still only for a real tutoring turn (result is not None means the
+        # else branch above ran), not quiz/mock-test/quiz-stop turns.
+        await evaluate_referral_milestones(db, student)
+        await evaluate_habit_milestones(db, student)
 
     return outgoing_text
