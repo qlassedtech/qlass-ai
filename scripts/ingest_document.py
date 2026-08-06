@@ -81,7 +81,7 @@ async def ingest(file_path: str, class_: str, subject: str, chapter: str, board:
     # half-committed chapter.
     embeddings = None
     if settings.voyage_api_key:
-        embeddings = await embed_texts(chunks, input_type="document")
+        embeddings = await embed_texts(chunks, input_type="document", retry_on_rate_limit=True)
         if embeddings is None:
             print("Voyage embedding call failed — ingesting with full-text search only, no semantic vectors this run.")
 
