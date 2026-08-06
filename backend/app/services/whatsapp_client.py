@@ -1,3 +1,4 @@
+import uuid
 from urllib.parse import urlparse, parse_qs
 
 import httpx
@@ -250,29 +251,94 @@ def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
     return None
 
 
+async def send_template_message(to_phone: str, template_name: str, params: list[dict]) -> dict:
+    """
+    Sends an approved WhatsApp template to a single contact — how you
+    *initiate* contact with someone who hasn't messaged recently (unlike
+    send_whatsapp_message, which only works within an existing 24h session).
+
+    Uses Wati's singular /api/v1/sendTemplateMessage endpoint, NOT the bulk
+    /api/v2/sendTemplateMessages endpoint used by send_broadcast_template
+    below — the bulk endpoint silently degrades for this account: it
+    returns {"result": true, "error": null} but flags every receiver
+    isValidWhatsAppNumber: false and never actually delivers, for numbers
+    that demonstrably do have WhatsApp. Confirmed live: this singular
+    endpoint returns validWhatsAppNumber: true and genuinely delivers for
+    the exact same template/number/account. Prefer this for any single-
+    recipient send (OTPs, registration welcome); send_broadcast_template is
+    only for genuine many-recipient broadcasts, where this singular
+    endpoint doesn't apply — but note it inherits the same unverified/
+    possibly-degraded status this function was written to work around.
+
+    `params` — [{"name": "1", "value": "123456"}, ...] for each {{n}}
+    placeholder in the template body, in order.
+    """
+    if not settings.whatsapp_token or not settings.wati_api_endpoint:
+        return {"sent": False, "reason": "Wati credentials not configured in .env"}
+    if not settings.wati_channel_number:
+        return {"sent": False, "reason": "WATI_CHANNEL_NUMBER not configured in .env"}
+
+    url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v1/sendTemplateMessage"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_token}", "Content-Type": "application/json"}
+    payload = {
+        "template_name": template_name,
+        "broadcast_name": f"{template_name}-{uuid.uuid4()}",
+        "channel_number": settings.wati_channel_number,
+        "parameters": params,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, params={"whatsappNumber": to_phone}, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("validWhatsAppNumber", True):
+                return {"sent": False, "reason": f"Wati reports this isn't a valid WhatsApp number: {to_phone}"}
+            return {"sent": True, "response": data}
+    except httpx.HTTPStatusError as exc:
+        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+    except httpx.HTTPError as exc:
+        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
 async def send_broadcast_template(
     template_name: str, broadcast_name: str, receivers: list[dict]
 ) -> dict:
     """
-    Bulk-send an approved WhatsApp template to many contacts at once.
-
-    Unlike send_whatsapp_message (which replies within an existing 24h session),
-    this is how you *initiate* contact with people who haven't messaged you
-    recently — WhatsApp requires a template approved in your Wati account for
-    this; free-form text is not allowed for business-initiated messages.
+    Bulk-send an approved WhatsApp template to many contacts at once — the
+    only reason to prefer this over send_template_message is a genuine
+    many-recipient broadcast (see app.routers.broadcast), where sending one
+    HTTP request per recipient isn't practical.
 
     `receivers` — list of {"whatsappNumber": "91...", "customParams": [{"name": "...", "value": "..."}]}
-    NOTE: verify field names against your Wati account's real bulk-send response
-    once you have an approved template to test with — untested against live Wati.
+    ("localMessageId" is filled in automatically below if omitted.)
+
+    STATUS: unverified for real delivery on this account. A single-
+    recipient test against this endpoint (with channel_number correctly
+    set) returned isValidWhatsAppNumber: false and did not deliver, for a
+    number confirmed to have WhatsApp — see send_template_message's
+    docstring, which is why every single-recipient OTP/registration send
+    was switched to that function instead. Whether this bulk endpoint
+    behaves differently at real scale (many receivers in one call, as
+    opposed to the single-receiver shape tested) is untested — treat any
+    broadcast sent through this function as unconfirmed until checked
+    against a real campaign's actual delivery.
     """
     if not settings.whatsapp_token or not settings.wati_api_endpoint:
         return {"sent": False, "reason": "Wati credentials not configured in .env"}
+    if not settings.wati_channel_number:
+        return {"sent": False, "reason": "WATI_CHANNEL_NUMBER not configured in .env"}
 
     url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v2/sendTemplateMessages"
     headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
+    receivers = [
+        {"localMessageId": str(uuid.uuid4()), **r} if "localMessageId" not in r else r
+        for r in receivers
+    ]
     payload = {
         "template_name": template_name,
         "broadcast_name": broadcast_name,
+        "channel_number": settings.wati_channel_number,
         "receivers": receivers,
     }
 

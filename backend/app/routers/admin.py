@@ -36,7 +36,7 @@ from app.services.teacher_auth import get_current_teacher, hash_password, verify
 from app.services import tenancy
 from app.services.tenancy import get_or_create_linked_student
 from app.services.uploads import save_image_upload
-from app.services.whatsapp_client import send_whatsapp_message, send_broadcast_template
+from app.services.whatsapp_client import send_whatsapp_message, send_template_message
 from app.services.workbook_service import generate_workbook_questions
 from app.services.ocr_client import extract_text_from_image
 from app.services.document_client import extract_text_from_document
@@ -211,12 +211,12 @@ async def request_teacher_otp(body: TeacherPhoneRequest, db: Session = Depends(g
     # 24h WhatsApp session with the bot — a plain send_whatsapp_message
     # session message silently fails to deliver in that case (confirmed
     # live: it reported {"sent": True} while nothing actually arrived), so
-    # this must use the approved Authentication-category template instead,
-    # same as registration's send_broadcast_template.
-    result = await send_broadcast_template(
-        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"teacher-otp-{teacher.id}-{otp}",
-        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
-    )
+    # this must use the approved Authentication-category template instead.
+    # Must be send_template_message (singular endpoint), not
+    # send_broadcast_template — see that function's docstring; the bulk
+    # endpoint silently degrades on this account even with the same
+    # template/number.
+    result = await send_template_message(phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
     if not result.get("sent"):
         raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}

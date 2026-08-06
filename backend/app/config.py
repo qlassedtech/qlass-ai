@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     whatsapp_token: str | None = None
     wati_api_endpoint: str | None = None
     wati_webhook_secret: str | None = None
+    # Required by Wati's v2 sendTemplateMessages API (undocumented until
+    # now — the payload used to omit it entirely, which silently degraded
+    # every template send: Wati accepted the call and returned
+    # {"result": true, "error": null} but flagged every receiver as
+    # isValidWhatsAppNumber: false and never actually delivered anything).
+    # The sending WhatsApp Business number for this Wati account.
+    wati_channel_number: str | None = None
 
     google_service_account_json: str | None = None
     google_drive_root_folder_id: str | None = None

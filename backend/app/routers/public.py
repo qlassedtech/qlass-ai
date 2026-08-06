@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.core import Student
 from app.services import cost_tracker, tenancy
 from app.services.phone import normalize_phone
-from app.services.whatsapp_client import send_broadcast_template, send_whatsapp_message
+from app.services.whatsapp_client import send_template_message, send_whatsapp_message
 
 router = APIRouter()
 
@@ -79,15 +79,18 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
         db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES), class_name=(body.student_class or "").strip() or None
     )
 
-    await send_broadcast_template(
-        REGISTRATION_TEMPLATE_NAME,
-        broadcast_name=f"signup-{student.id}",
-        receivers=[{
-            "whatsappNumber": phone,
-            "customParams": [
-                {"name": "1", "value": student.name},
-                {"name": "2", "value": f"{cost_tracker.TRIAL_CREDITS:.0f}"},
-            ],
-        }],
+    # send_template_message (Wati's singular /api/v1/sendTemplateMessage),
+    # not send_broadcast_template — the bulk endpoint silently degrades on
+    # this account (accepts the call, reports isValidWhatsAppNumber: false,
+    # never delivers) even for a number confirmed to have WhatsApp. This
+    # welcome message is what actually gets a brand-new student to reply
+    # and start using their trial credits, so a swallowed failure here
+    # means a real signup with no idea what to do next.
+    await send_template_message(
+        phone, REGISTRATION_TEMPLATE_NAME,
+        [
+            {"name": "1", "value": student.name},
+            {"name": "2", "value": f"{cost_tracker.TRIAL_CREDITS:.0f}"},
+        ],
     )
     return {"success": True, "already_registered": False}

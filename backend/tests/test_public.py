@@ -18,11 +18,11 @@ def test_get_school_info_returns_name_and_logo(db_session):
 async def test_register_creates_student_with_trial_credits_and_full_features(db_session, monkeypatch):
     sent = []
 
-    async def fake_send_template(template_name, broadcast_name, receivers):
-        sent.append((template_name, receivers))
+    async def fake_send_template(to_phone, template_name, params):
+        sent.append((to_phone, template_name, params))
         return {"sent": True}
 
-    monkeypatch.setattr("app.routers.public.send_broadcast_template", fake_send_template)
+    monkeypatch.setattr("app.routers.public.send_template_message", fake_send_template)
     # get_qlass_direct_centre_id caches the id at module scope across
     # calls/tests — the seeded centre from migration 0020 doesn't exist in
     # this per-test in-memory SQLite DB, so create it here under the exact
@@ -41,17 +41,17 @@ async def test_register_creates_student_with_trial_credits_and_full_features(db_
     assert cost_tracker.get_balance(db_session, student.id) == cost_tracker.TRIAL_CREDITS
     assert student.has_feature("youtube_videos") is True  # full features, not the conservative default
     assert len(sent) == 1
-    template_name, receivers = sent[0]
+    to_phone, template_name, params = sent[0]
     assert template_name == "student_signup_activation"
-    assert receivers[0]["whatsappNumber"] == "918888800001"
-    assert {"name": "1", "value": "Nikhil"} in receivers[0]["customParams"]
+    assert to_phone == "918888800001"
+    assert {"name": "1", "value": "Nikhil"} in params
 
 
 async def test_register_links_to_school_via_slug(db_session, monkeypatch):
-    async def fake_send_template(template_name, broadcast_name, receivers):
+    async def fake_send_template(to_phone, template_name, params):
         return {"sent": True}
 
-    monkeypatch.setattr("app.routers.public.send_broadcast_template", fake_send_template)
+    monkeypatch.setattr("app.routers.public.send_template_message", fake_send_template)
     tenancy._qlass_direct_centre_id = None
     db_session.add(Centre(name=tenancy.QLASS_DIRECT_CENTRE_NAME))
     school = Centre(name="Sunrise Public School", board="CBSE")

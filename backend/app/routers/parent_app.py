@@ -13,7 +13,7 @@ from app.services.parent_auth import create_parent_access_token, get_current_par
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage
 from app.services.rate_limit import is_otp_rate_limited
-from app.services.whatsapp_client import send_broadcast_template
+from app.services.whatsapp_client import send_template_message
 
 router = APIRouter()
 
@@ -43,10 +43,9 @@ async def request_parent_otp(body: PhoneRequest, db: Session = Depends(get_db)):
     # a plain send_whatsapp_message session message can silently fail to
     # deliver in that case, so this uses the approved Authentication-
     # category template instead (same fix as the student/teacher OTP flows).
-    result = await send_broadcast_template(
-        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"parent-otp-{parent.id}-{otp}",
-        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
-    )
+    # Must be send_template_message (singular endpoint), not
+    # send_broadcast_template — see that function's docstring.
+    result = await send_template_message(phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
     if not result.get("sent"):
         raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}

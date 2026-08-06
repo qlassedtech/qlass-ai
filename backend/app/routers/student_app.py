@@ -19,7 +19,7 @@ from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
-from app.services.whatsapp_client import send_broadcast_template
+from app.services.whatsapp_client import send_template_message
 
 router = APIRouter()
 
@@ -82,11 +82,9 @@ async def request_otp(body: CheckPhoneRequest, db: Session = Depends(get_db)):
     # session with the bot — a plain send_whatsapp_message session message
     # can silently fail to deliver in that case, so this uses the approved
     # Authentication-category template instead (same fix as the teacher/
-    # parent OTP flows).
-    result = await send_broadcast_template(
-        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"student-otp-{phone}-{otp}",
-        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
-    )
+    # parent OTP flows). Must be send_template_message (singular endpoint),
+    # not send_broadcast_template — see that function's docstring.
+    result = await send_template_message(phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
     if not result.get("sent"):
         raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}
