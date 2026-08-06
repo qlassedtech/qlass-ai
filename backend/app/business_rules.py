@@ -11,7 +11,7 @@ or limit needs updating.
 
 # Every deduction is charged at (actual provider cost) x MARKUP_MULTIPLIER —
 # covers overhead/margin rather than passing through raw provider cost 1:1.
-MARKUP_MULTIPLIER = 2.0
+MARKUP_MULTIPLIER = 1.1
 
 # Every new student wallet starts with this much free trial credit — Qlass
 # covers it (not a real charge to anyone), so a school can try the product
