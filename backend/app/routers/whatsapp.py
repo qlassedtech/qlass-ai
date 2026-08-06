@@ -7,10 +7,10 @@ from fastapi import APIRouter, Request, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.business_rules import FEATURE_LIMITS
 from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Centre, Student, ChatHistory, TopicProgress, ProcessedWebhookMessage
+from app.models.core import Centre, Student, ProcessedWebhookMessage
+from app.services.chat_core import process_message
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -25,38 +25,23 @@ from app.services.whatsapp_client import (
     send_whatsapp_buttons,
     verify_webhook_auth,
 )
-from app.services.profile_builder import (
-    next_missing_field,
-    should_ask_this_turn,
-)
-from app.services.sarvam_client import transcribe_audio, synthesize_speech, translate_text
+from app.services.sarvam_client import transcribe_audio, synthesize_speech
 from app.services.llm_client import translate_with_claude
 from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
-from app.services.document_client import apply_active_document_pin, extract_text_from_document
-from app.services.youtube_client import find_best_video
+from app.services.document_client import extract_text_from_document
 from app.services import cost_tracker, school_billing
 from app.services.escalation import (
     QLASS_SUPPORT_PHONE,
-    record_hint_outcome,
     get_escalation_recipients,
-    format_escalation_message,
     format_student_requested_help_message,
 )
-from app.services.habit import evaluate_habit_milestones
+from app.services.profile_builder import next_missing_field
 from app.services.rate_limit import is_rate_limited, student_lock
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
-from app.services.referral import (
-    generate_referral_code,
-    extract_referral_code,
-    evaluate_referral_milestones,
-    is_worth_asking_to_refer,
-    REFERRAL_SIGNUP_BONUS,
-)
-from app.services.intent_classifier import classify_intent
-from app.services.retrieval import fetch_candidate_chunks
+from app.services.referral import generate_referral_code, extract_referral_code, REFERRAL_SIGNUP_BONUS
 from app.services.active_profile import (
     classify_profile_routing,
     ProfileRouting,
@@ -64,48 +49,30 @@ from app.services.active_profile import (
     set_active_profile,
     build_disambiguation_prompt,
 )
-from app.services.progress_report import (
-    get_student_stats,
-    get_activity_stats,
-    get_welcome_back_note,
-    get_chapter_coverage,
-    format_progress_message,
-)
-from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
-from app.agents.tutor_agent import TutorAgent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-tutor_agent = TutorAgent()
 
-HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
 WEBHOOK_LEASE_SECONDS = 5 * 60
 WEBHOOK_RETRY_INTERVAL_SECONDS = 30
 WEBHOOK_RETRY_BATCH_SIZE = 100
-WEAK_TOPICS_LIMIT = 5
-OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
 
 # Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
 # in whatsapp_client.py) — each button maps to the same canonical phrase its
 # corresponding typed command already matches, so a button tap is routed
 # through the exact same intent-classification path as if the student had
-# typed it (see classify_intent below) rather than needing its own path.
+# typed it (see app.services.chat_core.process_message, which decides the
+# actual menu content and which buttons to offer) rather than needing its
+# own path.
 #
 # Deliberately no "Talk to Teacher" button here — proactively offering a
 # human escalation option on the AI tutor's own menu undercuts its own
 # credibility (it should be the front line, not routinely pointing to a
 # human). That path stays reachable two ways: the student explicitly types
-# it (still handled below via the teacher_help intent, regardless of any
-# button), or the automatic hint-streak escalation offers it after the
-# student has genuinely struggled (see app.services.escalation).
-#
-# "Refer a Friend" is also NOT always shown — see MENU_BUTTONS_BASE below,
-# it's added dynamically once the student has actually engaged enough to
-# credibly vouch for the product (asking a brand-new student to refer a
-# friend before they've experienced any value reads as growth-hungry, not
-# confident in the teaching itself).
-MENU_BUTTONS_BASE = ["📊 My Progress", "💳 Credit Usage"]
+# it (still handled via the teacher_help intent, regardless of any button),
+# or the automatic hint-streak escalation offers it after the student has
+# genuinely struggled (see app.services.escalation).
 MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
     "💳 Credit Usage": "credit usage",
@@ -156,59 +123,6 @@ def _assistant_voice_gender(student: Student) -> str:
     """
     speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender, settings.sarvam_tts_speaker)
     return "male" if speaker == "shubh" else "female"
-
-
-USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]  # weekly voice/image/video soft-cap warnings only
-
-
-def _weekly_usage_snapshot(db: Session, student: Student) -> dict[str, int]:
-    """
-    One query for every soft-capped service's usage this week, instead of a
-    separate round-trip per feature (voice/image/video checks used to each
-    hit the database independently — up to 3 queries per turn).
-    """
-    if student.phone in FULL_ACCESS_PHONES:
-        return {}
-    all_services = [service for cfg in FEATURE_LIMITS.values() for service in cfg["services"]]
-    return cost_tracker.get_usage_counts_by_service(db, student.id, all_services, "week")
-
-
-def _usage_status(student: Student, feature: str, weekly_counts: dict[str, int]) -> tuple[int, int, str]:
-    cfg = FEATURE_LIMITS[feature]
-    if student.phone in FULL_ACCESS_PHONES:
-        # Caps exist to keep a customer subscription price profitable — they
-        # don't apply to the team's own internal demo/testing numbers.
-        return 0, cfg["max"], cfg["period"]
-    used = sum(weekly_counts.get(service, 0) for service in cfg["services"])
-    return used, cfg["max"], cfg["period"]
-
-
-def _limit_reached_message(feature: str, used: int, limit: int, period: str) -> str:
-    label = FEATURE_LIMITS[feature]["label"]
-    return f"You've used all {limit} {label} for this week — check back next Monday!"
-
-
-def _threshold_notice(feature: str, used: int, limit: int, period: str) -> str | None:
-    label = FEATURE_LIMITS[feature]["label"]
-    for fraction in USAGE_WARNING_FRACTIONS:
-        if used == round(limit * fraction):
-            if fraction >= 1.0:
-                return f"⚠️ That was your last {label[:-1] if label.endswith('s') else label} for this week — more available next Monday."
-            return f"ℹ️ Heads up — you've used {used}/{limit} {label} for this week ({round(fraction * 100)}%)."
-    return None
-
-
-def _current_usage_fraction(db: Session, student: Student) -> float | None:
-    """
-    Thin WhatsApp-specific wrapper around cost_tracker.get_usage_fraction —
-    the only channel-specific wrinkle is skipping FULL_ACCESS_PHONES
-    (internal demo/testing numbers), which has no equivalent concept on the
-    web/app surfaces (see app.services.student_chat, which calls
-    cost_tracker.get_usage_fraction directly).
-    """
-    if student.phone in FULL_ACCESS_PHONES:
-        return None
-    return cost_tracker.get_usage_fraction(db, student)
 
 
 async def _send_localized_notice(db: Session, from_phone: str, student: Student, message: str) -> None:
@@ -588,13 +502,6 @@ async def retry_pending_webhooks() -> None:
 
 
 async def _handle_message(db: Session, payload: dict) -> None:
-    # Whether to reply with synthesized speech. Deliberately NOT set just
-    # because the student's own input happened to be a voice note — a
-    # student who spoke their question may still prefer to read the answer.
-    # Only the tutor's explicit "audio=true" decision (student asked for a
-    # voice reply) turns this on, further down.
-    send_voice_reply = False
-
     from_phone = payload.get("waId")
     if not from_phone:
         return
@@ -825,559 +732,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if not message_text:
         return
 
-    # Computed BEFORE this message is saved, so "days since last message"
-    # reflects the prior session, not this one — otherwise it would always
-    # read as 0 days once this message is in chat_history.
-    welcome_back_note = get_welcome_back_note(db, student.id)
+    result = await process_message(db, student, message_text)
 
-    apply_active_document_pin(db, student, message_text)
-
-    # Pull recent conversation turns *before* saving this message, so the
-    # tutor has context but doesn't see this message twice.
-    prior_rows = (
-        db.query(ChatHistory)
-        .filter(ChatHistory.student_id == student.id)
-        .order_by(ChatHistory.created_at.desc())
-        .limit(HISTORY_TURNS)
-        .all()
-    )
-    history = [{"role": row.role, "content": row.message} for row in reversed(prior_rows)]
-
-    # Save the incoming message
-    incoming_row = ChatHistory(student_id=student.id, role="user", message=message_text, agent="tutor")
-    db.add(incoming_row)
-    db.commit()
-    db.refresh(incoming_row)
-
-    image_prompt = None
-    video_query = None
-    citation = None
-    did_answer_via_llm = False
-    usage_fraction_before = _current_usage_fraction(db, student)
-    # Logged once per turn, before the routing ladder below decides which
-    # branch handles it — the ladder has grown into ~10 branches across
-    # several features (quiz, mock test, escalation, menu, profile
-    # onboarding...), so this is the fastest way to answer "why did the bot
-    # respond that way" from logs alone, without re-reading the whole ladder.
-    logger.info(
-        "turn start phone=%s student_id=%s pending_field=%s active_quiz_id=%s text=%r",
-        from_phone, student.id, student.pending_profile_field, student.active_quiz_id, message_text[:200],
-    )
-    # Resolves "quiz on the same"/"quiz on this" — passed to the classifier
-    # below so it can substitute the real topic itself rather than quizzing
-    # on the literal referential phrase. Prefers last_discussed_topic
-    # (updated on EVERY real tutoring turn, see the LLM branch below) over
-    # TopicProgress, which is only written when a scored check question is
-    # evaluated — relying on TopicProgress alone previously resolved to a
-    # stale topic from an unrelated earlier session whenever the answer to
-    # today's check question and the quiz request arrived in the same
-    # message (confirmed live: "demand and supply" resolved to a leftover
-    # physics topic from hours earlier).
-    last_topic_row = (
-        db.query(TopicProgress.topic)
-        .filter(TopicProgress.student_id == student.id)
-        .order_by(TopicProgress.created_at.desc())
-        .first()
-    )
-    last_topic_context = student.last_discussed_topic or (last_topic_row[0] if last_topic_row else None)
-
-    # A single cheap, deterministic classification call (same pattern as the
-    # tutor's own language classifier) replacing what used to be several
-    # separate hardcoded phrase-lists — one per intent, plus separate regex
-    # for quiz/mock-test/skip detection. Those only ever matched an exact
-    # fixed string (e.g. "my progress", "quiz me on X"), so any other
-    # phrasing of the same request (confirmed live: "what is my
-    # performance") silently fell through to the LLM improvising an answer
-    # instead of the real command. Run for every message that reaches this
-    # point, but only students who already passed the churn/pilot/credit
-    # gates above ever reach here, so this never spends money on a blocked
-    # account.
-    last_assistant_message = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
-    # Candidate chunks (cheap Postgres full-text recall, no LLM cost) are
-    # fetched unconditionally here so classify_intent's single call can
-    # also judge their relevance (relevant_excerpts) — see
-    # app.services.retrieval's module docstring for why that judgment
-    # rides along in this call instead of a separate dedicated one.
-    candidate_chunks = fetch_candidate_chunks(db, message_text, student.class_, student.board)
-    classification = await classify_intent(
-        message_text, last_discussed_topic=last_topic_context, last_assistant_message=last_assistant_message,
-        candidate_chunks=candidate_chunks,
-    )
-    cost_tracker.record_claude_usage(
-        db, classification.llm_result.model, classification.llm_result.input_tokens,
-        classification.llm_result.output_tokens, student.id,
-        cache_write_tokens=classification.llm_result.cache_write_tokens,
-        cache_read_tokens=classification.llm_result.cache_read_tokens,
-    )
-    intent = classification.intent
-    quiz_topic_request = classification.quiz_topic
-    mock_test_request = classification.wants_mock_test
-
-    if intent == "menu" and not student.active_quiz_id:
-        # Free UI affordance — returns immediately without touching
-        # chat_history/credits beyond the classification call above.
-        # Guarded against an active quiz: "help"/"menu" typed mid-quiz
-        # should stay inside the quiz's own answer/skip/stop handling below
-        # rather than being hijacked into the main menu — a stuck student
-        # typing "help" mid-quiz almost certainly means "help with this
-        # question," not "show me the main menu."
-        if not prior_rows:
-            # A student's very first message ever — "My Progress" and
-            # "Refer a Friend" are dead ends with zero history behind them
-            # (confirmed live: a first-time student tapped "My Progress"
-            # and got "you haven't answered any check questions yet").
-            # Skip the returning-user menu entirely and make the first
-            # touch feel like meeting a tutor, not a support bot: greet by
-            # name if we have one, and demonstrate what's possible instead
-            # of just listing commands.
-            first_name = student.name if student.name and student.name != "New Student" else None
-            greeting = f"Hi {first_name}! 👋" if first_name else "Hi! 👋"
-            # Only advertise a capability the student actually has — a
-            # first "wow" moment that turns out broken (e.g. promising
-            # photo help to a student without the OCR feature) is worse
-            # than not mentioning it at all.
-            capability_hints = []
-            if student.has_feature("ocr"):
-                capability_hints.append("send a photo of a tricky homework question")
-            if student.has_feature("voice"):
-                capability_hints.append("send a voice note")
-            if student.has_feature("documents"):
-                capability_hints.append("share a PDF or Word file of your homework")
-            if student.has_feature("youtube_videos"):
-                capability_hints.append("ask for a video explanation")
-            if not capability_hints:
-                capability_sentence = ""
-            elif len(capability_hints) == 1:
-                capability_sentence = f" You can also {capability_hints[0]}."
-            else:
-                capability_sentence = f" You can also {', '.join(capability_hints[:-1])}, or {capability_hints[-1]}."
-            await send_whatsapp_message(
-                from_phone,
-                f"{greeting} I'm your AI tutor — ask me to explain any topic or say \"quiz me on <topic>\" "
-                f"to test yourself.{capability_sentence} What would you like to learn today?",
-            )
-            return
-        # A returning student saying "Hi" after a gap is the single most
-        # common re-entry message — previously only a real tutoring
-        # question got the welcome-back note (spliced in much further down
-        # this ladder), so this exact greeting silently skipped it.
-        menu_greeting = f"{welcome_back_note}\n\nJust ask me anything to start learning, or pick one of these:" \
-            if welcome_back_note else "Hi! Just ask me anything to start learning, or pick one of these:"
-        activity = get_activity_stats(db, student.id)
-        weekly_stats = get_student_stats(db, student.id, days=7)
-        menu_buttons = list(MENU_BUTTONS_BASE)
-        if is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
-            menu_buttons.append("🎁 Refer a Friend")
-        button_result = await send_whatsapp_buttons(from_phone, menu_greeting, menu_buttons)
-        if not button_result.get("sent"):
-            fallback_prefix = f"{welcome_back_note}\n\n" if welcome_back_note else ""
-            fallback_commands = ", ".join(f"'{MENU_BUTTON_TO_COMMAND[b]}'" for b in menu_buttons)
-            await send_whatsapp_message(
-                from_phone,
-                f"{fallback_prefix}Just ask me anything to start learning! Or reply with {fallback_commands} "
-                "or anything else you want to work on.",
-            )
-        return
-
-    if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
-        # An explicit new request in the same message (e.g. "No, quiz me on
-        # circular motion") should win over resolving the pending class-
-        # update nudge via the LLM below — treat it as an implicit decline
-        # (leave the class as-is) and let quiz_topic_request/mock_test_
-        # request start the quiz further down in this same if/elif ladder.
-        student.pending_profile_field = None
-        student.suggested_class = None
-        db.commit()
-
-    if student.active_quiz_id and intent == "quiz_stop":
-        # No extra LLM call beyond the classification above, so available
-        # even if the monthly credit is exhausted (a student shouldn't get
-        # stuck unable to exit a quiz).
-        reply_text = stop_quiz(db, student)
-        detected_lang = student.preferred_language or "en-IN"
-    elif intent == "progress":
-        # Computed directly from real TopicProgress rows — no risk of the
-        # model inventing stats. Checked before the monthly credit-limit
-        # gate since the classification call above already ran regardless.
-        stats = get_student_stats(db, student.id)
-        activity = get_activity_stats(db, student.id)
-        coverage = get_chapter_coverage(db, student)
-        reply_text = format_progress_message(stats, activity, coverage)
-        detected_lang = student.preferred_language or "en-IN"
-    elif intent == "credit_usage":
-        # No on-demand way to check this used to exist at all — a student
-        # only ever found out their balance passively, via a proactive
-        # 50/75/90% reminder or by hitting zero (see cost_tracker.
-        # get_usage_fraction/usage_threshold_notice). Computed directly
-        # from the real ledger, same "no model-invented numbers" principle
-        # as the progress branch above.
-        if cost_tracker.is_unlimited_active(student):
-            status = cost_tracker.get_unlimited_usage_status(db, student)
-            usage_lines = "\n".join(
-                f"- This {period}: ₹{v['spent']:.2f} of ₹{v['cap']:.0f} used" for period, v in status.items()
-            )
-            wallet_balance = cost_tracker.get_balance(db, student.id)
-            overage_note = (
-                f"\n\nYou also have ₹{wallet_balance:.2f} in usage credits available if you go past "
-                f"your plan's included usage." if wallet_balance > 0 else ""
-            )
-            reply_text = f"You're on the unlimited plan ✨\n\n{usage_lines}{overage_note}"
-        else:
-            balance = cost_tracker.get_balance(db, student.id)
-            reply_text = (
-                f"💳 Your current AI credit balance: ₹{balance:.2f}\n\n"
-                f"Reply \"top up credits\" anytime to add more."
-            )
-        detected_lang = student.preferred_language or "en-IN"
-    elif intent == "referral":
-        # Generated lazily here too (not just at signup) so students
-        # created before this feature shipped still get a code the first
-        # time they ask.
-        if not student.referral_code:
-            student.referral_code = generate_referral_code(student.id)
-            db.commit()
-        reply_text = (
-            f"Share your code with a friend — when they message me for the first time and start "
-            f"asking questions, you'll get ₹{cost_tracker.REFERRAL_BONUS:.0f} in AI credits "
-            f"(up to ₹{cost_tracker.REFERRAL_LIFETIME_CAP:.0f} total)! 🎉\n\n"
-            f"Your code: *{student.referral_code}*\n"
-            f"Tell them to just message me and mention this code in their first message."
-        )
-        detected_lang = student.preferred_language or "en-IN"
-    elif intent == "teacher_help":
-        # Checked before the monthly credit-limit gate below (same
-        # reasoning as progress/referral): asking for a human teacher
-        # shouldn't be blocked just because AI credits ran out. Distinct
-        # from the automatic hint-streak escalation in app.services.
-        # escalation — this is the student explicitly asking, not a
-        # system-detected struggle pattern.
-        teacher_recipients = get_escalation_recipients(db, student.centre_id)
-        for recipient in teacher_recipients:
-            await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
-        # Same real gap as the credit-exhausted "talk to teacher" bypass
-        # above — a self-signup student with no school on file has zero
-        # registered teachers to notify; don't claim otherwise.
-        reply_text = (
-            "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. "
-            "What else can I help you with in the meantime?"
-            if teacher_recipients
-            else f"You're not linked to a school on our records, so I can't reach a teacher for you — "
-                 f"call Qlass support directly at {QLASS_SUPPORT_PHONE} instead! What else can I help you with?"
-        )
-        detected_lang = student.preferred_language or "en-IN"
-    elif student.active_quiz_id:
-        # Treat this message as the answer to the current quiz question.
-        reply_text = await handle_quiz_answer(db, student, message_text, classification.quiz_skip)
-        detected_lang = student.preferred_language or "en-IN"
-    elif mock_test_request:
-        mock_topic = classification.mock_test_topic or "a mixed review covering everything we've discussed so far"
-        reply_text = await start_mock_test(db, student, mock_topic)
-        detected_lang = student.preferred_language or "en-IN"
-    elif quiz_topic_request:
-        reply_text = await start_quiz(db, student, quiz_topic_request)
-        detected_lang = student.preferred_language or "en-IN"
-    elif (
-        db.query(ChatHistory.id)
-        .filter(
-            ChatHistory.student_id == student.id, ChatHistory.role == "user",
-            ChatHistory.id > incoming_row.id,
-        )
-        .first()
-        is not None
-    ):
+    if not result.reply_text:
         # A newer message from this same student already arrived while this
-        # one was waiting on student_lock (e.g. three rapid-fire texts like
-        # "Then what will I do with theory?" / "No use" / "Bye" sent within
-        # seconds of each other) — confirmed live: each got its own
-        # independent LLM reply, producing a disjointed pile-up of answers
-        # that didn't track what the student was actually saying as one
-        # thought. Skip generating a reply for this stale message entirely;
-        # it's already in chat_history, so the newer message's own LLM call
-        # sees it as context and can respond to the whole exchange at once.
-        # Never applies to a quiz answer (that's the separate
-        # student.active_quiz_id branch above, not this one) — every quiz
-        # answer still needs its own grading feedback.
+        # one was being processed — chat_core already skipped generating a
+        # reply for this stale message (it's already in chat_history, so the
+        # newer message's own reply sees it as context and responds to the
+        # whole exchange at once). Nothing to send.
         return
-    else:
-        did_answer_via_llm = True
 
-        # Whether this message actually answers a pending onboarding question
-        # (name/class/board/school) or the class-update nudge is decided by
-        # the LLM itself below (pending_profile_field/pending_class_confirm
-        # -> result["profile_answer"]/result["class_confirm"]), not a local
-        # regex heuristic — a plain word-matching check here previously
-        # mis-swallowed mixed messages (e.g. "I don't know. Nikhil", or
-        # "12.. no" declining a class-update nudge while also attempting a
-        # maths answer), discarding real content entirely. So neither is
-        # cleared here; both are resolved after the LLM call instead.
-        pending_class_confirm = (
-            student.suggested_class if student.pending_profile_field == "class_confirm" else None
-        )
-        pending_profile_field = (
-            student.pending_profile_field if student.pending_profile_field != "class_confirm" else None
-        )
-
-        # Surface topics this student has previously gotten wrong, so the
-        # tutor can naturally revisit them rather than forgetting the moment
-        # they scroll out of the ~6-exchange conversation window.
-        weak_topic_rows = (
-            db.query(TopicProgress.topic)
-            .filter(TopicProgress.student_id == student.id, TopicProgress.is_correct.is_(False))
-            .order_by(TopicProgress.created_at.desc())
-            .limit(WEAK_TOPICS_LIMIT)
-            .all()
-        )
-        weak_topics = list(dict.fromkeys(row[0] for row in weak_topic_rows))  # dedupe, keep order
-
-        # Route to the Tutor Agent -> real LLM call, with conversation history.
-        # The reply language is decided by a separate deterministic classify()
-        # call inside tutor_agent.respond(), not by the main generation — see
-        # the "lang" field it returns. It also decides whether a diagram is
-        # warranted (only if image generation is enabled for this student),
-        # returning an image_prompt when so, and whether a text message
-        # should selectively get a voice reply (only if explicitly asked
-        # for — most text stays text).
-        relevant_chunks = [
-            candidate_chunks[i - 1] for i in classification.relevant_excerpts if 1 <= i <= len(candidate_chunks)
-        ]
-        result = await tutor_agent.respond(
-            student.as_profile_dict(),
-            message_text,
-            history,
-            weak_topics,
-            image_generation_enabled=student.has_feature("image_generation"),
-            voice_enabled=student.has_feature("voice"),
-            video_enabled=student.has_feature("youtube_videos"),
-            active_document_text=student.active_document_text,
-            pending_class_confirm=pending_class_confirm,
-            pending_profile_field=pending_profile_field,
-            retrieved_chunks=relevant_chunks,
-        )
-        reply_text = result["reply"]
-        detected_lang = result["lang"]
-        image_prompt = result["image_prompt"]
-        video_query = result["video_query"]
-        citation = result["citation"]
-
-        if pending_class_confirm:
-            # The LLM already wove an acknowledgement into reply_text above
-            # when it read a yes/no signal — this just applies the actual
-            # class change and settles the nudge for good, whatever it
-            # decided (including "na", so an ignored suggestion is never
-            # re-appended to a future reply).
-            if result["class_confirm"] is True:
-                student.class_ = pending_class_confirm
-            student.pending_profile_field = None
-            student.suggested_class = None
-            db.commit()
-        elif pending_profile_field:
-            # Same idea: whatever the LLM extracted (or didn't) settles this
-            # turn's onboarding question. If it didn't get an answer this
-            # turn, should_ask_this_turn/next_missing_field further below
-            # will naturally ask again in a few messages — this doesn't
-            # need to keep retrying the same turn.
-            if result["profile_answer"]:
-                setattr(student, pending_profile_field, result["profile_answer"])
-            student.pending_profile_field = None
-            db.commit()
-        usage = result["usage"]
-        cost_tracker.record_claude_usage(
-            db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
-            cache_write_tokens=usage["main_cache_write_tokens"], cache_read_tokens=usage["main_cache_read_tokens"],
-        )
-        cost_tracker.record_claude_usage(
-            db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id,
-            cache_write_tokens=usage["classify_cache_write_tokens"], cache_read_tokens=usage["classify_cache_read_tokens"],
-        )
-        if result["wants_audio_reply"]:
-            send_voice_reply = True
-
-        # Soft weekly caps: voice/image/video are supplements, not the core
-        # paid feature, so hitting their cap just skips that extra (falling
-        # back to the text reply, which already stands on its own) rather
-        # than blocking the whole turn like the monthly ₹ credit hard stop.
-        # One query for all three instead of up to three separate ones.
-        weekly_counts = _weekly_usage_snapshot(db, student)
-        if send_voice_reply:
-            used, limit, _ = _usage_status(student, "voice", weekly_counts)
-            if used >= limit:
-                send_voice_reply = False
-        if image_prompt:
-            used, limit, _ = _usage_status(student, "image_generation", weekly_counts)
-            if used >= limit:
-                image_prompt = None
-        if video_query:
-            used, limit, _ = _usage_status(student, "youtube_videos", weekly_counts)
-            if used >= limit:
-                video_query = None
-
-        if detected_lang != student.preferred_language:
-            student.preferred_language = detected_lang
-            db.commit()
-
-        # Academic-integrity signal for the teacher digest — how often the
-        # tutor gave a hint vs. a full worked solution when the student
-        # brought a problem to solve. None means "not applicable this turn"
-        # (an explanation, check question, etc., not a problem to solve).
-        if result["topic"]:
-            # Updated on every real tutoring turn (not gated on "evaluated"
-            # like TopicProgress below) — see Student.last_discussed_topic
-            # and the "quiz on the same" resolution near the top of this
-            # function.
-            student.last_discussed_topic = result["topic"]
-            db.commit()
-
-        if result["solved_directly"] is True:
-            student.direct_solutions_count = (student.direct_solutions_count or 0) + 1
-            db.commit()
-        elif result["solved_directly"] is False:
-            student.hints_given_count = (student.hints_given_count or 0) + 1
-            db.commit()
-
-        should_escalate = record_hint_outcome(student, result["evaluated"], result["correct"])
-        if should_escalate:
-            student.consecutive_unresolved_hints = 0  # reset so we don't re-notify every single turn past threshold
-            db.commit()
-            escalation_message = format_escalation_message(student.name, result["topic"])
-            for recipient in get_escalation_recipients(db, student.centre_id):
-                await send_whatsapp_message(recipient.phone, escalation_message)
-            # The explicit "talk to teacher" command already tells the
-            # student their teacher was notified — this automatic
-            # hint-streak trigger previously didn't, so a student stuck on
-            # the same topic had no idea help was already on its way.
-            # Skipped on a goodbye turn — a farewell shouldn't get this
-            # tacked on.
-            if not result["closing"]:
-                reply_text = f"{reply_text}\n\nBy the way, I've let your teacher know you might want a hand with this — they'll reach out soon. 🙋"
-
-        if result["evaluated"]:
-            # The check question being evaluated was asked in the *previous*
-            # assistant turn, not this one.
-            last_assistant_turn = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
-            db.add(
-                TopicProgress(
-                    student_id=student.id,
-                    topic=result["topic"] or "unknown",
-                    question_text=last_assistant_turn,
-                    given_answer=message_text,
-                    is_correct=result["correct"],
-                )
-            )
-            db.commit()
-
-        # Track a run of consecutive off-level questions (e.g. registered as
-        # class 8 but repeatedly asking Class 12 content) and, after a real
-        # pattern rather than a single one-off question, suggest updating
-        # their registered class — never on the first occurrence.
-        if result["off_level_class"] and result["off_level_class"] != student.class_:
-            student.off_level_count = (student.off_level_count or 0) + 1
-        else:
-            student.off_level_count = 0
-        db.commit()
-
-        if (
-            result["off_level_class"]
-            and student.off_level_count >= OFF_LEVEL_SUGGEST_THRESHOLD
-            and not student.pending_profile_field
-            and not reply_text.rstrip().endswith("?")
-            and not result["closing"]
-        ):
-            level = result["off_level_class"]
-            reply_text = (
-                f"{reply_text}\n\nBy the way, I've noticed you've been asking Class {level} questions — "
-                f"want me to update your registered class to {level}?"
-            )
-            student.pending_profile_field = "class_confirm"
-            student.suggested_class = level
-            student.off_level_count = 0
-            db.commit()
-
-        user_message_count = (
-            db.query(ChatHistory)
-            .filter(ChatHistory.student_id == student.id, ChatHistory.role == "user")
-            .count()
-        )
-        # Don't stack a profile question onto a reply that already ends with
-        # the tutor's own question (e.g. a check-for-understanding question,
-        # or the class-update suggestion above) — a student answering both at
-        # once ("Radiant and centripetal") gets entirely swallowed as the
-        # profile answer, silently dropping the actual teaching evaluation.
-        # Also never onto a goodbye (result["closing"]) — confirmed live: a
-        # student who said "Bye" got "Bye! Come back anytime! 👋\n\nBy the
-        # way, what's your name?" tacked on right after their own sign-off.
-        if should_ask_this_turn(user_message_count) and not reply_text.rstrip().endswith("?") and not result["closing"]:
-            missing = next_missing_field(student)
-            if missing:
-                field, question = missing
-                reply_text = f"{reply_text}\n\n{question}"
-                student.pending_profile_field = field
-                db.commit()
-
-    if welcome_back_note:
-        reply_text = f"{welcome_back_note}\n\n{reply_text}"
-
-    # Save the reply — kept in English (what Claude actually said) so future
-    # turns give the model a consistent conversation history to reason over.
-    # Deliberately BEFORE the usage-threshold notice below: that notice is a
-    # system aside, not tutoring content, and saving it into history would
-    # let a future turn see it as if it were the tutor's own prior statement
-    # and potentially echo it back (confirmed live during testing).
-    db.add(ChatHistory(student_id=student.id, role="assistant", message=reply_text, agent="tutor"))
-    db.commit()
-    logger.info(
-        "turn end phone=%s student_id=%s via_llm=%s active_quiz_id=%s reply=%r",
-        from_phone, student.id, did_answer_via_llm, student.active_quiz_id, reply_text[:200],
-    )
-
-    # This turn's own AI usage just moved the needle on the student's
-    # current usage cap — warn at 50%/75%/90% so hitting it is never a
-    # surprise. Only added to the outgoing message, never to what was just
-    # saved to chat_history above. Only relevant when a real LLM call
-    # actually happened this turn (not the profile-answer/class-confirm
-    # branches, which never touch billing).
-    if did_answer_via_llm:
-        usage_fraction_after = _current_usage_fraction(db, student)
-        usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
-        if usage_notice:
-            # Exactly the moment a student would want the full breakdown,
-            # not just the headline percentage — a natural, low-noise place
-            # to surface the on-demand command rather than a separate
-            # periodic nag (see MENU_BUTTONS_BASE for the other place this
-            # is discoverable, the returning-user "Hi" menu).
-            reply_text = f"{reply_text}\n\n{usage_notice} Reply \"credit usage\" anytime for the full breakdown."
-
-    # Translate into the student's language for what actually gets sent.
-    # Claude (Haiku) does this first — cheap token cost instead of Sarvam
-    # Mayura's per-character billing, which was the single largest cost line
-    # item in production. Falls back to Sarvam only if the Claude call fails,
-    # and to the plain English reply if not needed (student wrote in
-    # English) or both translation paths fail.
-    outgoing_text = reply_text
-    if detected_lang and not detected_lang.startswith("en"):
-        translated_result = await translate_with_claude(
-            reply_text, detected_lang, speaker_gender=_assistant_voice_gender(student), student_state=student.state
-        )
-        if translated_result:
-            outgoing_text = translated_result.text
-            cost_tracker.record_claude_usage(
-                db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
-                cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
-            )
-        else:
-            translated = await translate_text(reply_text, "en-IN", detected_lang)
-            if translated:
-                outgoing_text = translated
-                cost_tracker.record_char_usage(db, "sarvam_translate", len(reply_text), student.id)
-
-    # Appended AFTER translation, not before — a chapter title is a proper
-    # noun, and running it through the translation pass risked mangling it
-    # into awkward Hindi rather than leaving it as-is (see
-    # app.services.retrieval.build_citation_footer). `citation` is None
-    # unless this turn actually went through the tutor_agent.respond()
-    # branch AND grounding fired — every other branch (quiz, progress,
-    # menu, etc.) leaves it at its safe default.
-    if citation:
-        outgoing_text = f"{outgoing_text}\n\n{citation}"
+    if result.menu_buttons:
+        button_result = await send_whatsapp_buttons(from_phone, result.reply_text, result.menu_buttons)
+        if not button_result.get("sent"):
+            await send_whatsapp_message(from_phone, result.reply_text)
+        return
 
     # Send back over Wati — as a voice note only if the student explicitly
     # asked for an audio reply (never just because their own input was
@@ -1389,23 +758,23 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # wrongly treat that as handled and never fall back), so the student
     # always gets *something*.
     send_result = None
-    if send_voice_reply:
+    if result.wants_audio_reply:
         speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender)
-        audio_reply = await synthesize_speech(outgoing_text, detected_lang, speaker=speaker)
+        audio_reply = await synthesize_speech(result.reply_text, result.detected_lang, speaker=speaker)
         if audio_reply:
-            cost_tracker.record_char_usage(db, "sarvam_tts", len(outgoing_text), student.id)
+            cost_tracker.record_char_usage(db, "sarvam_tts", len(result.reply_text), student.id)
             send_result = await send_whatsapp_audio(from_phone, audio_reply)
             if not send_result.get("sent"):
                 logger.error("send_whatsapp_audio failed for %s: %s", from_phone, send_result)
             else:
                 # Also send the text transcript, in the same language as the
                 # voice note, so the student has it in writing too.
-                await send_whatsapp_message(from_phone, outgoing_text)
-    if image_prompt:
-        image_bytes = await generate_image(image_prompt)
+                await send_whatsapp_message(from_phone, result.reply_text)
+    if result.image_prompt:
+        image_bytes = await generate_image(result.image_prompt)
         if image_bytes:
             cost_tracker.record_flat_usage(db, "azure_image", student.id)
-            image_result = await send_whatsapp_image(from_phone, image_bytes, caption=outgoing_text)
+            image_result = await send_whatsapp_image(from_phone, image_bytes, caption=result.reply_text)
             if not image_result.get("sent"):
                 logger.error("send_whatsapp_image failed for %s: %s", from_phone, image_result)
             elif not send_result:
@@ -1415,28 +784,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 # already a successful voice send above.
                 send_result = image_result
     if not send_result or not send_result.get("sent"):
-        fallback_result = await send_whatsapp_message(from_phone, outgoing_text)
+        fallback_result = await send_whatsapp_message(from_phone, result.reply_text)
         if not fallback_result.get("sent"):
             logger.error("send_whatsapp_message fallback also failed for %s: %s", from_phone, fallback_result)
 
-    if video_query:
-        video = await find_best_video(video_query, student_language_code=detected_lang, student_class=student.class_)
-        cost_tracker.record_youtube_search(db, student.id)
-        if video:
-            # Sent as its own follow-up message (Wati has no native rich video
-            # embed) rather than folded into the main reply, so the link
-            # doesn't get lost inside a long translated paragraph.
-            video_result = await send_whatsapp_message(from_phone, f"📺 {video['title']}\n{video['url']}")
-            if not video_result.get("sent"):
-                logger.error("send video suggestion failed for %s: %s", from_phone, video_result)
-
-    if did_answer_via_llm:
-        # Deliberately last, after the actual reply has already been sent —
-        # this used to run before tutor_agent.respond() and block the real
-        # answer behind an extra Wati round-trip whenever a milestone fired,
-        # so a student asking a genuine question would see "Nice streak!"
-        # arrive before the answer to what they actually asked. Still only
-        # fires for a real tutoring question (see did_answer_via_llm above),
-        # not quiz/progress/credit-usage/referral/teacher_help turns.
-        await evaluate_referral_milestones(db, student)
-        await evaluate_habit_milestones(db, student)
+    if result.video:
+        # Sent as its own follow-up message (Wati has no native rich video
+        # embed) rather than folded into the main reply, so the link
+        # doesn't get lost inside a long translated paragraph.
+        video_result = await send_whatsapp_message(from_phone, f"📺 {result.video['title']}\n{result.video['url']}")
+        if not video_result.get("sent"):
+            logger.error("send video suggestion failed for %s: %s", from_phone, video_result)

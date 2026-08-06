@@ -3,11 +3,11 @@ import asyncio
 from app.models.core import Centre, Student
 from app.routers.whatsapp import (
     MENU_BUTTON_TO_COMMAND,
-    MENU_BUTTONS_BASE,
     _create_new_student,
     _extract_school_centre_from_greeting,
     _resolve_active_student,
 )
+from app.services.chat_core import MENU_BUTTONS_BASE
 from app.services import tenancy
 
 
