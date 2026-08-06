@@ -582,6 +582,20 @@ async def _handle_message(db: Session, payload: dict) -> None:
         await send_whatsapp_message(from_phone, f"You can call Qlass support directly at {QLASS_SUPPORT_PHONE} 📞")
         return
 
+    # "stop nudges"/"unsubscribe" opts out of proactive re-engagement
+    # messages (see app.services.nudges/scripts/send_engagement_nudges.py)
+    # — checked here, before every other gate, same reasoning as the other
+    # probe_text short-circuits above: an opt-out request must always work,
+    # even for a churned/pilot-expired/out-of-credit student. Never affects
+    # real tutoring replies, only this one unprompted-outreach feature.
+    if probe_text in ("stop nudges", "unsubscribe"):
+        student.nudges_opt_out = True
+        db.commit()
+        await send_whatsapp_message(
+            from_phone, "Got it — you won't get any more check-in messages from me. You can still chat anytime you like! 👋"
+        )
+        return
+
     # A school marked "churned" in the sales pipeline (see
     # app.services.sales) is no longer a paying customer — its students
     # only keep getting service if THEY personally paid Qlass directly at

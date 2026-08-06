@@ -171,6 +171,17 @@ class Student(Base):
     # dispute or an ongoing school investigation).
     deletion_requested_at = Column(TIMESTAMP(timezone=True))
     is_deleted = Column(Boolean, default=False)
+    # {"fun_fact": "2026-08-01T10:00:00+00:00", "feature_highlight": "...",
+    # "social_proof": "..."} — last-sent timestamp per re-engagement nudge
+    # type (see app.services.nudges), so the rotation never repeats the same
+    # type back-to-back and scripts/send_engagement_nudges.py can skip a
+    # type still inside its cooldown window.
+    nudges_sent = Column(JSONType, default=dict)
+    # A student can text "stop nudges"/"unsubscribe" (see app.routers.
+    # whatsapp) to opt out of proactive re-engagement messages — never sent
+    # once true. Doesn't affect real tutoring replies, only this one
+    # unprompted-outreach feature.
+    nudges_opt_out = Column(Boolean, default=False)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:
