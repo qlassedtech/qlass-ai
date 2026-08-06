@@ -8,12 +8,12 @@ from app.database import get_db
 from app.models.core import Parent, Student
 from app.services import cost_tracker
 from app.services.consent import CONSENT_STATEMENT, has_given_consent, record_consent
-from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.parent_auth import create_parent_access_token, get_current_parent
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage
 from app.services.rate_limit import is_otp_rate_limited
-from app.services.whatsapp_client import send_whatsapp_message
+from app.services.whatsapp_client import send_broadcast_template
 
 router = APIRouter()
 
@@ -39,7 +39,16 @@ async def request_parent_otp(body: PhoneRequest, db: Session = Depends(get_db)):
             status_code=404, detail="This number isn't linked to a student yet — ask your school to add it"
         )
     otp = await generate_and_store_otp("parent_login", phone)
-    await send_whatsapp_message(phone, f"Your Qlass Learning parent login code is *{otp}*. It expires in 10 minutes.")
+    # A parent has no guaranteed active 24h WhatsApp session with the bot —
+    # a plain send_whatsapp_message session message can silently fail to
+    # deliver in that case, so this uses the approved Authentication-
+    # category template instead (same fix as the student/teacher OTP flows).
+    result = await send_broadcast_template(
+        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"parent-otp-{parent.id}-{otp}",
+        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
+    )
+    if not result.get("sent"):
+        raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}
 
 

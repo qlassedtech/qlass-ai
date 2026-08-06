@@ -10,7 +10,7 @@ from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.document_client import extract_text_from_document
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.ocr_client import extract_text_from_image
-from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
 from app.services.rate_limit import is_otp_rate_limited
@@ -19,7 +19,7 @@ from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
-from app.services.whatsapp_client import send_whatsapp_message
+from app.services.whatsapp_client import send_broadcast_template
 
 router = APIRouter()
 
@@ -78,7 +78,17 @@ async def request_otp(body: CheckPhoneRequest, db: Session = Depends(get_db)):
     if db.query(Parent).filter(Parent.phone == phone).first():
         raise HTTPException(status_code=400, detail="This number is registered as a parent contact — use the parent login instead")
     otp = await generate_and_store_otp("student_login", phone)
-    await send_whatsapp_message(phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
+    # Logging into the web portal doesn't guarantee an active 24h WhatsApp
+    # session with the bot — a plain send_whatsapp_message session message
+    # can silently fail to deliver in that case, so this uses the approved
+    # Authentication-category template instead (same fix as the teacher/
+    # parent OTP flows).
+    result = await send_broadcast_template(
+        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"student-otp-{phone}-{otp}",
+        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
+    )
+    if not result.get("sent"):
+        raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}
 
 

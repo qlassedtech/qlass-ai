@@ -20,7 +20,7 @@ from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipien
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
-from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
@@ -36,7 +36,7 @@ from app.services.teacher_auth import get_current_teacher, hash_password, verify
 from app.services import tenancy
 from app.services.tenancy import get_or_create_linked_student
 from app.services.uploads import save_image_upload
-from app.services.whatsapp_client import send_whatsapp_message
+from app.services.whatsapp_client import send_whatsapp_message, send_broadcast_template
 from app.services.workbook_service import generate_workbook_questions
 from app.services.ocr_client import extract_text_from_image
 from app.services.document_client import extract_text_from_document
@@ -207,7 +207,18 @@ async def request_teacher_otp(body: TeacherPhoneRequest, db: Session = Depends(g
     if not teacher:
         raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
     otp = await generate_and_store_otp("teacher_login", phone)
-    await send_whatsapp_message(phone, f"Your Qlass Learning login code is *{otp}*. It expires in 10 minutes.")
+    # A teacher logging into the web portal cold has no guaranteed active
+    # 24h WhatsApp session with the bot — a plain send_whatsapp_message
+    # session message silently fails to deliver in that case (confirmed
+    # live: it reported {"sent": True} while nothing actually arrived), so
+    # this must use the approved Authentication-category template instead,
+    # same as registration's send_broadcast_template.
+    result = await send_broadcast_template(
+        LOGIN_OTP_TEMPLATE_NAME, broadcast_name=f"teacher-otp-{teacher.id}-{otp}",
+        receivers=[{"whatsappNumber": phone, "customParams": [{"name": "1", "value": otp}]}],
+    )
+    if not result.get("sent"):
+        raise HTTPException(status_code=502, detail="Couldn't send the login code — please try again shortly")
     return {"sent": True}
 
 
