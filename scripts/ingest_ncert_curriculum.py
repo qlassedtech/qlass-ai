@@ -108,25 +108,36 @@ BOOKS: list[tuple[str, str, str, int, str]] = [
 ]
 
 
-async def _download(client: httpx.AsyncClient, code: str, chapter_num: int) -> bytes | None:
+async def _download(code: str, chapter_num: int) -> bytes | None:
+    """
+    A fresh httpx.AsyncClient per call, not one shared/reused across the
+    whole multi-hour run — confirmed live as the actual cause of a 41.5%
+    failure rate in the first full run: downloads are spaced out by the
+    ~21s+ Voyage rate-limit pacing between chapters (see
+    app.services.embeddings), long enough for a reused connection's
+    keep-alive to go stale and fail on the next request. One retry on a
+    fresh connection covers the rest (genuine transient blips).
+    """
     url = f"{PDF_BASE_URL}{code}{chapter_num:02d}.pdf"
-    try:
-        resp = await client.get(url, timeout=60)
-        if resp.status_code != 200 or not resp.content:
-            return None
-        return resp.content
-    except httpx.HTTPError:
-        return None
+    for _ in range(2):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, timeout=60)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+            if resp.status_code == 404:
+                return None  # genuinely doesn't exist — retrying won't help
+        except httpx.HTTPError:
+            pass
+    return None
 
 
-async def _ingest_chapter(
-    db, client: httpx.AsyncClient, class_: str, subject: str, book_title: str, code: str, chapter_num: int,
-) -> str:
+async def _ingest_chapter(db, class_: str, subject: str, book_title: str, code: str, chapter_num: int) -> str:
     """Downloads, extracts, chunks, embeds, and stores one chapter — the
     PDF bytes never touch disk (kept in memory only, discarded after text
     extraction), so this never accumulates storage regardless of how many
     chapters run."""
-    pdf_bytes = await _download(client, code, chapter_num)
+    pdf_bytes = await _download(code, chapter_num)
     if pdf_bytes is None:
         return "download_failed"
 
@@ -179,25 +190,43 @@ async def _ingest_chapter(
     return f"ok ({len(chunks)} chunks, FTS only — embedding failed)"
 
 
-async def run() -> None:
+async def run(retry_missing_only: bool = False) -> None:
+    """
+    retry_missing_only=True skips any (class, subject, chapter) already
+    present in the documents table — meant for a cleanup pass after a run
+    that had download failures (see the "ok"/"download_failed" per-book
+    logic above and this module's docstring on why those happen: NCERT
+    connection blips, not missing content), so re-running doesn't
+    re-download/re-embed the ~60% that already succeeded.
+    """
     total_chapters = sum(n for *_, n, _ in BOOKS)
     done = 0
-    counts = {"ok": 0, "download_failed": 0, "no_text": 0, "no_chunks": 0}
-    async with httpx.AsyncClient() as client:
-        for class_, subject, code, num_chapters, book_title in BOOKS:
-            db = SessionLocal()
-            try:
-                for chapter_num in range(1, num_chapters + 1):
-                    done += 1
-                    status = await _ingest_chapter(db, client, class_, subject, book_title, code, chapter_num)
-                    counts["ok" if status.startswith("ok") else status] = counts.get(
-                        "ok" if status.startswith("ok") else status, 0
-                    ) + 1
-                    print(f"[{done}/{total_chapters}] Class {class_} {subject} — {book_title} ch.{chapter_num}: {status}")
-            finally:
-                db.close()
+    counts = {"ok": 0, "download_failed": 0, "no_text": 0, "no_chunks": 0, "skipped_existing": 0}
+    for class_, subject, code, num_chapters, book_title in BOOKS:
+        db = SessionLocal()
+        try:
+            existing_chapters: set[str] = set()
+            if retry_missing_only:
+                rows = (
+                    db.query(Document.chapter)
+                    .filter(Document.class_ == class_, Document.subject == subject, Document.board == BOARD)
+                    .all()
+                )
+                existing_chapters = {row[0] for row in rows}
+            for chapter_num in range(1, num_chapters + 1):
+                done += 1
+                chapter_label = f"{book_title} — Chapter {chapter_num}"
+                if retry_missing_only and chapter_label in existing_chapters:
+                    counts["skipped_existing"] += 1
+                    continue
+                status = await _ingest_chapter(db, class_, subject, book_title, code, chapter_num)
+                key = "ok" if status.startswith("ok") else status
+                counts[key] = counts.get(key, 0) + 1
+                print(f"[{done}/{total_chapters}] Class {class_} {subject} — {book_title} ch.{chapter_num}: {status}")
+        finally:
+            db.close()
     print(f"\nDone: {counts}")
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(run(retry_missing_only="--retry-missing" in sys.argv))
