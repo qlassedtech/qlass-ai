@@ -44,19 +44,28 @@ BOARD = "CBSE"
 
 # (class, subject, book_code, num_chapters, book_title)
 BOOKS: list[tuple[str, str, str, int, str]] = [
-    ("4", "Mathematics", "demh1", 14, "Math-Magic"),
-    ("4", "Hindi", "dhhn1", 14, "Rimjhim"),
-    ("4", "English", "deen1", 9, "Marigold"),
+    # demh1/dhhn1/deen1 ("Math-Magic"/"Rimjhim"/"Marigold") 404'd entirely
+    # against the real site — confirmed live these are discontinued titles,
+    # superseded by the NCF-revised books below (same "old title still
+    # listed in the dropdown but the per-chapter PDFs were pulled" pattern
+    # as Class 9 Science's old "Vigyan" vs new "Exploration").
+    ("4", "Mathematics", "demm1", 14, "Math-Mela"),
+    ("4", "Hindi", "dhve1", 13, "Veena"),
+    ("4", "English", "desa1", 12, "Santoor"),
     ("5", "Mathematics", "eemh1", 14, "Math-Magic"),
     ("5", "Hindi", "ehhn1", 18, "Rimjhim"),
     ("5", "English", "eeen1", 10, "Marigold"),
     ("6", "Mathematics", "fegp1", 10, "Ganita Prakash"),
-    ("6", "Hindi", "fhvs1", 14, "Vasant"),
-    ("6", "English", "fehl1", 8, "Honeysuckle"),
+    # fhvs1/fehl1 ("Vasant"/"Honeysuckle") 404'd entirely — replaced with
+    # the same Malhar/Poorvi titles that already work for Classes 7-8.
+    ("6", "Hindi", "fhml1", 13, "Malhar"),
+    ("6", "English", "fepr1", 5, "Poorvi"),
     ("6", "Science", "fecu1", 12, "Curiosity"),
-    ("6", "Social Science", "fess1", 10, "History - Our Past"),
-    ("6", "Social Science", "fess2", 6, "The Earth Our Habitat"),
-    ("6", "Social Science", "fess3", 8, "Social And Political Life"),
+    # fess1/fess2/fess3 (the old separate History/Geography/Civics books)
+    # 404'd entirely — replaced by "Exploring Society India and Beyond",
+    # the single NCF-revised book that supersedes all three (same
+    # consolidation already used for Classes 7-8's Social Science).
+    ("6", "Social Science", "fees1", 14, "Exploring Society India and Beyond"),
     ("7", "Mathematics", "gegp1", 8, "Ganita Prakash Part-I"),
     ("7", "Mathematics", "gegp2", 7, "Ganita Prakash Part-II"),
     ("7", "Hindi", "ghml1", 10, "Malhar"),
@@ -73,13 +82,17 @@ BOOKS: list[tuple[str, str, str, int, str]] = [
     ("8", "Social Science", "hess3", 8, "Social And Political Life"),
     ("8", "Social Science", "hess2", 8, "Our Pasts-III"),
     ("9", "Mathematics", "iemh1", 8, "Ganita Manjari"),
-    ("9", "Hindi", "ihks1", 13, "Kshitij"),
+    # ihks1 ("Kshitij") 404'd entirely — replaced with "Ganga", confirmed
+    # working. iess1/iess2/iess3 (old separate Contemporary India/
+    # Economics/Contemporary World books) also 404'd entirely — dropped
+    # rather than chasing individual replacements, since "Understanding
+    # Society India and Beyond" (iest1, below) is the single NCF-revised
+    # book that already supersedes all three and was already ingested
+    # successfully.
+    ("9", "Hindi", "ihga1", 12, "Ganga"),
     ("9", "English", "iebe1", 8, "Kaveri"),
     ("9", "Science", "iesc1", 13, "Exploration"),
     ("9", "Social Science", "iest1", 9, "Understanding Society India and Beyond Part-I"),
-    ("9", "Social Science", "iess1", 6, "Contemporary India-I"),
-    ("9", "Social Science", "iess2", 4, "Economics"),
-    ("9", "Social Science", "iess3", 5, "India and the Contemporary World-I"),
     ("10", "Mathematics", "jemh1", 14, "Mathematics"),
     ("10", "Hindi", "jhks1", 12, "Kshitij-2"),
     ("10", "English", "jeff1", 9, "First Flight"),
