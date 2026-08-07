@@ -13,18 +13,21 @@ VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
 MAX_BATCH_SIZE = 128
 
 # Voyage's free tier is rate-limited to 3 requests/minute AND 10,000
-# tokens/minute until a payment method is added on the account (confirmed
-# live: a single real NCERT chapter — ~20 chunks, ~13,000 tokens — 429'd
-# even as the very first request of a fresh minute, and kept 429'ing on
-# every retry, because the TPM cap alone was already exceeded regardless
-# of RPM pacing). MAX_BATCH_CHARS keeps each individual request under that
-# TPM budget (~4 chars/token for English is the usual rule of thumb —
-# 24,000 chars is a conservative ~6,000-token estimate, leaving real
-# margin rather than cutting it exactly at 10,000).
-MAX_BATCH_CHARS = 24_000
+# tokens/minute (a ROLLING 60s window, not a fixed per-call budget) until a
+# payment method is added on the account. Confirmed live twice: even a
+# properly-sized ~6,000-token sub-batch (well under the stated 10,000 TPM)
+# still 429'd on every attempt, 21s apart — a rolling window means a single
+# ~6,000-token request alone can occupy more than half of any 60s slice of
+# budget, so a request that size needs close to the FULL 60s to roll off
+# before the next one has real headroom, not just ~20s. MAX_BATCH_CHARS is
+# cut much smaller (8,000 chars, a conservative ~2,000-token estimate) so
+# each request is a small, safe fraction of the rolling budget instead of
+# most of it.
+MAX_BATCH_CHARS = 8_000
 
-# 21s comfortably clears one request every 20s (the 3 RPM cap).
-RATE_LIMIT_RETRY_SECONDS = 21
+# 65s comfortably clears a full 60s rolling window between requests (the
+# 3 RPM / 10K TPM cap) — 21s was proven insufficient live (see above).
+RATE_LIMIT_RETRY_SECONDS = 65
 
 # Tracks the last paced request across ALL embed_texts calls in this
 # process, not just within one call — scripts/bulk_ingest_pdfs.py makes one
