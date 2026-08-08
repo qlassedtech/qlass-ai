@@ -35,6 +35,12 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str | None:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             pages = [page.get_text().strip() for page in doc]
         text = "\n\n".join(p for p in pages if p)
+        # Some PDFs' content streams decode to text containing embedded NUL
+        # bytes (confirmed live: a NIOS lesson PDF triggered "A string
+        # literal cannot contain NUL (0x00) characters" on insert) —
+        # Postgres text columns reject them outright, so this is stripped
+        # here rather than at every ingestion call site.
+        text = text.replace("\x00", "")
         return text or None
     except Exception:
         return None
