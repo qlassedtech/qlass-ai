@@ -11,6 +11,7 @@ backend/firebase-service-account.json
 rag/chroma_store/
 backend/static/uploads/
 *.db
+dump.rdb
 .DS_Store
 node_modules/
 android/.gradle/
