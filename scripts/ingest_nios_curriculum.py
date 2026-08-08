@@ -38,11 +38,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import httpx  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
 
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Document, DocumentChunk  # noqa: E402
 from app.services.document_client import extract_text_from_document  # noqa: E402
 from app.services.embeddings import embed_texts, format_vector_literal  # noqa: E402
+
+# A DB session per lesson (not one shared per subject) — confirmed live
+# that an SSH-tunneled connection to production (see module docstring) can
+# drop during the long idle gaps between lessons (Voyage's rate-limit
+# pacing leaves the DB connection untouched for minutes at a time), which
+# previously killed the whole remaining subject, not just that one lesson.
+# One retry after a short pause covers a genuinely transient drop; a
+# second consecutive failure is treated as the tunnel actually being down
+# and is allowed to raise, since silently retrying forever would mask that.
+DB_RETRY_DELAY_SECONDS = 5
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ingest_document import _chunk_text  # noqa: E402
@@ -102,6 +113,10 @@ def _is_english_medium(href: str) -> bool:
     return parent.endswith("e") and not parent.endswith("he")
 
 
+def _chapter_label(title: str) -> str:
+    return f"NIOS {title}" if not title.lower().startswith("nios") else title
+
+
 def _clean_title(inner_html: str, href: str) -> str:
     title = re.sub(r"<[^>]+>", " ", inner_html)
     for entity, char in HTML_ENTITIES.items():
@@ -148,7 +163,7 @@ async def _ingest_lesson(db, client: httpx.AsyncClient, class_: str, subject: st
     if not chunks:
         return "no_chunks"
 
-    chapter_label = f"NIOS {title}" if not title.lower().startswith("nios") else title
+    chapter_label = _chapter_label(title)
     embeddings = await embed_texts(chunks, input_type="document", retry_on_rate_limit=True)
 
     existing = (
@@ -188,8 +203,36 @@ async def _ingest_lesson(db, client: httpx.AsyncClient, class_: str, subject: st
     return f"ok ({len(chunks)} chunks, FTS only)"
 
 
+def _existing_chapters(class_: str, subject: str) -> set[str]:
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Document.chapter)
+            .filter(Document.class_ == class_, Document.subject == subject, Document.board == BOARD)
+            .all()
+        )
+        return {row[0] for row in rows}
+    finally:
+        db.close()
+
+
+async def _ingest_lesson_with_retry(class_: str, subject: str, title: str, url: str, client: httpx.AsyncClient) -> str:
+    for attempt in range(2):
+        db = SessionLocal()
+        try:
+            return await _ingest_lesson(db, client, class_, subject, title, url)
+        except OperationalError:
+            if attempt == 0:
+                print("  DB connection dropped (tunnel blip?) — retrying once after a short pause...")
+                await asyncio.sleep(DB_RETRY_DELAY_SECONDS)
+                continue
+            raise
+        finally:
+            db.close()
+
+
 async def run() -> None:
-    counts = {"ok": 0, "download_failed": 0, "no_text": 0, "no_chunks": 0, "page_fetch_failed": 0}
+    counts = {"ok": 0, "download_failed": 0, "no_text": 0, "no_chunks": 0, "page_fetch_failed": 0, "skipped_existing": 0}
     done = 0
     async with httpx.AsyncClient(verify=VERIFY_NIOS_TLS) as client:
         for class_, subject, page_url in SUBJECT_PAGES:
@@ -202,16 +245,18 @@ async def run() -> None:
                 continue
             lessons = _extract_lessons(page_resp.text, page_url)
             print(f"Class {class_} {subject}: {len(lessons)} lessons found")
-            db = SessionLocal()
-            try:
-                for title, url in lessons:
-                    done += 1
-                    status = await _ingest_lesson(db, client, class_, subject, title, url)
-                    key = "ok" if status.startswith("ok") else status
-                    counts[key] = counts.get(key, 0) + 1
-                    print(f"[{done}] Class {class_} {subject} — {title}: {status}")
-            finally:
-                db.close()
+            already_done = _existing_chapters(class_, subject)
+            for title, url in lessons:
+                done += 1
+                chapter_label = _chapter_label(title)
+                if chapter_label in already_done:
+                    counts["skipped_existing"] += 1
+                    print(f"[{done}] Class {class_} {subject} — {title}: already ingested, skipping")
+                    continue
+                status = await _ingest_lesson_with_retry(class_, subject, title, url, client)
+                key = "ok" if status.startswith("ok") else status
+                counts[key] = counts.get(key, 0) + 1
+                print(f"[{done}] Class {class_} {subject} — {title}: {status}")
     print(f"\nDone: {counts}")
 
 
