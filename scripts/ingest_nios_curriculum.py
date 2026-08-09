@@ -175,15 +175,27 @@ def _extract_lessons_by_pattern(html: str, base_url: str, pattern: "re.Pattern")
     number is real content is still correctly identified/retrieved either
     way — this only affects the citation label shown to a student, not
     what gets embedded.
+
+    `pattern` is matched against each full href attribute value (via
+    LESSON_HREF_RE, same as _extract_lessons) rather than searched
+    directly against the raw HTML — confirmed live that searching the raw
+    HTML let `pattern` match on a mid-string fragment missing the leading
+    "/media/documents/..." portion of the real href, which urljoin then
+    silently resolved against the wrong base (the subject page's own
+    directory instead of the site root), producing a URL that 404's even
+    though the real file exists.
     """
-    matches = sorted(set(pattern.findall(html)))
+    matches: set[str] = set()
+    for href, _inner_html in LESSON_HREF_RE.findall(html):
+        if pattern.search(href):
+            matches.add(href)
 
     def _lesson_number(href: str) -> int:
         m = re.search(r"(\d+)(?=\.pdf$)", href, re.IGNORECASE)
         return int(m.group(1)) if m else 0
 
-    matches.sort(key=_lesson_number)
-    return [(f"Lesson {_lesson_number(href)}", urljoin(base_url, href)) for href in matches]
+    ordered = sorted(matches, key=_lesson_number)
+    return [(f"Lesson {_lesson_number(href)}", urljoin(base_url, href)) for href in ordered]
 
 
 async def _download_lesson(client: httpx.AsyncClient, url: str) -> bytes | None:
