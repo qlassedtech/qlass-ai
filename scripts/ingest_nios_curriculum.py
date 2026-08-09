@@ -61,25 +61,46 @@ from ingest_document import _chunk_text  # noqa: E402
 BOARD = "NIOS"
 VERIFY_NIOS_TLS = False  # see module docstring
 
-# (class label, subject name, course-material page URL). Scoped to just
-# the Senior Secondary (Class XII equivalency) science/math subjects that
-# use NIOS's clean, consistent "<code>_<Subject>_Eng_LessonN.pdf" (or the
-# Biology-specific bare-"E"-suffix variant — see _is_english_medium)
-# naming — confirmed live to extract real, well-titled lessons reliably.
+# (class label, subject name, course-material page URL, explicit lesson-
+# URL regex or None). The Senior Secondary science/math subjects use
+# NIOS's clean, consistent "<code>_<Subject>_Eng_LessonN.pdf" naming
+# (matched generically — see _extract_lessons/_is_english_medium) and need
+# no explicit pattern. Every other subject here uses a DIFFERENT, subject-
+# specific naming scheme with no titled anchor text (confirmed live by
+# inspecting each page directly rather than guessing), so those are given
+# an exact regex instead of relying on a generic heuristic:
+#   - Math (211)/Science (212), Secondary: "Chapter-N.pdf" under an
+#     English-only folder (no Hindi-vs-English ambiguity to resolve).
+#   - Social Science (213), Secondary: "Lesson-NN.pdf" specifically under
+#     SecSocSciCour/English/ — the SAME lesson numbers also exist under a
+#     second, differently-named English-medium folder on this page
+#     (social_science_213_English_Medium/) with duplicate content; only
+#     one of the two is used to avoid ingesting every lesson twice.
+#   - English (202 Secondary, 302 Senior Secondary): "L_N.pdf" /
+#     "302ELN.pdf" respectively.
 #
-# Deliberately NOT included yet: Class X (Secondary) Math/Science, which
-# use a DIFFERENT "Chapter-N.pdf" naming instead of "Lesson" and mix in
-# "Learner Guide"/worksheet PDFs under similar-looking folder names; and
-# English/Hindi at both levels, whose pages surface worksheet PDFs
-# ("WS 1", "WS 2"...) more prominently than the actual lesson content in
-# the site's own HTML. Both need their own per-subject page inspection
-# (same as NCERT's stragglers) rather than a blind naming-pattern guess —
-# left as a follow-up, not attempted here.
-SUBJECT_PAGES: list[tuple[str, str, str]] = [
-    ("12", "Mathematics", "https://nios.ac.in/online-course-material/sr-secondary-courses/Mathematics-(311).aspx"),
-    ("12", "Physics", "https://nios.ac.in/online-course-material/sr-secondary-courses/Physics-(312).aspx"),
-    ("12", "Chemistry", "https://nios.ac.in/online-course-material/sr-secondary-courses/Chemistry-(313).aspx"),
-    ("12", "Biology", "https://nios.ac.in/online-course-material/sr-secondary-courses/Biology-(314).aspx"),
+# Hindi (201, 301) is deliberately excluded at both levels — confirmed
+# live that at least the Senior Secondary Hindi PDFs use a legacy,
+# non-Unicode font encoding (extracted "text" is glyph-codepoint garbage,
+# not real Devanagari — verified this is NOT the same PDF the already-
+# ingested NCERT Hindi books use, which extract correctly). Ingesting NIOS
+# Hindi content risks silently polluting the corpus with unusable text;
+# left out entirely rather than ingesting garbage.
+SUBJECT_PAGES: list[tuple[str, str, str, "re.Pattern | None"]] = [
+    ("12", "Mathematics", "https://nios.ac.in/online-course-material/sr-secondary-courses/Mathematics-(311).aspx", None),
+    ("12", "Physics", "https://nios.ac.in/online-course-material/sr-secondary-courses/Physics-(312).aspx", None),
+    ("12", "Chemistry", "https://nios.ac.in/online-course-material/sr-secondary-courses/Chemistry-(313).aspx", None),
+    ("12", "Biology", "https://nios.ac.in/online-course-material/sr-secondary-courses/Biology-(314).aspx", None),
+    ("12", "English", "https://nios.ac.in/online-course-material/sr-secondary-courses/English-(302).aspx",
+     re.compile(r"srsec302new/302EL\d+\.pdf", re.IGNORECASE)),
+    ("10", "Mathematics", "https://nios.ac.in/online-course-material/secondary-courses/Mathematics-(211)-Syllabus.aspx",
+     re.compile(r"SecMathcour/Eng/Chapter-\d+\.pdf", re.IGNORECASE)),
+    ("10", "Science", "https://nios.ac.in/online-course-material/secondary-courses/Science-and-Technology-(212)-Syllabus.aspx",
+     re.compile(r"secscicour/English/Chapter-\d+\.pdf", re.IGNORECASE)),
+    ("10", "Social Science", "https://nios.ac.in/online-course-material/secondary-courses/Social-Science-(213)-Syllabus.aspx",
+     re.compile(r"SecSocSciCour/English/Lesson-(?!00)\d+\.pdf", re.IGNORECASE)),
+    ("10", "English", "https://nios.ac.in/online-course-material/secondary-courses/english-(202)-syllabus.aspx",
+     re.compile(r"Secengcour/book1/L_\d+\.pdf", re.IGNORECASE)),
 ]
 
 # Matches an anchor's visible text and href for an English-medium lesson
@@ -143,6 +164,26 @@ def _extract_lessons(html: str, base_url: str) -> list[tuple[str, str]]:
         seen.add(url)
         lessons.append((_clean_title(inner_html, href), url))
     return lessons
+
+
+def _extract_lessons_by_pattern(html: str, base_url: str, pattern: "re.Pattern") -> list[tuple[str, str]]:
+    """
+    For subjects with an explicit lesson-URL regex (see SUBJECT_PAGES) —
+    these pages have no usable anchor text (confirmed live: empty or just
+    "&nbsp;"), so the title is a generic "Lesson N" derived from the
+    trailing number in the URL itself rather than real chapter names. The
+    number is real content is still correctly identified/retrieved either
+    way — this only affects the citation label shown to a student, not
+    what gets embedded.
+    """
+    matches = sorted(set(pattern.findall(html)))
+
+    def _lesson_number(href: str) -> int:
+        m = re.search(r"(\d+)(?=\.pdf$)", href, re.IGNORECASE)
+        return int(m.group(1)) if m else 0
+
+    matches.sort(key=_lesson_number)
+    return [(f"Lesson {_lesson_number(href)}", urljoin(base_url, href)) for href in matches]
 
 
 async def _ingest_lesson(db, client: httpx.AsyncClient, class_: str, subject: str, title: str, url: str) -> str:
@@ -235,7 +276,7 @@ async def run() -> None:
     counts = {"ok": 0, "download_failed": 0, "no_text": 0, "no_chunks": 0, "page_fetch_failed": 0, "skipped_existing": 0}
     done = 0
     async with httpx.AsyncClient(verify=VERIFY_NIOS_TLS) as client:
-        for class_, subject, page_url in SUBJECT_PAGES:
+        for class_, subject, page_url, lesson_pattern in SUBJECT_PAGES:
             try:
                 page_resp = await client.get(page_url, timeout=30)
                 page_resp.raise_for_status()
@@ -243,7 +284,11 @@ async def run() -> None:
                 print(f"Could not fetch subject page {page_url}: {exc}")
                 counts["page_fetch_failed"] += 1
                 continue
-            lessons = _extract_lessons(page_resp.text, page_url)
+            lessons = (
+                _extract_lessons_by_pattern(page_resp.text, page_url, lesson_pattern)
+                if lesson_pattern is not None
+                else _extract_lessons(page_resp.text, page_url)
+            )
             print(f"Class {class_} {subject}: {len(lessons)} lessons found")
             already_done = _existing_chapters(class_, subject)
             for title, url in lessons:
