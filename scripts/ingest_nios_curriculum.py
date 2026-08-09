@@ -186,13 +186,29 @@ def _extract_lessons_by_pattern(html: str, base_url: str, pattern: "re.Pattern")
     return [(f"Lesson {_lesson_number(href)}", urljoin(base_url, href)) for href in matches]
 
 
+async def _download_lesson(client: httpx.AsyncClient, url: str) -> bytes | None:
+    """One retry on a fresh short pause — confirmed live that an entire
+    124-lesson run once 100% download-failed due to what was, moments
+    later, a plain reachable connection again (a transient network blip,
+    not a real outage) — a single unretried failure per lesson wasted the
+    whole run rather than just skipping the one bad request."""
+    for attempt in range(2):
+        try:
+            resp = await client.get(url, timeout=60)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+            if resp.status_code == 404:
+                return None
+        except httpx.HTTPError:
+            pass
+        if attempt == 0:
+            await asyncio.sleep(5)
+    return None
+
+
 async def _ingest_lesson(db, client: httpx.AsyncClient, class_: str, subject: str, title: str, url: str) -> str:
-    try:
-        resp = await client.get(url, timeout=60)
-        if resp.status_code != 200 or not resp.content:
-            return "download_failed"
-        pdf_bytes = resp.content
-    except httpx.HTTPError:
+    pdf_bytes = await _download_lesson(client, url)
+    if pdf_bytes is None:
         return "download_failed"
 
     raw_text = extract_text_from_document(pdf_bytes, Path(url).name)
