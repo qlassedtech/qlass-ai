@@ -52,7 +52,7 @@ from app.services.progress_report import (
 )
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
 from app.services.referral import generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer
-from app.services.retrieval import fetch_hybrid_candidates
+from app.services.retrieval import MAX_CANDIDATES, fetch_candidate_chunks, fetch_semantic_candidates
 from app.services.sarvam_client import translate_text
 from app.services.youtube_client import find_best_video
 from app.agents.tutor_agent import TutorAgent
@@ -175,12 +175,18 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     last_topic_context = student.last_discussed_topic or (last_topic_row[0] if last_topic_row else None)
     last_assistant_message = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), None)
 
-    # Candidate chunks (cheap Postgres full-text recall, no LLM cost) are
-    # fetched unconditionally so classify_intent's single call can also
-    # judge their relevance (relevant_excerpts) — see app.services.
-    # retrieval's module docstring for why that judgment rides along here
-    # instead of a separate dedicated call.
-    candidate_chunks = await fetch_hybrid_candidates(db, message_text, student.class_, student.board)
+    # Keyword-only candidate chunks (cheap Postgres full-text recall, no
+    # external call) are fetched unconditionally so classify_intent's
+    # single call can also judge their relevance (relevant_excerpts) — see
+    # app.services.retrieval's module docstring for why that judgment rides
+    # along here instead of a separate dedicated call. Semantic (Voyage)
+    # recall is deliberately NOT included at this stage — it costs a live,
+    # rate-limited API call, and most branches below (quiz answers, menu,
+    # progress, credit_usage, referral, teacher_help, mock_test, quiz_topic)
+    # never use candidate_chunks at all. It's fetched instead only in the
+    # final `else` (LLM-answer) branch, the one branch that actually reads
+    # relevant_chunks — see there.
+    candidate_chunks = fetch_candidate_chunks(db, message_text, student.class_, student.board)
     classification = await classify_intent(
         message_text, last_discussed_topic=last_topic_context, last_assistant_message=last_assistant_message,
         candidate_chunks=candidate_chunks,
@@ -194,6 +200,21 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     intent = classification.intent
     quiz_topic_request = classification.quiz_topic
     mock_test_request = classification.wants_mock_test
+
+    did_answer_via_llm = False
+    image_prompt = None
+    video_query = None
+    citation = None
+    wants_audio_reply = False
+    menu_buttons = None
+
+    if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
+        # An explicit new request in the same message should win over
+        # resolving the pending class-update nudge — treat it as an
+        # implicit decline (leave the class as-is).
+        student.pending_profile_field = None
+        student.suggested_class = None
+        db.commit()
 
     if intent == "menu" and not student.active_quiz_id:
         # Free UI affordance — returns immediately without touching
@@ -224,43 +245,30 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 capability_sentence = f" You can also {capability_hints[0]}."
             else:
                 capability_sentence = f" You can also {', '.join(capability_hints[:-1])}, or {capability_hints[-1]}."
-            return ChatTurnResult(
-                reply_text=(
-                    f"{greeting} I'm your AI tutor — ask me to explain any topic or say \"quiz me on <topic>\" "
-                    f"to test yourself.{capability_sentence} What would you like to learn today?"
-                ),
+            reply_text = (
+                f"{greeting} I'm your AI tutor — ask me to explain any topic or say \"quiz me on <topic>\" "
+                f"to test yourself.{capability_sentence} What would you like to learn today?"
             )
-        # A returning student saying "Hi" after a gap is the single most
-        # common re-entry message.
-        menu_greeting = (
-            f"{welcome_back_note}\n\nJust ask me anything to start learning, or pick one of these:"
-            if welcome_back_note else "Hi! Just ask me anything to start learning, or pick one of these:"
-        )
-        activity = get_activity_stats(db, student.id)
-        weekly_stats = get_student_stats(db, student.id, days=7)
-        menu_buttons = list(MENU_BUTTONS_BASE)
-        if is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
-            menu_buttons.append("🎁 Refer a Friend")
-        fallback_commands = ", ".join(f"'{MENU_BUTTON_TO_COMMAND[b]}'" for b in menu_buttons)
-        return ChatTurnResult(
-            reply_text=f"{menu_greeting}\n\nOr reply with {fallback_commands} or anything else you want to work on.",
-            menu_buttons=menu_buttons,
-        )
-
-    if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
-        # An explicit new request in the same message should win over
-        # resolving the pending class-update nudge — treat it as an
-        # implicit decline (leave the class as-is).
-        student.pending_profile_field = None
-        student.suggested_class = None
-        db.commit()
-
-    did_answer_via_llm = False
-    image_prompt = None
-    video_query = None
-    citation = None
-
-    if student.active_quiz_id and intent == "quiz_stop":
+        else:
+            # A returning student saying "Hi" after a gap is the single most
+            # common re-entry message. welcome_back_note is NOT woven in here
+            # — it's prepended once, uniformly for every branch (including
+            # this one now), by the shared "if welcome_back_note" step below.
+            activity = get_activity_stats(db, student.id)
+            weekly_stats = get_student_stats(db, student.id, days=7)
+            menu_buttons = list(MENU_BUTTONS_BASE)
+            if is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
+                menu_buttons.append("🎁 Refer a Friend")
+            fallback_commands = ", ".join(f"'{MENU_BUTTON_TO_COMMAND[b]}'" for b in menu_buttons)
+            reply_text = (
+                f"Hi! Just ask me anything to start learning, or pick one of these:\n\n"
+                f"Or reply with {fallback_commands} or anything else you want to work on."
+            )
+        # Same translation treatment as every other branch below (menu used
+        # to return early here, skipping it entirely — a Hindi-speaking
+        # student on any channel always got this in English).
+        detected_lang = student.preferred_language or "en-IN"
+    elif student.active_quiz_id and intent == "quiz_stop":
         reply_text = stop_quiz(db, student)
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "progress":
@@ -371,6 +379,23 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         relevant_chunks = [
             candidate_chunks[i - 1] for i in classification.relevant_excerpts if 1 <= i <= len(candidate_chunks)
         ]
+        # Semantic recall (a live Voyage call) is only worth paying for once
+        # a turn has actually reached the LLM-answer branch — see the note
+        # by the keyword-only fetch above. classify_intent already judged
+        # the keyword candidates' relevance; semantic candidates arrive
+        # after that call, so they're appended directly (already ranked by
+        # embedding similarity) rather than run through a second relevance
+        # judgment, up to the same overall candidate limit.
+        if len(relevant_chunks) < MAX_CANDIDATES:
+            semantic_chunks = await fetch_semantic_candidates(db, message_text, student.class_, student.board)
+            seen = {chunk.content for chunk in relevant_chunks}
+            for chunk in semantic_chunks:
+                if len(relevant_chunks) >= MAX_CANDIDATES:
+                    break
+                if chunk.content in seen:
+                    continue
+                seen.add(chunk.content)
+                relevant_chunks.append(chunk)
         result = await tutor_agent.respond(
             student.as_profile_dict(), message_text, history, weak_topics,
             image_generation_enabled=student.has_feature("image_generation"),
@@ -585,7 +610,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
 
     return ChatTurnResult(
         reply_text=outgoing_text, detected_lang=detected_lang, did_answer_via_llm=did_answer_via_llm,
-        image_prompt=image_prompt, wants_audio_reply=bool(locals().get("wants_audio_reply")),
+        image_prompt=image_prompt, wants_audio_reply=wants_audio_reply, menu_buttons=menu_buttons,
         video=video_result,
     )
 

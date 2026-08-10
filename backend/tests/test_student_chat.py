@@ -44,13 +44,13 @@ async def test_quiz_request_starts_a_real_quiz_not_a_free_text_reply(db_session,
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("tutor_agent.respond should not be called for a quiz request")
 
-    # fetch_hybrid_candidates runs raw Postgres full-text-search SQL
+    # fetch_candidate_chunks runs raw Postgres full-text-search SQL
     # (to_tsquery/@@) that the SQLite-backed db_session fixture can't
     # execute — these tests are about quiz/routing logic, not retrieval,
     # so it's mocked out the same way tutor_agent.respond often is below.
-    async def fake_fetch_hybrid_candidates(*a, **kw):
+    def fake_fetch_candidate_chunks(*a, **kw):
         return []
-    monkeypatch.setattr(chat_core, "fetch_hybrid_candidates", fake_fetch_hybrid_candidates)
+    monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core, "start_quiz", fake_start_quiz)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
@@ -76,13 +76,13 @@ async def test_answer_during_active_quiz_is_graded_not_treated_as_a_new_message(
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("tutor_agent.respond should not be called mid-quiz")
 
-    # fetch_hybrid_candidates runs raw Postgres full-text-search SQL
+    # fetch_candidate_chunks runs raw Postgres full-text-search SQL
     # (to_tsquery/@@) that the SQLite-backed db_session fixture can't
     # execute — these tests are about quiz/routing logic, not retrieval,
     # so it's mocked out the same way tutor_agent.respond often is below.
-    async def fake_fetch_hybrid_candidates(*a, **kw):
+    def fake_fetch_candidate_chunks(*a, **kw):
         return []
-    monkeypatch.setattr(chat_core, "fetch_hybrid_candidates", fake_fetch_hybrid_candidates)
+    monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core, "handle_quiz_answer", fake_handle_quiz_answer)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
@@ -112,13 +112,13 @@ async def test_non_quiz_message_still_uses_the_tutor_agent(db_session, monkeypat
             "off_level_class": None, "closing": False, "profile_answer": None, "class_confirm": None,
         }
 
-    # fetch_hybrid_candidates runs raw Postgres full-text-search SQL
+    # fetch_candidate_chunks runs raw Postgres full-text-search SQL
     # (to_tsquery/@@) that the SQLite-backed db_session fixture can't
     # execute — these tests are about quiz/routing logic, not retrieval,
     # so it's mocked out the same way tutor_agent.respond often is below.
-    async def fake_fetch_hybrid_candidates(*a, **kw):
+    def fake_fetch_candidate_chunks(*a, **kw):
         return []
-    monkeypatch.setattr(chat_core, "fetch_hybrid_candidates", fake_fetch_hybrid_candidates)
+    monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fake_respond)
 
@@ -143,9 +143,9 @@ async def test_progress_and_credit_usage_intents_now_work_on_the_web_channel(db_
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("progress/credit_usage should never reach tutor_agent.respond")
 
-    async def fake_fetch_hybrid_candidates(*a, **kw):
+    def fake_fetch_candidate_chunks(*a, **kw):
         return []
-    monkeypatch.setattr(chat_core, "fetch_hybrid_candidates", fake_fetch_hybrid_candidates)
+    monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
 
     async def fake_classify_progress(message_text, **kwargs):
