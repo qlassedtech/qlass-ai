@@ -142,7 +142,24 @@ class TutorAgent(BaseAgent):
         active_document_text: str | None = None,
         pending_class_confirm: str | None = None,
         pending_profile_field: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
+        """
+        Returns (static, dynamic) — split so the caller can mark only the
+        static half as Anthropic-cacheable (see call_llm/_cached_system).
+        static is everything genuinely stable across a student's turns
+        within a session (instructions, feature flags, weak_topics, the
+        TRACK-tag spec) — the large majority of this prompt's tokens.
+        dynamic is retrieved_chunks and active_document_text specifically,
+        since those are the two things that actually differ almost every
+        real turn (a new RAG lookup per question, a newly-pinned document)
+        — bundling them into the same cached block as the static text
+        would invalidate the cache on nearly every call, defeating the
+        whole point (confirmed live: this was happening before this split
+        existed — retrieved_chunks changing every turn meant the ~3,000-
+        token static instructional block was being billed as a fresh read
+        every single time instead of the ~90%-cheaper cache read it was
+        designed for).
+        """
         profile = (
             f"You are the Qlass AI Tutor, speaking with a student in class "
             f"{student.get('class', 'unknown')}, board {student.get('board', 'unknown')}. That's just "
@@ -396,9 +413,13 @@ class TutorAgent(BaseAgent):
                 f"or asks for practice questions), steer toward this — but always answer whatever they "
                 f"actually asked first; never ignore their real question to force this in."
             )
+        # Everything below varies almost every real turn (see this method's
+        # docstring) — kept OUT of `profile` so that block alone can be the
+        # Anthropic-cacheable one.
+        dynamic = ""
         if retrieved_chunks:
             knowledge = "\n\n".join(chunk.content for chunk in retrieved_chunks)
-            profile += (
+            dynamic += (
                 "\n\nThe following is real textbook material for this exact topic — use it to keep "
                 "terminology, scope, and any stated facts/definitions consistent with what this student's "
                 "syllabus actually covers, and prefer it over your own knowledge if the two ever "
@@ -418,13 +439,13 @@ class TutorAgent(BaseAgent):
             # student to re-paste it (confirmed live). Pinning the most
             # recently uploaded document/photo here means it stays available
             # for the entire session, however long the problem set is.
-            profile += (
+            dynamic += (
                 "\n\nThe student uploaded this document/photo earlier in the conversation — refer back "
                 "to it whenever they mention a question number, or any content from it, even if that "
                 "upload has scrolled out of the visible chat history:\n\n"
                 f"{active_document_text}"
             )
-        return profile
+        return profile, dynamic
 
     @staticmethod
     def _language_classifier_prompt(current_lang: str) -> str:
@@ -467,10 +488,16 @@ class TutorAgent(BaseAgent):
         # simply never have anything to pass here and the tutor teaches
         # from general knowledge exactly as it always has.
         retrieved_chunks = retrieved_chunks or []
-        system_prompt = self.build_context(
+        static_prompt, dynamic_prompt = self.build_context(
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
             active_document_text, pending_class_confirm, pending_profile_field,
         )
+        # Two separate blocks (see build_context's docstring) — only the
+        # static one is cache-marked, so a per-turn change in dynamic_prompt
+        # (a new RAG lookup, a newly-pinned document) never invalidates it.
+        system_prompt: list[dict] = [{"type": "text", "text": static_prompt, "cache_control": {"type": "ephemeral"}}]
+        if dynamic_prompt:
+            system_prompt.append({"type": "text", "text": dynamic_prompt})
         messages = (history or []) + [{"role": "user", "content": message}]
         current_lang = student.get("preferred_language") or "en-IN"
 

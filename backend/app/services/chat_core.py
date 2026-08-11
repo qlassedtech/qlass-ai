@@ -55,7 +55,7 @@ from app.services.referral import (
     generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer,
     REFERRAL_SIGNUP_BONUS, REFERRAL_LIFETIME_CAP,
 )
-from app.services.retrieval import MAX_CANDIDATES, fetch_candidate_chunks, fetch_semantic_candidates
+from app.services.retrieval import MAX_CANDIDATES, MAX_CHUNKS, fetch_candidate_chunks, fetch_semantic_candidates
 from app.services.sarvam_client import translate_text
 from app.services.youtube_client import find_best_video
 from app.agents.tutor_agent import TutorAgent
@@ -417,6 +417,14 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                     continue
                 seen.add(chunk.content)
                 relevant_chunks.append(chunk)
+        # Capped to MAX_CHUNKS (not MAX_CANDIDATES) for what actually goes
+        # into the LLM's context — every chunk here costs real input tokens
+        # on every single call since this part of the prompt can't be
+        # cached (see the note by tutor_agent.respond below), unlike the
+        # much larger static instructional prompt. Keyword-matched chunks
+        # (already LLM-relevance-judged) come first in the list, so the
+        # highest-trust ones are kept.
+        relevant_chunks = relevant_chunks[:MAX_CHUNKS]
         result = await tutor_agent.respond(
             student.as_profile_dict(), message_text, history, weak_topics,
             image_generation_enabled=student.has_feature("image_generation"),

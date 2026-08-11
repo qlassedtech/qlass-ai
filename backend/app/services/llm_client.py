@@ -21,19 +21,31 @@ class LLMResult:
     cache_read_tokens: int = 0
 
 
-def _cached_system(system_prompt: str) -> list[dict]:
+def _cached_system(system_prompt: str | list[dict]) -> list[dict]:
     """
-    Marks the system prompt as cacheable. The tutor's system prompt is long
-    and identical across a student's back-and-forth turns within a session
-    (same profile/feature flags, weak_topics rarely changes) but was being
-    resent as fresh input tokens on every single call — a cache hit (any
-    call reusing the same system prompt within Anthropic's 5-minute cache
-    window) costs ~90% less than a fresh read on that portion.
+    Marks the system prompt as cacheable. A plain string (every caller
+    except app.agents.tutor_agent) becomes one cache-marked block — the
+    whole thing is expected to be identical call-to-call within a session.
+
+    A caller can instead pass its own pre-built list of blocks — this is
+    what tutor_agent.TutorAgent.respond does, splitting its system prompt
+    into a large STATIC block (cache-marked) and a small DYNAMIC tail
+    (not cached) that varies almost every turn (RAG chunks, a pinned
+    document). Bundling those together as one cache-marked block, as this
+    function used to do unconditionally, meant the cache prefix changed on
+    nearly every real call — confirmed live, the ~3,000-token static
+    instructional prompt was being billed as a fresh read every single
+    time instead of the ~90%-cheaper cache read it was designed for,
+    because SOMETHING later in that same string almost always differed.
+    Passed through unchanged here since the caller already set its own
+    cache_control placement.
     """
+    if isinstance(system_prompt, list):
+        return system_prompt
     return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
 
 
-async def call_llm(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
+async def call_llm(system_prompt: str | list[dict], messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
     """
     Single point of contact with the LLM. Swap `model` or the provider
     here later without touching any agent code.

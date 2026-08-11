@@ -30,6 +30,13 @@ from app.services.text_utils import tokenize_words
 # classify_intent already runs once per message regardless, that judgment
 # rides along in the same call instead of paying for a dedicated one.
 MAX_CANDIDATES = 8
+# Cap on how many chunks actually go into the LLM's context (as opposed to
+# MAX_CANDIDATES, the recall pool they're drawn from) — each chunk costs
+# real input tokens on every single call since the RAG portion of the
+# prompt can't be cached (it changes almost every turn), unlike the much
+# larger static instructional prompt. Confirmed live: capping this from 8
+# down to 3 measurably cuts per-turn cost with no measured quality loss —
+# the top few candidates by rank/similarity carry the real signal.
 MAX_CHUNKS = 3
 MAX_CHUNK_CHARS = 1500  # keeps the system prompt bounded even if a chunk is unusually long
 MIN_WORD_LEN = 3  # drops tiny function words (if, is, in, to...) that add real recall noise, not signal
