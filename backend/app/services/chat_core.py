@@ -220,7 +220,14 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     )
     intent = CANONICAL_COMMAND_INTENT.get(message_text.strip().lower(), classification.intent)
     quiz_topic_request = classification.quiz_topic
-    mock_test_request = classification.wants_mock_test
+    # classify_intent's own prompt already lists "mock test" as a literal
+    # example of wants_mock_test=yes — confirmed live it still missed the
+    # bare phrase itself, silently falling through to generic tutoring
+    # (an improvised, unscored fake quiz question) instead of the real
+    # scored mock_test flow. "mock test" is unambiguous enough that this
+    # doesn't need the model's judgment at all, same reasoning as
+    # CANONICAL_COMMAND_INTENT above.
+    mock_test_request = classification.wants_mock_test or "mock test" in message_text.lower()
 
     did_answer_via_llm = False
     image_prompt = None
