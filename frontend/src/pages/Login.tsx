@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { absoluteUrl, api, normalizePhone, parentApi, publicApi, setParentToken, setStudentToken, setToken } from "../api";
 import ThemeToggle from "../components/ThemeToggle";
 
-type Step = "phone" | "password" | "otp" | "parent_otp" | "teacher_otp";
+type Step = "phone" | "password" | "otp" | "parent_otp" | "teacher_otp" | "student_password";
 
 export default function Login() {
   const [searchParams] = useSearchParams();
@@ -38,6 +38,8 @@ export default function Login() {
       const { login_type } = await api.checkPhone(normalized);
       if (login_type === "password") {
         setStep("password");
+      } else if (login_type === "student_password") {
+        setStep("student_password");
       } else if (login_type === "parent_otp") {
         await parentApi.requestOtp(normalized);
         setStep("parent_otp");
@@ -65,6 +67,21 @@ export default function Login() {
       // single-school "Student Roster" default.
       const me = await api.me();
       navigate(me.role === "org_admin" ? "/schools" : "/students");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "We couldn't sign you in — please try again");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleStudentPasswordSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const { access_token } = await api.studentLogin(phone, password);
+      setStudentToken(access_token);
+      navigate("/chat");
     } catch (err) {
       setError(err instanceof Error ? err.message : "We couldn't sign you in — please try again");
     } finally {
@@ -134,6 +151,7 @@ export default function Login() {
   const submitHandlers: Record<Step, (e: React.FormEvent) => void> = {
     phone: handlePhoneSubmit,
     password: handlePasswordSubmit,
+    student_password: handleStudentPasswordSubmit,
     otp: handleOtpSubmit,
     parent_otp: handleParentOtpSubmit,
     teacher_otp: handleTeacherOtpSubmit,
@@ -160,6 +178,7 @@ export default function Login() {
         <p className="login-subtitle">
           {step === "phone" && "Sign in as a school, teacher, parent, or student"}
           {step === "password" && "Enter your portal password"}
+          {step === "student_password" && "Enter your password"}
           {step === "otp" && "Enter the code we sent over WhatsApp"}
           {step === "parent_otp" && "Enter the code we sent over WhatsApp"}
           {step === "teacher_otp" && "Enter the code we sent over WhatsApp"}
@@ -172,7 +191,7 @@ export default function Login() {
           </label>
         )}
 
-        {step === "password" && (
+        {(step === "password" || step === "student_password") && (
           <>
             <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: 13 }}>{phone}</p>
             <label>
@@ -204,7 +223,7 @@ export default function Login() {
             ? "Please wait..."
             : step === "phone"
               ? "Continue"
-              : step === "password"
+              : step === "password" || step === "student_password"
                 ? "Sign In"
                 : "Verify & Continue"}
         </button>

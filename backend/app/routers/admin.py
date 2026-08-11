@@ -82,6 +82,9 @@ class StudentUpdateRequest(BaseModel):
     features: dict | None = None
     parent_phone: str | None = None
     parent_name: str | None = None
+    # An alternate real WhatsApp number — set when the student's primary
+    # `phone` above isn't itself on WhatsApp. See Student.whatsapp_phone.
+    whatsapp_phone: str | None = None
 
 
 def _student_to_dict(
@@ -125,6 +128,8 @@ def _student_to_dict(
         "parent_name": parent.name if parent else None,
         "subscription_plan": student.subscription_plan,
         "subscription_expires_at": student.subscription_expires_at,
+        "whatsapp_phone": student.whatsapp_phone,
+        "has_password": student.password_hash is not None,
     }
 
 
@@ -565,6 +570,26 @@ def update_student(
         student.focus_topic = body.focus_topic
     if body.features is not None:
         student.features = {**(student.features or {}), **body.features}
+    if body.whatsapp_phone is not None:
+        whatsapp_phone = body.whatsapp_phone.strip() or None
+        if whatsapp_phone:
+            # Two students routing WhatsApp messages to the same number
+            # would be genuinely ambiguous (see _resolve_active_student) —
+            # same one-number-one-owner reasoning as parent_phone below,
+            # and also checked against every OTHER student's primary
+            # `phone`, since that's the other column inbound messages can
+            # match against.
+            clash = (
+                db.query(Student.id)
+                .filter(
+                    Student.id != student.id,
+                    (Student.whatsapp_phone == whatsapp_phone) | (Student.phone == whatsapp_phone),
+                )
+                .first()
+            )
+            if clash:
+                raise HTTPException(status_code=409, detail="That WhatsApp number is already linked to a different student")
+        student.whatsapp_phone = whatsapp_phone
     if body.parent_phone is not None:
         # Parent.phone is globally unique — the same number can't be
         # linked to two different students' parent accounts.
@@ -581,6 +606,33 @@ def update_student(
     db.commit()
     db.refresh(student)
     return _student_to_dict(db, student)
+
+
+class SetStudentPasswordRequest(BaseModel):
+    password: str
+
+
+@router.post("/admin/students/{student_id}/set-password")
+def set_student_password(
+    student_id: int, body: SetStudentPasswordRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Gives a student a portal password — the only login option for a student
+    with no WhatsApp access at all, since the normal path
+    (POST /student-app/auth/request-otp) can only ever deliver a code over
+    WhatsApp. A school admin/teacher sets this on the student's behalf
+    (there's no "forgot password" self-serve flow for a student without
+    WhatsApp either, for the same reason — an admin resets it the same way
+    they set it originally). Once set, /student-app/auth/check-phone routes
+    this phone to password login instead of OTP.
+    """
+    student = _get_scoped_student_or_404(db, teacher, student_id)
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    student.password_hash = hash_password(body.password)
+    db.commit()
+    return {"has_password": True}
 
 
 @router.get("/admin/students/{student_id}/progress")

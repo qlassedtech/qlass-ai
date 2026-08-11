@@ -211,6 +211,8 @@ export interface Student {
   parent_name: string | null;
   subscription_plan: string;
   subscription_expires_at: string | null;
+  whatsapp_phone: string | null;
+  has_password: boolean;
 }
 
 export interface TeacherAccount {
@@ -340,6 +342,13 @@ export const api = {
     }>,
   updateStudent: (id: number, data: Partial<Student> & { class_?: string }) =>
     request(`/admin/students/${id}`, { method: "PATCH", body: JSON.stringify(data) }) as Promise<Student>,
+  // For a student with no WhatsApp access at all — the only other login
+  // path (see student_app.py's /auth/login). A school admin/teacher sets
+  // this on the student's behalf.
+  setStudentPassword: (id: number, password: string) =>
+    request(`/admin/students/${id}/set-password`, {
+      method: "POST", body: JSON.stringify({ password }),
+    }) as Promise<{ has_password: boolean }>,
   getProgress: (id: number) => request(`/admin/students/${id}/progress`) as Promise<ProgressResponse>,
   sendDigest: (id: number, toPhone: string) =>
     request(`/admin/students/${id}/digest`, { method: "POST", body: JSON.stringify({ to_phone: toPhone }) }),
@@ -475,8 +484,16 @@ export const api = {
     request(`/admin/presentation/status/${generationId}`) as Promise<{ status: string; url: string | null }>,
   checkPhone: (phone: string) =>
     request("/student-app/auth/check-phone", { method: "POST", body: JSON.stringify({ phone }) }) as Promise<{
-      login_type: "password" | "otp" | "parent_otp";
+      login_type: "password" | "otp" | "parent_otp" | "student_password";
     }>,
+  // Password login for a student with no WhatsApp access at all — a school
+  // admin/teacher sets this via the student's profile page (see
+  // POST /admin/students/{id}/set-password); a student who does have
+  // WhatsApp still logs in with OTP as normal (api.verifyStudentOtp).
+  studentLogin: (phone: string, password: string) =>
+    request("/student-app/auth/login", {
+      method: "POST", body: JSON.stringify({ phone, password }),
+    }) as Promise<{ access_token: string; student: StudentProfile }>,
   // Sits alongside password login (api.login) for teacher/admin accounts —
   // an alternative, not a replacement.
   requestTeacherOtp: (phone: string) =>

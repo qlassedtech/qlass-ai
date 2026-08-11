@@ -17,6 +17,7 @@ from app.services.rate_limit import is_otp_rate_limited
 from app.services.referral import REFERRAL_SIGNUP_BONUS
 from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
+from app.services.teacher_auth import verify_password
 from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
 from app.services.whatsapp_client import send_template_message
@@ -54,6 +55,9 @@ def check_phone(body: CheckPhoneRequest, db: Session = Depends(get_db)):
         lands in the teacher portal, where "My AI Tutor" is available)
       - a phone a school has linked as a parent contact -> "parent_otp"
         (read-only progress + billing view for their child)
+      - a student a school has given a portal password (see
+        POST /admin/students/{id}/set-password — for a student with no
+        WhatsApp access at all) -> "student_password"
       - anything else -> "otp" (a plain student, WhatsApp OTP, no
         password ever exists for these accounts) into the student chat app
     Checked in this order since a phone could theoretically appear in more
@@ -65,7 +69,36 @@ def check_phone(body: CheckPhoneRequest, db: Session = Depends(get_db)):
         return {"login_type": "password"}
     if db.query(Parent).filter(Parent.phone == phone).first():
         return {"login_type": "parent_otp"}
+    if db.query(Student).filter(Student.phone == phone, Student.password_hash.isnot(None)).first():
+        return {"login_type": "student_password"}
     return {"login_type": "otp"}
+
+
+class StudentLoginRequest(BaseModel):
+    phone: str
+    password: str
+
+
+@router.post("/student-app/auth/login")
+def student_login(body: StudentLoginRequest, db: Session = Depends(get_db)):
+    """
+    Password login for a student with no WhatsApp access — sits alongside
+    OTP login (see verify_student_otp below), never a replacement; a
+    student who does have WhatsApp still uses OTP as normal, since only a
+    school admin/teacher can set a password for a student in the first
+    place (see POST /admin/students/{id}/set-password).
+    """
+    phone = normalize_phone(body.phone)
+    student = (
+        db.query(Student)
+        .filter(Student.phone == phone, Student.is_staff_profile.is_(False))
+        .order_by(Student.id.desc())
+        .first()
+    )
+    if not student or not student.password_hash or not verify_password(body.password, student.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid phone or password")
+    token = create_student_access_token(student.id)
+    return {"access_token": token, "student": student_summary(db, student)}
 
 
 @router.post("/student-app/auth/request-otp")

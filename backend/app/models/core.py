@@ -80,6 +80,20 @@ class Student(Base):
     # profile; see app.services.active_profile for how the active one is
     # resolved per incoming message.
     phone = Column(Text, nullable=False, index=True)
+    # Set only when a school gives this student a portal password — the
+    # normal path (WhatsApp OTP) needs no password at all, this exists
+    # specifically for a student with no WhatsApp access (see
+    # POST /admin/students/{id}/set-password and the student-app
+    # /auth/login endpoint). Never set by a student themselves.
+    password_hash = Column(Text)
+    # An alternate real WhatsApp number for this student, when their
+    # primary/login `phone` above isn't itself on WhatsApp (e.g. a parent's
+    # or a different personal number is what they actually message from).
+    # app.routers.whatsapp._resolve_active_student matches an inbound
+    # message against EITHER phone or whatsapp_phone — `phone` stays the
+    # one identity used for portal login/display, this is purely a second
+    # routing key. Set via PATCH /admin/students/{id}.
+    whatsapp_phone = Column(Text, index=True)
     class_ = Column("class", Text)
     board = Column(Text)
     school = Column(Text)

@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -232,8 +233,20 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     check below for why that wasn't actually true until it was fixed); the
     multi-profile path only kicks in for phones that actually have more
     than one student on them.
+
+    Matches against `phone` OR `whatsapp_phone` — the latter covers a
+    student whose primary/login phone isn't itself on WhatsApp, so a
+    school linked a different real WhatsApp number to the same student
+    (see Student.whatsapp_phone / PATCH /admin/students/{id}). A message
+    from that alternate number routes to the SAME existing student, never
+    creates a new profile.
     """
-    students = db.query(Student).filter(Student.phone == from_phone).order_by(Student.id).all()
+    students = (
+        db.query(Student)
+        .filter(or_(Student.phone == from_phone, Student.whatsapp_phone == from_phone))
+        .order_by(Student.id)
+        .all()
+    )
 
     if not students:
         return await _create_new_student(db, from_phone, message_text), None

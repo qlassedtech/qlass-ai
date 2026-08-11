@@ -41,6 +41,19 @@ MAX_CHUNKS = 3
 MAX_CHUNK_CHARS = 1500  # keeps the system prompt bounded even if a chunk is unusually long
 MIN_WORD_LEN = 3  # drops tiny function words (if, is, in, to...) that add real recall noise, not signal
 
+# Retrieval scoping default when a profile's own `board` isn't known at all
+# (e.g. a teacher's personal "My AI Tutor" profile, or a school that hasn't
+# set its own board yet) — NCERT content is tagged board="CBSE" in
+# `documents` (there's no literal "NCERT" board value), so this is the
+# closest match to "NCERT by default". Confirmed live: leaving board
+# unscoped in this case searched the ENTIRE corpus including NIOS, and a
+# plain "what is photosynthesis" question from an unscoped profile got
+# cited against a Class 12 NIOS chapter — surprising for a query that
+# didn't ask for anything NIOS-specific. Only applied when board is
+# genuinely unset; an explicitly different board (ICSE, BSEB, ...) is
+# never overridden.
+DEFAULT_BOARD = "CBSE"
+
 # pgvector's <=> operator returns cosine DISTANCE (0 = identical). Cosine
 # similarity search always returns its top-N nearest neighbors regardless
 # of whether any of them are actually close — for a query on a topic that
@@ -87,8 +100,9 @@ def fetch_candidate_chunks(
     class/board are known (confirmed live during development: an earlier
     version fell back to an unscoped search whenever the scoped one came
     up empty, which defeated the whole point — a wrong-class chunk is
-    worse than none at all). Only queries unscoped when class/board
-    genuinely aren't known.
+    worse than none at all). class is only left unscoped when genuinely
+    unknown; board is NEVER left unscoped — it defaults to DEFAULT_BOARD
+    (see that constant) rather than searching the entire corpus.
     Returns [] (never raises) if there's simply no matching content yet,
     which is the common case until a school's real textbook set is
     ingested via scripts/ingest_document.py.
@@ -97,6 +111,7 @@ def fetch_candidate_chunks(
     if not words:
         return []
     tsquery_str = " | ".join(words)
+    board = board or DEFAULT_BOARD
 
     base_query = """
         SELECT dc.content, d.class, d.subject, d.chapter, d.board,
@@ -106,16 +121,13 @@ def fetch_candidate_chunks(
         WHERE dc.content_tsv @@ to_tsquery('english', :query)
     """
     params: dict = {"query": tsquery_str, "limit": limit}
-    scoping = []
+    scoping = ["d.board = :board"]
+    params["board"] = board
     if class_:
         scoping.append("d.class = :class_")
         params["class_"] = class_
-    if board:
-        scoping.append("d.board = :board")
-        params["board"] = board
 
-    sql = f"{base_query} AND {' AND '.join(scoping)} ORDER BY rank DESC LIMIT :limit" if scoping \
-        else f"{base_query} ORDER BY rank DESC LIMIT :limit"
+    sql = f"{base_query} AND {' AND '.join(scoping)} ORDER BY rank DESC LIMIT :limit"
     rows = db.execute(text(sql), params).fetchall()
     return [
         RetrievedChunk(content=row[0][:MAX_CHUNK_CHARS], class_=row[1], subject=row[2], chapter=row[3], board=row[4])
@@ -146,6 +158,7 @@ async def fetch_semantic_candidates(
     if query_embedding is None:
         return []
     vector_literal = format_vector_literal(query_embedding)
+    board = board or DEFAULT_BOARD
 
     base_query = """
         SELECT dc.content, d.class, d.subject, d.chapter, d.board
@@ -155,19 +168,13 @@ async def fetch_semantic_candidates(
           AND dc.embedding <=> CAST(:vector AS vector) < :max_distance
     """
     params: dict = {"vector": vector_literal, "limit": limit, "max_distance": MAX_SEMANTIC_DISTANCE}
-    scoping = []
+    scoping = ["d.board = :board"]
+    params["board"] = board
     if class_:
         scoping.append("d.class = :class_")
         params["class_"] = class_
-    if board:
-        scoping.append("d.board = :board")
-        params["board"] = board
 
-    sql = (
-        f"{base_query} AND {' AND '.join(scoping)} ORDER BY dc.embedding <=> CAST(:vector AS vector) LIMIT :limit"
-        if scoping
-        else f"{base_query} ORDER BY dc.embedding <=> CAST(:vector AS vector) LIMIT :limit"
-    )
+    sql = f"{base_query} AND {' AND '.join(scoping)} ORDER BY dc.embedding <=> CAST(:vector AS vector) LIMIT :limit"
     try:
         rows = db.execute(text(sql), params).fetchall()
     except Exception:

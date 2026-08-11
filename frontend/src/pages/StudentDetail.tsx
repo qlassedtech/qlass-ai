@@ -37,6 +37,10 @@ export default function StudentDetail() {
   const [gender, setGender] = useState("");
   const [parentPhone, setParentPhone] = useState("");
   const [parentName, setParentName] = useState("");
+  const [whatsappPhone, setWhatsappPhone] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordStatus, setPasswordStatus] = useState<string | null>(null);
+  const [settingPassword, setSettingPassword] = useState(false);
   const [digestPhone, setDigestPhone] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -66,6 +70,7 @@ export default function StudentDetail() {
         setGender(found.gender || "");
         setParentPhone(found.parent_phone || "");
         setParentName(found.parent_name || "");
+        setWhatsappPhone(found.whatsapp_phone || "");
       }
     });
     api.getProgress(studentId).then(setProgress);
@@ -141,11 +146,31 @@ export default function StudentDetail() {
         class_: classNum, board, school: schoolName || undefined, gender: gender || undefined,
         focus_topic: focusTopic,
         parent_phone: parentPhone || undefined, parent_name: parentName || undefined,
+        whatsapp_phone: whatsappPhone.trim() || undefined,
       });
       setStatus("Saved!");
       load();
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Failed to save");
+    }
+  }
+
+  async function handleSetPassword() {
+    setPasswordStatus(null);
+    if (newPassword.trim().length < 6) {
+      setPasswordStatus("Password must be at least 6 characters");
+      return;
+    }
+    setSettingPassword(true);
+    try {
+      await api.setStudentPassword(studentId, newPassword.trim());
+      setPasswordStatus("Password set — this student can now sign in with their phone and this password.");
+      setNewPassword("");
+      load();
+    } catch (err) {
+      setPasswordStatus(err instanceof Error ? err.message : "Failed to set password");
+    } finally {
+      setSettingPassword(false);
     }
   }
 
@@ -338,6 +363,27 @@ export default function StudentDetail() {
         </div>
       )}
 
+      <div className="card" style={{ marginBottom: 24 }}>
+        <h3>Portal Password</h3>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          {student.has_password
+            ? "This student already has a password set and can sign in without WhatsApp."
+            : "Only needed for a student with no WhatsApp access at all — normally they log in with a WhatsApp code instead."}
+        </p>
+        <div className="inline-form">
+          <input
+            type="password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder={student.has_password ? "New password" : "Set a password"}
+          />
+          <button type="button" onClick={handleSetPassword} disabled={settingPassword}>
+            {settingPassword ? "Saving..." : student.has_password ? "Reset Password" : "Set Password"}
+          </button>
+        </div>
+        {passwordStatus && <p className="status" style={{ marginTop: 8 }}>{passwordStatus}</p>}
+      </div>
+
       <div className="grid-2">
         <div className="card">
           <h3>Learner Profile</h3>
@@ -380,6 +426,14 @@ export default function StudentDetail() {
           <label>
             Focus topic (teacher-assigned)
             <input value={focusTopic} onChange={(e) => setFocusTopic(e.target.value)} placeholder="e.g. quadratic equations" />
+          </label>
+          <label>
+            Alternate WhatsApp number
+            <input
+              value={whatsappPhone}
+              onChange={(e) => setWhatsappPhone(e.target.value)}
+              placeholder="Only if different from the number above"
+            />
           </label>
           <label>
             Parent's WhatsApp number
