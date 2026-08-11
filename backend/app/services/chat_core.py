@@ -219,6 +219,21 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         cache_read_tokens=classification.llm_result.cache_read_tokens,
     )
     intent = CANONICAL_COMMAND_INTENT.get(message_text.strip().lower(), classification.intent)
+    # Confirmed live: classify_intent occasionally misclassifies a genuine
+    # tutoring question as "menu" (e.g. "Explain the process of
+    # photosynthesis" right after a greeting reply that itself ended in a
+    # question) — not reproducible on retry with the same phrase or the
+    # same account, so likely inherent LLM noise rather than a specific
+    # code bug. Logged here (raw classifier output vs. the possibly-
+    # overridden final intent, plus the last assistant turn for context)
+    # so a future occurrence has a real debug trail instead of having to
+    # be caught live again.
+    if classification.intent in ("menu", "quiz_stop") or intent != classification.intent:
+        logger.info(
+            "intent classification student_id=%s text=%r raw_intent=%s final_intent=%s last_assistant=%r",
+            student.id, message_text[:200], classification.intent, intent,
+            (last_assistant_message or "")[:200],
+        )
     quiz_topic_request = classification.quiz_topic
     # classify_intent's own prompt already lists "mock test" as a literal
     # example of wants_mock_test=yes — confirmed live it still missed the
