@@ -162,6 +162,12 @@ export default function Login() {
       <div style={{ position: "absolute", top: 20, right: 20, zIndex: 2 }}>
         <ThemeToggle />
       </div>
+      {/* .center-page centers its children as a flex ROW — without this
+          wrapper, the "Powered by" badge below sits as a second row item
+          beside the card instead of stacked under it, shoving the card off
+          true center. Wrapping both in one column container makes the pair
+          center as a single unit, badge correctly stacked underneath. */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", position: "relative", zIndex: 1 }}>
       <form className="card" onSubmit={submitHandlers[step]}>
         {schoolName ? (
           <div className="landing-school-logo-large" style={{ width: 96, height: 96, margin: "0 auto 16px" }}>
@@ -257,11 +263,12 @@ export default function Login() {
         )}
       </form>
       {schoolName && (
-        <div className="landing-powered-by" style={{ position: "relative", zIndex: 1 }}>
+        <div className="landing-powered-by">
           <span>Powered by</span>
           <img src="/logo-tight.png" alt="Qlass Learning" />
         </div>
       )}
+      </div>
     </div>
   );
 }

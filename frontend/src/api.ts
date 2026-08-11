@@ -213,6 +213,7 @@ export interface Student {
   subscription_expires_at: string | null;
   whatsapp_phone: string | null;
   has_password: boolean;
+  approval_status: "approved" | "pending";
 }
 
 export interface TeacherAccount {
@@ -306,6 +307,11 @@ export const api = {
     }>,
   me: () => request("/admin/me") as Promise<Teacher>,
   listStudents: () => request("/admin/students") as Promise<Student[]>,
+  // Self-registered (via a school's own /join?school=... link) students
+  // awaiting a teacher's confirmation — see Student.approval_status.
+  listPendingStudents: () => request("/admin/students/pending") as Promise<Student[]>,
+  approveStudent: (id: number) =>
+    request(`/admin/students/${id}/approve`, { method: "POST" }) as Promise<Student>,
   createStudent: (data: { name: string; phone: string; class_?: string; board?: string; school?: string }) =>
     request("/admin/students", { method: "POST", body: JSON.stringify(data) }) as Promise<Student>,
   previewStudentBulkUpload: (file: File, centreId?: number) => {

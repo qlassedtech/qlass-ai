@@ -32,6 +32,7 @@ export default function SchoolProfile() {
   const [error, setError] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [waLinkCopied, setWaLinkCopied] = useState(false);
+  const [loginLinkCopied, setLoginLinkCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
@@ -58,6 +59,7 @@ export default function SchoolProfile() {
   if (!school) return error ? <p className="error">{error}</p> : <p>Loading...</p>;
 
   const registrationLink = `${window.location.origin}/join?school=${slugify(school.name)}`;
+  const loginLink = `${window.location.origin}/login?school=${slugify(school.name)}`;
   const whatsappLink = `https://wa.me/${BOT_WHATSAPP_NUMBER}?text=${encodeURIComponent(
     `Hi, I am a student from ${school.name}. I am excited to get access to AI tutor`,
   )}`;
@@ -117,6 +119,29 @@ export default function SchoolProfile() {
             }}
           >
             {linkCopied ? "Copied!" : "Copy Link"}
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 20 }}>
+        <h3 style={{ marginTop: 0 }}>Sign-In Link</h3>
+        <p className="muted" style={{ marginTop: -8, marginBottom: 16, fontSize: 13 }}>
+          For someone who already has an account (a teacher, or a student you've already enrolled) — shows{" "}
+          {school.name}'s own logo and name instead of the generic Qlass login page. Bookmark-friendly; share this
+          instead of the plain site link.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input readOnly value={loginLink} onFocus={(e) => e.target.select()} />
+          <button
+            type="button"
+            style={{ flexShrink: 0 }}
+            onClick={() => {
+              navigator.clipboard.writeText(loginLink);
+              setLoginLinkCopied(true);
+              setTimeout(() => setLoginLinkCopied(false), 2000);
+            }}
+          >
+            {loginLinkCopied ? "Copied!" : "Copy Link"}
           </button>
         </div>
       </div>

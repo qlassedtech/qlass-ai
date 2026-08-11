@@ -94,6 +94,14 @@ class Student(Base):
     # one identity used for portal login/display, this is purely a second
     # routing key. Set via PATCH /admin/students/{id}.
     whatsapp_phone = Column(Text, index=True)
+    # "approved" (default — every admin/teacher-provisioned student, and
+    # every student that existed before this column did) or "pending" — a
+    # student who self-registered through a specific school's link (see
+    # app.routers.public.register) starts as "pending" until a teacher
+    # confirms them via POST /admin/students/{id}/approve. Not a hard gate
+    # on chatting — purely a review/visibility flag, see
+    # GET /admin/students/pending.
+    approval_status = Column(Text, default="approved")
     class_ = Column("class", Text)
     board = Column(Text)
     school = Column(Text)

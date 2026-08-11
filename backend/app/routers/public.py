@@ -55,10 +55,18 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
         return {"success": False, "error": "Please enter a valid 10-digit WhatsApp number"}
 
     centre_id = tenancy.get_qlass_direct_centre_id(db)
+    # A student who came through a SPECIFIC school's own link starts
+    # "pending" — that school's teachers get to confirm this is actually
+    # their student before it counts as a real enrolled roster member (see
+    # GET /admin/students/pending). The generic Qlass Direct fallback
+    # below (no school link at all) has no teacher to review it against,
+    # so it stays "approved" same as always.
+    approval_status = "approved"
     if body.school:
         centre = tenancy.find_centre_by_slug(db, body.school)
         if centre:
             centre_id = centre.id
+            approval_status = "pending"
 
     # Phone-only match: the form is deliberately too small to disambiguate
     # a shared family phone with more than one child (see
@@ -76,7 +84,8 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
         return {"success": True, "already_registered": True}
 
     student = tenancy.create_student_profile(
-        db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES), class_name=(body.student_class or "").strip() or None
+        db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES),
+        class_name=(body.student_class or "").strip() or None, approval_status=approval_status,
     )
 
     # send_template_message (Wati's singular /api/v1/sendTemplateMessage),

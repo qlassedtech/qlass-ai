@@ -130,6 +130,7 @@ def _student_to_dict(
         "subscription_expires_at": student.subscription_expires_at,
         "whatsapp_phone": student.whatsapp_phone,
         "has_password": student.password_hash is not None,
+        "approval_status": student.approval_status or "approved",
     }
 
 
@@ -368,6 +369,36 @@ def list_students(
         )
         for s in students
     ]
+
+
+@router.get("/admin/students/pending")
+def list_pending_students(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    """
+    Students who self-registered through this school's own link (see
+    POST /public/register, app.services.tenancy.create_student_profile's
+    approval_status parameter) and haven't been confirmed by a teacher yet
+    — a separate, smaller list from the main roster (GET /admin/students)
+    so a school can review "is this really our student?" before treating
+    a self-signup as a real enrolled member, without it getting lost among
+    everyone else.
+    """
+    students = (
+        _scoped_students(db, teacher)
+        .filter(Student.approval_status == "pending")
+        .order_by(Student.id.desc())
+        .all()
+    )
+    return [_student_to_dict(db, s) for s in students]
+
+
+@router.post("/admin/students/{student_id}/approve")
+def approve_student(
+    student_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    student = _get_scoped_student_or_404(db, teacher, student_id)
+    student.approval_status = "approved"
+    db.commit()
+    return _student_to_dict(db, student)
 
 
 @router.post("/admin/students")
