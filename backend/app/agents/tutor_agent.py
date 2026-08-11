@@ -22,6 +22,31 @@ _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
 _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
 _VIDEO_QUERY_TAG = re.compile(r"\n?\[\[VIDEO_QUERY: (.*?)\]\]")
 
+# Backup signal for off_level — confirmed live the hidden TRACK tag misses
+# this real, non-rare (see the comment above _TRACK_TAG: "off_level in
+# particular is often omitted") even on turns where the model's own VISIBLE
+# reply plainly says so (e.g. "This topic is usually covered in Class
+# 11-12, so it's a bit ahead of your current level" for a registered
+# Class 8 student — off_level stayed unset that same turn). Scans the
+# actual reply text for the same kind of phrasing the model already uses
+# when it DOES notice the mismatch, as a fallback for when the hidden tag
+# doesn't agree with what it just told the student.
+_LEVEL_MISMATCH_PHRASES = (
+    "ahead of your", "beyond your level", "usually covered in class", "usually taught in class",
+    "not covered until class", "your current level", "this is a class",
+)
+_CLASS_MENTION_RE = re.compile(r"\bclass\s+(\d{1,2})\b", re.IGNORECASE)
+
+
+def _infer_off_level_from_text(reply_text: str, student_class: str | None) -> str | None:
+    lower = reply_text.lower()
+    if not any(phrase in lower for phrase in _LEVEL_MISMATCH_PHRASES):
+        return None
+    for match in _CLASS_MENTION_RE.findall(lower):
+        if match != (student_class or ""):
+            return match
+    return None
+
 
 # What each Student.pending_profile_field value actually asks the student,
 # and how the extracted answer should be formatted — mirrors the questions
@@ -542,6 +567,8 @@ class TutorAgent(BaseAgent):
         }
 
         parsed = parse_track_reply(raw_reply)
+        if not parsed["off_level_class"]:
+            parsed["off_level_class"] = _infer_off_level_from_text(parsed["reply"], student.get("class"))
         # Generated from the DB rows actually retrieved, never left to the
         # LLM to compose — it can't cite a chapter it wasn't given, or
         # invent one, the way asking the model to "mention your source"
