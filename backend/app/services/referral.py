@@ -27,6 +27,13 @@ REFERRAL_MILESTONES: list[tuple[str, int, int, int, float]] = [
     ("week3", 14, 20, 1, 30.0),
 ]
 
+# The most a referrer can ever earn from a single referral: the signup
+# bonus plus every milestone bonus, if the referred student hits all of
+# them. Shown to a student asking about the referral program (see
+# app.services.chat_core's "referral" intent) so the number quoted always
+# matches REFERRAL_MILESTONES instead of drifting out of sync with it.
+REFERRAL_LIFETIME_CAP = REFERRAL_SIGNUP_BONUS + sum(bonus for _, _, _, _, bonus in REFERRAL_MILESTONES)
+
 # "Worth asking to refer a friend" bar — shared between the WhatsApp main
 # menu (see whatsapp.py's MENU_BUTTONS) and scripts/send_referral_nudges.py,
 # so both use the same definition of a credible, high-conversion referrer

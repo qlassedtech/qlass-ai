@@ -51,7 +51,10 @@ from app.services.progress_report import (
     get_student_stats, get_activity_stats, get_welcome_back_note, get_chapter_coverage, format_progress_message,
 )
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
-from app.services.referral import generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer
+from app.services.referral import (
+    generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer,
+    REFERRAL_SIGNUP_BONUS, REFERRAL_LIFETIME_CAP,
+)
 from app.services.retrieval import MAX_CANDIDATES, fetch_candidate_chunks, fetch_semantic_candidates
 from app.services.sarvam_client import translate_text
 from app.services.youtube_client import find_best_video
@@ -326,8 +329,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             db.commit()
         reply_text = (
             f"Share your code with a friend — when they message me for the first time and start "
-            f"asking questions, you'll get ₹{cost_tracker.REFERRAL_BONUS:.0f} in AI credits "
-            f"(up to ₹{cost_tracker.REFERRAL_LIFETIME_CAP:.0f} total)! 🎉\n\n"
+            f"asking questions, you'll get ₹{REFERRAL_SIGNUP_BONUS:.0f} in AI credits "
+            f"(up to ₹{REFERRAL_LIFETIME_CAP:.0f} total)! 🎉\n\n"
             f"Your code: *{student.referral_code}*\n"
             f"Tell them to just message me and mention this code in their first message."
         )
