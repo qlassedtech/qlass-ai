@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Centre, Student, ProcessedWebhookMessage
+from app.models.core import Centre, Student, Teacher, ProcessedWebhookMessage
 from app.services.chat_core import process_message
 from app.services.whatsapp_client import (
     parse_incoming_message,
@@ -249,6 +249,19 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
     )
 
     if not students:
+        # A registered teacher/admin's own phone, messaging the bot cold
+        # (never opened "My AI Tutor" on the web portal first, so no
+        # linked Student profile exists yet) — confirmed live this was a
+        # real, pre-existing gap: falling through to _create_new_student
+        # created a completely disconnected "New Student" profile with
+        # is_staff_profile=False and centre_id defaulting to the generic
+        # Qlass Direct pool, not their real school, with no connection to
+        # their actual teacher identity at all. Route to (or lazily
+        # create) their real personal tutor profile instead — same call
+        # GET /admin/my-tutor itself makes.
+        teacher = db.query(Teacher).filter(Teacher.phone == from_phone).first()
+        if teacher:
+            return tenancy.get_or_create_linked_student(db, teacher.phone, teacher.name, teacher.centre_id), None
         return await _create_new_student(db, from_phone, message_text), None
 
     # The overwhelming majority of phones have exactly one profile — no
