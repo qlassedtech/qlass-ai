@@ -218,6 +218,13 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         cache_write_tokens=classification.llm_result.cache_write_tokens,
         cache_read_tokens=classification.llm_result.cache_read_tokens,
     )
+    if classification.relevance_llm_result is not None:
+        cost_tracker.record_claude_usage(
+            db, classification.relevance_llm_result.model, classification.relevance_llm_result.input_tokens,
+            classification.relevance_llm_result.output_tokens, student.id,
+            cache_write_tokens=classification.relevance_llm_result.cache_write_tokens,
+            cache_read_tokens=classification.relevance_llm_result.cache_read_tokens,
+        )
     intent = CANONICAL_COMMAND_INTENT.get(message_text.strip().lower(), classification.intent)
     # Confirmed live: classify_intent occasionally misclassifies a genuine
     # tutoring question as "menu" (e.g. "Explain the process of
@@ -562,6 +569,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
 
         if (
             result["off_level_class"]
+            and not student.is_staff_profile
             and student.off_level_count >= OFF_LEVEL_SUGGEST_THRESHOLD
             and not student.pending_profile_field
             and not reply_text.rstrip().endswith("?")
@@ -588,7 +596,14 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         # unprompted got a warm "noted!"-sounding reply that never actually
         # persisted anything, silently, every time. A rare double-question
         # message is a far smaller cost than onboarding never completing.
-        if should_ask_this_turn(user_message_count) and not result["closing"]:
+        # A teacher's own "My AI Tutor" account (is_staff_profile=True) has
+        # no real class/board/school of its own — confirmed live, a teacher
+        # asking a plain question got "which class are you in?" tacked onto
+        # the answer, a question that only makes sense for an actual
+        # student profile. Skip the whole onboarding nudge ladder for staff
+        # profiles rather than asking fields that will never legitimately
+        # get filled in.
+        if not student.is_staff_profile and should_ask_this_turn(user_message_count) and not result["closing"]:
             missing = next_missing_field(student)
             if missing:
                 field, question = missing

@@ -122,39 +122,62 @@ def test_classify_intent_malformed_response_falls_back_safely(monkeypatch):
 
 
 def test_classify_intent_extracts_relevant_excerpt_numbers(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.intent_classifier.classify",
-        _fake_classify(
-            '[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no '
-            'mock_test_topic=NONE quiz_skip=no relevant_excerpts=1,3]]'
-        ),
-    )
-    result = asyncio.run(classify_intent("what is euclid's division algorithm"))
-    assert result.relevant_excerpts == [1, 3]
-
-
-def test_classify_intent_relevant_excerpts_none_by_default(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.intent_classifier.classify",
-        _fake_classify(
-            '[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no '
-            'mock_test_topic=NONE quiz_skip=no relevant_excerpts=NONE]]'
-        ),
-    )
-    result = asyncio.run(classify_intent("thanks!"))
-    assert result.relevant_excerpts == []
-
-
-def test_classify_intent_passes_candidate_excerpts_into_prompt(monkeypatch):
+    # relevant_excerpts is judged by a separate call (classify_relevant_excerpts)
+    # — split out after Haiku was confirmed live to deterministically misfire
+    # intent=menu on real questions whenever candidate excerpts rode along in
+    # the same prompt as the intent-classification instructions. That call
+    # only fires when candidate_chunks is given.
     from app.services.retrieval import RetrievedChunk
 
     async def fake(system_prompt, messages, fallback, model, max_tokens=10):
+        if "CLASSIFY" in fallback:
+            return LLMResult(text='[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE '
+                                   'wants_mock_test=no mock_test_topic=NONE quiz_skip=no]]', model=model)
+        return LLMResult(text="[[RELEVANT excerpts=1,3]]", model=model)
+
+    monkeypatch.setattr("app.services.intent_classifier.classify", fake)
+    candidates = [
+        RetrievedChunk(content="a", class_="10", subject="Math", chapter="Real Numbers", board="CBSE"),
+        RetrievedChunk(content="b", class_="10", subject="Math", chapter="Polynomials", board="CBSE"),
+        RetrievedChunk(content="c", class_="10", subject="Math", chapter="Triangles", board="CBSE"),
+    ]
+    result = asyncio.run(classify_intent("what is euclid's division algorithm", candidate_chunks=candidates))
+    assert result.relevant_excerpts == [1, 3]
+    assert result.relevance_llm_result is not None
+
+
+def test_classify_intent_relevant_excerpts_empty_when_no_candidates(monkeypatch):
+    # No candidate_chunks at all -> the relevance call never happens, and
+    # relevant_excerpts is simply empty (nothing to be relevant to).
+    monkeypatch.setattr(
+        "app.services.intent_classifier.classify",
+        _fake_classify('[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no '
+                        'mock_test_topic=NONE quiz_skip=no]]'),
+    )
+    result = asyncio.run(classify_intent("thanks!"))
+    assert result.relevant_excerpts == []
+    assert result.relevance_llm_result is None
+
+
+def test_classify_intent_passes_candidate_excerpts_into_relevance_prompt_only(monkeypatch):
+    # The excerpts must appear in the SEPARATE relevance call's prompt, and
+    # must NOT appear in the intent-classification call's prompt at all —
+    # that separation is the actual fix for the Haiku misclassification bug.
+    from app.services.retrieval import RetrievedChunk
+
+    calls = []
+
+    async def fake(system_prompt, messages, fallback, model, max_tokens=10):
+        calls.append(messages[0]["content"])
+        if "CLASSIFY" in fallback:
+            assert "Real Numbers" not in messages[0]["content"]
+            return LLMResult(text='[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE '
+                                   'wants_mock_test=no mock_test_topic=NONE quiz_skip=no]]', model=model)
         assert "Real Numbers" in messages[0]["content"]
-        return LLMResult(text="[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE "
-                               "wants_mock_test=no mock_test_topic=NONE quiz_skip=no "
-                               "relevant_excerpts=1]]", model=model)
+        return LLMResult(text="[[RELEVANT excerpts=1]]", model=model)
 
     monkeypatch.setattr("app.services.intent_classifier.classify", fake)
     candidate = RetrievedChunk(content="text", class_="10", subject="Math", chapter="Real Numbers", board="CBSE")
     result = asyncio.run(classify_intent("euclid's division algorithm", candidate_chunks=[candidate]))
     assert result.relevant_excerpts == [1]
+    assert len(calls) == 2

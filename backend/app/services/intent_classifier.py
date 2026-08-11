@@ -15,8 +15,7 @@ _SYSTEM_PROMPT = (
     "Classify the student's latest WhatsApp message. Respond with ONLY one line in "
     'EXACTLY this format, nothing else — no explanation, no markdown:\n'
     '[[CLASSIFY intent=<label> wants_quiz=<yes|no> quiz_topic="<topic>|NONE" '
-    'wants_mock_test=<yes|no> mock_test_topic="<topic>|NONE" quiz_skip=<yes|no> '
-    'relevant_excerpts=<comma-separated numbers|NONE>]]\n\n'
+    'wants_mock_test=<yes|no> mock_test_topic="<topic>|NONE" quiz_skip=<yes|no>]]\n\n'
     "intent — exactly one of:\n"
     "menu — asking to see the main menu of options, or a bare \"help\"/\"options\" "
     "with no actual question (e.g. \"menu\", \"help\", \"what can you do\"). CRITICAL — "
@@ -79,13 +78,18 @@ _SYSTEM_PROMPT = (
     "question only — the quiz keeps going afterward, it does not end the quiz (that's "
     "quiz_stop above, a different and much rarer intent). This is irrelevant (and safely "
     "ignored) when no quiz is active — still fill it in based on the message alone.\n\n"
-    "relevant_excerpts — if a \"Candidate excerpts\" list is given below, decide which "
-    "numbered excerpts (if any) are genuinely useful for answering or responding to this "
-    "specific message — sharing a single common word with the message is not enough, an "
-    "excerpt only counts if it's actually about the same topic. Most everyday replies "
-    "(greetings, \"I don't know\", short answers, thanks) have NO relevant excerpt at all, "
-    "and that's the correct, expected answer for most messages — don't force a match. "
-    "If no \"Candidate excerpts\" list is given, or none qualify, this is NONE."
+)
+
+_RELEVANCE_SYSTEM_PROMPT = (
+    "You are given a student's message and a numbered list of candidate textbook excerpts. "
+    "Decide which numbered excerpts (if any) are genuinely useful for answering or "
+    "responding to this specific message — sharing a single common word with the message is "
+    "not enough, an excerpt only counts if it's actually about the same topic. Most everyday "
+    "replies (greetings, \"I don't know\", short answers, thanks) have NO relevant excerpt at "
+    "all, and that's the correct, expected answer for most messages — don't force a match.\n\n"
+    "Respond with ONLY one line in EXACTLY this format, nothing else — no explanation, no "
+    "markdown:\n"
+    "[[RELEVANT excerpts=<comma-separated numbers|NONE>]]"
 )
 
 
@@ -109,8 +113,7 @@ def _field(block: str, name: str) -> str | None:
     return block[start:end] or None
 
 
-def _extract_tag_block(raw_text: str) -> str:
-    marker = "[[CLASSIFY"
+def _extract_tag_block(raw_text: str, marker: str) -> str:
     start = raw_text.find(marker)
     if start == -1:
         return raw_text
@@ -134,7 +137,7 @@ class MessageClassification:
     def __init__(
         self, intent: str, quiz_topic: str | None, mock_test_topic: str | None,
         wants_mock_test: bool, quiz_skip: bool, llm_result: LLMResult,
-        relevant_excerpts: list[int] | None = None,
+        relevant_excerpts: list[int] | None = None, relevance_llm_result: LLMResult | None = None,
     ):
         self.intent = intent
         self.quiz_topic = quiz_topic
@@ -143,10 +146,14 @@ class MessageClassification:
         self.quiz_skip = quiz_skip
         self.llm_result = llm_result
         self.relevant_excerpts = relevant_excerpts or []
+        # Set only when candidate_chunks was non-empty — a second, separate
+        # LLM call (see classify_relevant_excerpts) — so callers can record
+        # its token usage too. None means no second call was made.
+        self.relevance_llm_result = relevance_llm_result
 
 
 def _parse_classification(raw_text: str) -> dict:
-    block = _extract_tag_block(raw_text)
+    block = _extract_tag_block(raw_text, "[[CLASSIFY")
 
     intent_raw = (_field(block, "intent") or "other").lower()
     intent = intent_raw if intent_raw in INTENTS else "other"
@@ -162,7 +169,6 @@ def _parse_classification(raw_text: str) -> dict:
     )
 
     quiz_skip = _field(block, "quiz_skip") == "yes"
-    relevant_excerpts = _parse_relevant_excerpts(_field(block, "relevant_excerpts"))
 
     return {
         "intent": intent,
@@ -170,7 +176,6 @@ def _parse_classification(raw_text: str) -> dict:
         "wants_mock_test": wants_mock_test,
         "mock_test_topic": mock_test_topic,
         "quiz_skip": quiz_skip,
-        "relevant_excerpts": relevant_excerpts,
     }
 
 
@@ -183,10 +188,12 @@ async def classify_intent(
     both the old plain intent-label classifier AND the separate regex-based
     quiz/mock-test/skip detection that used to live in quiz_service.py —
     folded into one call rather than several, since this already runs on
-    every message regardless (see app.routers.whatsapp). The RAG relevance
-    judgment (relevant_excerpts) rides along in this same call too, for the
-    same reason — see app.services.retrieval's module docstring for why
-    that isn't its own dedicated LLM call.
+    every message regardless (see app.routers.whatsapp).
+
+    The RAG relevance judgment (relevant_excerpts) is deliberately NOT part
+    of this call — see classify_relevant_excerpts below for why it was
+    split out into its own separate call instead of riding along here as
+    it originally did.
 
     The regex phrase-lists this replaces only ever matched an exact fixed
     string (e.g. "quiz me on X"), so any other phrasing silently fell
@@ -207,36 +214,61 @@ async def classify_intent(
         context_lines.append(f'[Last discussed topic: "{last_discussed_topic}"]')
     if last_assistant_message:
         context_lines.append(f'[Last assistant message: "{last_assistant_message}"]')
-    if candidate_chunks:
-        excerpt_lines = [
-            f"{i}. [{chunk.chapter or 'unknown chapter'}] {chunk.content[:_EXCERPT_PREVIEW_CHARS]}"
-            for i, chunk in enumerate(candidate_chunks, start=1)
-        ]
-        context_lines.append("[Candidate excerpts:\n" + "\n\n".join(excerpt_lines) + "]")
     context = "\n".join([*context_lines, message_text]) if context_lines else message_text
 
     result = await classify(
         _SYSTEM_PROMPT,
         [{"role": "user", "content": context}],
         fallback="[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no "
-                  "mock_test_topic=NONE quiz_skip=no relevant_excerpts=NONE]]",
-        # Confirmed live (school launch day): Haiku unreliably classified a
-        # plain academic question as intent=menu whenever several candidate
-        # excerpts were present alongside the last-assistant-message
-        # context — reproduced deterministically (not sampling noise) at
-        # temperature=0 across repeated identical calls, and across
-        # prompt-wording variants meant to guard against it. Isolated via
-        # a controlled sweep (varying only the candidate-excerpt count and
-        # model, everything else held fixed): Haiku misfired at excerpt
-        # counts 3/4/5/8 out of 8 tested, every single time; Sonnet got
-        # every one of the same inputs right. This is the fix that
-        # actually closed the gap, not a wording change.
-        model="claude-sonnet-4-6",
+                  "mock_test_topic=NONE quiz_skip=no]]",
+        model="claude-haiku-4-5-20251001",
         max_tokens=_CLASSIFY_MAX_TOKENS,
     )
     parsed = _parse_classification(result.text)
+
+    relevant_excerpts: list[int] = []
+    relevance_result: LLMResult | None = None
+    if candidate_chunks:
+        relevant_excerpts, relevance_result = await classify_relevant_excerpts(message_text, candidate_chunks)
+
     return MessageClassification(
         intent=parsed["intent"], quiz_topic=parsed["quiz_topic"], mock_test_topic=parsed["mock_test_topic"],
         wants_mock_test=parsed["wants_mock_test"], quiz_skip=parsed["quiz_skip"], llm_result=result,
-        relevant_excerpts=parsed["relevant_excerpts"],
+        relevant_excerpts=relevant_excerpts, relevance_llm_result=relevance_result,
     )
+
+
+async def classify_relevant_excerpts(
+    message_text: str, candidate_chunks: list[RetrievedChunk],
+) -> tuple[list[int], LLMResult]:
+    """
+    Judges which candidate excerpts are actually relevant to message_text —
+    split out of classify_intent into its own call (still cheap Haiku, so
+    this doesn't cost more than the single combined call used to) after
+    confirmed live (school launch day): Haiku deterministically misfired
+    intent=menu on plain academic questions whenever several candidate
+    excerpts were present in the SAME prompt as the intent-classification
+    instructions and last-assistant-message context — reproduced 100% of
+    the time at temperature=0 via a controlled sweep varying only excerpt
+    count, not sampling noise, and not fixable by rewording the combined
+    prompt (tried and re-measured, no change). Isolating the excerpt
+    judgment into its own focused prompt — no intent taxonomy, no
+    last-assistant-message — removed the destabilizing combination
+    entirely: the intent call alone was 100% reliable on Haiku (5/5 in the
+    same sweep), and this call only ever answers the narrower relevance
+    question.
+    """
+    excerpt_lines = [
+        f"{i}. [{chunk.chapter or 'unknown chapter'}] {chunk.content[:_EXCERPT_PREVIEW_CHARS]}"
+        for i, chunk in enumerate(candidate_chunks, start=1)
+    ]
+    context = "[Candidate excerpts:\n" + "\n\n".join(excerpt_lines) + "]\n" + message_text
+    result = await classify(
+        _RELEVANCE_SYSTEM_PROMPT,
+        [{"role": "user", "content": context}],
+        fallback="[[RELEVANT excerpts=NONE]]",
+        model="claude-haiku-4-5-20251001",
+        max_tokens=60,
+    )
+    block = _extract_tag_block(result.text, "[[RELEVANT")
+    return _parse_relevant_excerpts(_field(block, "excerpts")), result
