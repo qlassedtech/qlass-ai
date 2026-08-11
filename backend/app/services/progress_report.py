@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.core import ChatHistory, TopicProgress, Subject, Chapter
+from app.models.core import Answer, ChatHistory, Chapter, Question, Quiz, Subject, TopicProgress
 from app.services.text_utils import tokenize_words
 
 # A student's free-text `board` value maps to the `Subject.board` the
@@ -39,6 +39,31 @@ def get_student_stats(db: Session, student_id: int, days: int | None = None) -> 
         elif row.is_correct is False:
             incorrect += 1
             counts["incorrect"] += 1
+
+    # Quiz/mock-test answers are tracked in a completely separate table
+    # (Answer, via Question/Quiz) from the inline tutoring check-questions
+    # above (TopicProgress) — confirmed live a student could correctly
+    # answer a real scored quiz question and "my progress" would show zero
+    # reflection of it, since this method never looked at the quiz tables
+    # at all. Answer has no created_at of its own, so a `days`-scoped query
+    # approximates using the parent Quiz's created_at instead — a quiz is
+    # answered over minutes, not days, so this is a close enough proxy.
+    # Kept out of topic_counts/weak_topics (below) since a quiz answer has
+    # no reliable topic string of its own to attribute it to, only merged
+    # into the overall correct/incorrect/total counts.
+    answer_query = (
+        db.query(Answer.is_correct)
+        .join(Question, Question.id == Answer.question_id)
+        .join(Quiz, Quiz.id == Question.quiz_id)
+        .filter(Answer.student_id == student_id)
+    )
+    if days is not None:
+        answer_query = answer_query.filter(Quiz.created_at >= since)
+    for (is_correct,) in answer_query.all():
+        if is_correct is True:
+            correct += 1
+        elif is_correct is False:
+            incorrect += 1
 
     total = correct + incorrect
     # A topic counts as "weak" if wrong answers there outnumber right ones —
