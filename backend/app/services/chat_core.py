@@ -46,7 +46,7 @@ from app.services.escalation import get_escalation_recipients, format_escalation
 from app.services.habit import evaluate_habit_milestones
 from app.services.intent_classifier import classify_intent
 from app.services.llm_client import translate_with_claude
-from app.services.profile_builder import next_missing_field, should_ask_this_turn
+from app.services.profile_builder import is_plausible_profile_answer, next_missing_field, should_ask_this_turn
 from app.services.progress_report import (
     get_student_stats, get_activity_stats, get_welcome_back_note, get_chapter_coverage, format_progress_message,
 )
@@ -449,8 +449,14 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             student.suggested_class = None
             db.commit()
         elif pending_profile_field:
-            if result["profile_answer"]:
-                setattr(student, pending_profile_field, result["profile_answer"])
+            profile_answer = result["profile_answer"]
+            # Rejects an implausible extraction (e.g. the whole raw message
+            # instead of just the clean answer) rather than trusting it
+            # verbatim — see is_plausible_profile_answer's docstring. The
+            # field is left blank either way, so next_missing_field asks
+            # again later instead of a bad value becoming permanent.
+            if profile_answer and is_plausible_profile_answer(pending_profile_field, profile_answer):
+                setattr(student, pending_profile_field, profile_answer)
             student.pending_profile_field = None
             db.commit()
 
