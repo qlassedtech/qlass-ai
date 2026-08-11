@@ -224,10 +224,16 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # example of wants_mock_test=yes — confirmed live it still missed the
     # bare phrase itself, silently falling through to generic tutoring
     # (an improvised, unscored fake quiz question) instead of the real
-    # scored mock_test flow. "mock test" is unambiguous enough that this
-    # doesn't need the model's judgment at all, same reasoning as
-    # CANONICAL_COMMAND_INTENT above.
-    mock_test_request = classification.wants_mock_test or "mock test" in message_text.lower()
+    # scored mock_test flow. Exact-match only (not a substring check) —
+    # confirmed live that a broader "mock test" in message_text.lower()
+    # check was a real regression: "What is a mock test and how does it
+    # work?" (a genuine question ABOUT mock tests, not a request for one)
+    # incorrectly started a real scored test. Same discipline as
+    # CANONICAL_COMMAND_INTENT above: only override for phrasing
+    # unambiguous enough that the model's judgment isn't needed at all.
+    mock_test_request = classification.wants_mock_test or message_text.strip().lower() in (
+        "mock test", "give me a mock test", "start a mock test", "start mock test",
+    )
 
     did_answer_via_llm = False
     image_prompt = None
