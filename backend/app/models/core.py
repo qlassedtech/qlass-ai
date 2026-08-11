@@ -49,6 +49,13 @@ class Centre(Base):
     # school with genuinely mixed-board sections can still override per
     # student; this is just the sensible default, not an enforced value.
     board = Column(Text)
+    # Whether a student self-registering through THIS school's own link
+    # (see app.routers.public.register) becomes a full roster member
+    # immediately (true, default) or starts "pending" until a teacher
+    # confirms them (false — see Student.approval_status and
+    # GET /admin/students/pending). A school's own choice, not a platform
+    # default — set via PATCH /admin/school.
+    auto_approve_students = Column(Boolean, default=True)
     # Lightweight sales-pipeline tracking — "prospect" (being sold to, no
     # real usage yet) | "trial" | "active" | "churned". Self-registered
     # schools (see /auth/register-school) start as "active" since they've

@@ -33,6 +33,18 @@ export default function SchoolProfile() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [waLinkCopied, setWaLinkCopied] = useState(false);
   const [loginLinkCopied, setLoginLinkCopied] = useState(false);
+  const [savingApproval, setSavingApproval] = useState(false);
+
+  async function toggleAutoApprove() {
+    if (!school) return;
+    setSavingApproval(true);
+    try {
+      const updated = await api.updateSchool({ auto_approve_students: !school.auto_approve_students });
+      setSchool(updated);
+    } finally {
+      setSavingApproval(false);
+    }
+  }
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
@@ -121,6 +133,15 @@ export default function SchoolProfile() {
             {linkCopied ? "Copied!" : "Copy Link"}
           </button>
         </div>
+        <label className="toggle-row" style={{ marginTop: 16 }}>
+          <input type="checkbox" checked={!school.auto_approve_students} onChange={toggleAutoApprove} disabled={savingApproval} />
+          Require a teacher to approve each new student before they join the roster
+        </label>
+        <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+          {school.auto_approve_students
+            ? "Off — anyone who signs up through the link above joins your roster immediately."
+            : "On — new signups appear under \"Pending Approval\" on the Student Roster page until a teacher confirms them. They can still chat with the AI tutor in the meantime."}
+        </p>
       </div>
 
       <div className="card" style={{ marginTop: 20 }}>

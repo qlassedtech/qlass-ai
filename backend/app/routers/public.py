@@ -56,17 +56,22 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
     centre_id = tenancy.get_qlass_direct_centre_id(db)
     # A student who came through a SPECIFIC school's own link starts
-    # "pending" — that school's teachers get to confirm this is actually
-    # their student before it counts as a real enrolled roster member (see
+    # "pending" UNLESS that school has opted into auto-approval (see
+    # Centre.auto_approve_students, a school's own choice via
+    # PATCH /admin/school — defaults to true, matching the behavior every
+    # school already had before this workflow existed). "pending" means
+    # that school's teachers get to confirm this is actually their student
+    # before it counts as a real enrolled roster member (see
     # GET /admin/students/pending). The generic Qlass Direct fallback
     # below (no school link at all) has no teacher to review it against,
-    # so it stays "approved" same as always.
+    # so it always stays "approved".
     approval_status = "approved"
     if body.school:
         centre = tenancy.find_centre_by_slug(db, body.school)
         if centre:
             centre_id = centre.id
-            approval_status = "pending"
+            if centre.auto_approve_students is False:
+                approval_status = "pending"
 
     # Phone-only match: the form is deliberately too small to disambiguate
     # a shared family phone with more than one child (see

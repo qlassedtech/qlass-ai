@@ -1194,6 +1194,7 @@ def get_school(
     return {
         "id": centre.id, "name": centre.name, "city": centre.city, "logo_url": centre.logo_url,
         "board": centre.board, "credit_balance": school_billing.get_balance(db, centre.id),
+        "auto_approve_students": centre.auto_approve_students if centre.auto_approve_students is not None else True,
     }
 
 
@@ -1205,6 +1206,10 @@ class UpdateSchoolProfileRequest(BaseModel):
     # school default to this instead of being asked individually (see
     # tenancy.default_board_for_centre).
     board: str | None = None
+    # See Centre.auto_approve_students — a self-registered student either
+    # becomes a full roster member immediately, or starts "pending" until
+    # a teacher confirms them.
+    auto_approve_students: bool | None = None
 
 
 @router.patch("/admin/school")
@@ -1218,8 +1223,13 @@ def update_school_profile(
         centre.city = body.city
     if body.board is not None:
         centre.board = body.board
+    if body.auto_approve_students is not None:
+        centre.auto_approve_students = body.auto_approve_students
     db.commit()
-    return {"id": centre.id, "name": centre.name, "city": centre.city, "board": centre.board}
+    return {
+        "id": centre.id, "name": centre.name, "city": centre.city, "board": centre.board,
+        "auto_approve_students": centre.auto_approve_students,
+    }
 
 
 class AddSchoolCreditsRequest(BaseModel):

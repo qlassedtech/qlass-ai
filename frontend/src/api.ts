@@ -232,6 +232,7 @@ export interface School {
   board: string | null;
   logo_url: string | null;
   credit_balance: number;
+  auto_approve_students: boolean;
 }
 
 export interface Analytics {
@@ -425,6 +426,8 @@ export const api = {
   createTeacher: (data: { name: string; phone: string; password: string; role: string; centre_id?: number }) =>
     request("/admin/teachers", { method: "POST", body: JSON.stringify(data) }) as Promise<TeacherAccount>,
   getSchool: () => request("/admin/school") as Promise<School>,
+  updateSchool: (data: { auto_approve_students?: boolean }) =>
+    request("/admin/school", { method: "PATCH", body: JSON.stringify(data) }) as Promise<School>,
   getAnalytics: (centreId?: number) =>
     request(`/admin/analytics${centreId ? `?centre_id=${centreId}` : ""}`) as Promise<Analytics>,
   downloadSchoolStatement: (year: number, month: number, centreId?: number) =>
