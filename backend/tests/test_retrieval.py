@@ -105,16 +105,17 @@ def test_citation_footer_names_the_real_chapter():
     assert footer == "📖 Source: Class 9 Science — Cell Structure"
 
 
-def test_citation_footer_dedupes_same_chapter_across_multiple_chunks():
-    footer = build_citation_footer([_chunk(), _chunk()])
-    assert footer.count("Cell Structure") == 1
-
-
-def test_citation_footer_lists_multiple_distinct_chapters():
+def test_citation_footer_cites_only_the_best_ranked_chunk_not_the_whole_list():
+    """
+    Confirmed live: citing every retrieved chunk produced a wall of 6
+    unrelated chapters (Hindi literature, English readers, unrelated Math
+    topics) on a single answer. chunks arrives already ranked by relevance
+    (see app.services.chat_core) — only the first (best) one should ever
+    be cited, regardless of how many were retrieved as candidate context.
+    """
     footer = build_citation_footer([_chunk(chapter="Cell Structure"), _chunk(chapter="Sound Waves")])
-    assert "Sources" in footer
-    assert "Cell Structure" in footer
-    assert "Sound Waves" in footer
+    assert footer == "📖 Source: Class 9 Science — Cell Structure"
+    assert "Sound Waves" not in footer
 
 
 def test_citation_footer_skips_a_chunk_with_no_chapter_recorded():

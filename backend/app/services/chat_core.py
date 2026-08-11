@@ -78,6 +78,24 @@ MENU_BUTTON_TO_COMMAND = {
     "🎁 Refer a Friend": "refer a friend",
 }
 
+# Canonical command phrase -> the intent it must always resolve to,
+# bypassing classify_intent's guess entirely for these exact messages.
+# Confirmed live: a student tapping the "💳 Credit Usage" button (which
+# sends the plain text "credit usage") got classify_intent's own "menu"
+# intent back instead of "credit_usage", twice in a row — the model
+# appears to get thrown off when the immediately preceding assistant
+# message is itself a menu that lists "credit usage" as a suggested reply,
+# reading the student's message as echoing that suggestion rather than
+# actually invoking it. A menu tap is meant to be 100% deterministic (see
+# the comment above MENU_BUTTON_TO_COMMAND) — it shouldn't depend on an
+# LLM correctly resolving an ambiguity that shouldn't exist in the first
+# place.
+CANONICAL_COMMAND_INTENT = {
+    "my progress": "progress",
+    "credit usage": "credit_usage",
+    "refer a friend": "referral",
+}
+
 # Opposite-gender voice: a female voice for a detected-male student, a male
 # voice for a detected-female student. Speaker names are from Sarvam's
 # bulbul:v3 roster. Detection is pitch-based (see app.services.audio_qa.
@@ -197,7 +215,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         cache_write_tokens=classification.llm_result.cache_write_tokens,
         cache_read_tokens=classification.llm_result.cache_read_tokens,
     )
-    intent = classification.intent
+    intent = CANONICAL_COMMAND_INTENT.get(message_text.strip().lower(), classification.intent)
     quiz_topic_request = classification.quiz_topic
     mock_test_request = classification.wants_mock_test
 

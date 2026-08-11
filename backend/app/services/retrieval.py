@@ -34,6 +34,21 @@ MAX_CHUNKS = 3
 MAX_CHUNK_CHARS = 1500  # keeps the system prompt bounded even if a chunk is unusually long
 MIN_WORD_LEN = 3  # drops tiny function words (if, is, in, to...) that add real recall noise, not signal
 
+# pgvector's <=> operator returns cosine DISTANCE (0 = identical). Cosine
+# similarity search always returns its top-N nearest neighbors regardless
+# of whether any of them are actually close — for a query on a topic that
+# simply isn't in the corpus, the "nearest" chunks are still just noise.
+# Confirmed live in production: a student asked "what is alphabet in
+# computer science" (not covered by any ingested NCERT/NIOS book) and got
+# cited against six completely unrelated chapters (Hindi literature,
+# English readers, unrelated Math topics) spanning Class 4 to 12 — the
+# "closest" matches all sat at distance 0.47-0.51. A second check against
+# queries with real corpus coverage ("explain photosynthesis", "newton's
+# laws of motion") returned genuine matches at distance 0.29-0.31 — a
+# wide, clean gap from the noise floor above. 0.4 sits comfortably between
+# the two, cutting the noise while keeping real matches.
+MAX_SEMANTIC_DISTANCE = 0.4
+
 
 @dataclass
 class RetrievedChunk:
@@ -130,8 +145,9 @@ async def fetch_semantic_candidates(
         FROM document_chunks dc
         JOIN documents d ON d.id = dc.document_id
         WHERE dc.embedding IS NOT NULL
+          AND dc.embedding <=> CAST(:vector AS vector) < :max_distance
     """
-    params: dict = {"vector": vector_literal, "limit": limit}
+    params: dict = {"vector": vector_literal, "limit": limit, "max_distance": MAX_SEMANTIC_DISTANCE}
     scoping = []
     if class_:
         scoping.append("d.class = :class_")
@@ -192,26 +208,29 @@ async def fetch_hybrid_candidates(
 
 def build_citation_footer(chunks: list[RetrievedChunk]) -> str | None:
     """
-    A short "📖 Source: ..." line naming the real chapter(s) an answer was
+    A short "📖 Source: ..." line naming the real chapter an answer was
     grounded in — generated here from the DB rows actually retrieved, not
     left to the LLM to compose, so it can never cite a chapter it wasn't
     actually given (or invent one). Returns None if nothing was retrieved.
-    Dedupes by chapter, since the top-N chunks can come from the same
-    chapter more than once.
+
+    Cites only the SINGLE best-ranked chunk (chunks arrives already ordered
+    by relevance/similarity — see app.services.chat_core), not every chunk
+    retrieved. Confirmed live: citing the whole retrieved list produced a
+    wall of 6 unrelated chapters (Hindi literature, English readers,
+    unrelated Math topics) on a single answer — a real citation should
+    point at where the answer actually came from, not list everything that
+    happened to be pulled as candidate context.
     """
     if not chunks:
         return None
-    seen = set()
     lines = []
     for chunk in chunks:
-        key = (chunk.class_, chunk.subject, chunk.chapter)
-        if key in seen or not chunk.chapter:
+        if not chunk.chapter:
             continue
-        seen.add(key)
         class_note = f"Class {chunk.class_} " if chunk.class_ else ""
         subject_note = f"{chunk.subject} — " if chunk.subject else ""
         lines.append(f"{class_note}{subject_note}{chunk.chapter}")
+        break
     if not lines:
         return None
-    label = "Sources" if len(lines) > 1 else "Source"
-    return f"📖 {label}: " + "; ".join(lines)
+    return f"📖 Source: {lines[0]}"
