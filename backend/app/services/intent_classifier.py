@@ -220,7 +220,18 @@ async def classify_intent(
         [{"role": "user", "content": context}],
         fallback="[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no "
                   "mock_test_topic=NONE quiz_skip=no relevant_excerpts=NONE]]",
-        model="claude-haiku-4-5-20251001",
+        # Confirmed live (school launch day): Haiku unreliably classified a
+        # plain academic question as intent=menu whenever several candidate
+        # excerpts were present alongside the last-assistant-message
+        # context — reproduced deterministically (not sampling noise) at
+        # temperature=0 across repeated identical calls, and across
+        # prompt-wording variants meant to guard against it. Isolated via
+        # a controlled sweep (varying only the candidate-excerpt count and
+        # model, everything else held fixed): Haiku misfired at excerpt
+        # counts 3/4/5/8 out of 8 tested, every single time; Sonnet got
+        # every one of the same inputs right. This is the fix that
+        # actually closed the gap, not a wording change.
+        model="claude-sonnet-4-6",
         max_tokens=_CLASSIFY_MAX_TOKENS,
     )
     parsed = _parse_classification(result.text)

@@ -222,9 +222,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # Confirmed live: classify_intent occasionally misclassifies a genuine
     # tutoring question as "menu" (e.g. "Explain the process of
     # photosynthesis" right after a greeting reply that itself ended in a
-    # question) — not reproducible on retry with the same phrase or the
-    # same account, so likely inherent LLM noise rather than a specific
-    # code bug. Logged here (raw classifier output vs. the possibly-
+    # question, and later "What is the water cycle?" in the same
+    # situation). Logged here (raw classifier output vs. the possibly-
     # overridden final intent, plus the last assistant turn for context)
     # so a future occurrence has a real debug trail instead of having to
     # be caught live again.
