@@ -539,9 +539,15 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         user_message_count = (
             db.query(ChatHistory).filter(ChatHistory.student_id == student.id, ChatHistory.role == "user").count()
         )
-        # Don't stack a profile question onto a reply that already ends
-        # with the tutor's own question, or onto a goodbye.
-        if should_ask_this_turn(user_message_count) and not reply_text.rstrip().endswith("?") and not result["closing"]:
+        # Only held back for a goodbye, not for a reply that already ends
+        # with the tutor's own question — confirmed live that the tutor's
+        # replies end with a pedagogical check-question near-universally by
+        # design, so gating on "doesn't already end in ?" meant this almost
+        # never actually fired: a student who volunteered their name/class
+        # unprompted got a warm "noted!"-sounding reply that never actually
+        # persisted anything, silently, every time. A rare double-question
+        # message is a far smaller cost than onboarding never completing.
+        if should_ask_this_turn(user_message_count) and not result["closing"]:
             missing = next_missing_field(student)
             if missing:
                 field, question = missing
