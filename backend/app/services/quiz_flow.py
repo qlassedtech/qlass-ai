@@ -16,6 +16,29 @@ quick quiz" with nothing behind it). Any fix here (e.g. the TopicProgress
 write-back on a missed answer) automatically applies to both channels.
 """
 
+# classify_intent's quiz_skip field is trusted as-is by handle_quiz_answer
+# below (skipped straight past grading, no second look at message_text) —
+# confirmed live it can misfire on a genuine one-word answer attempt
+# ("Evaporation", the actual correct answer to the question just asked,
+# got graded as Skipped instead of Correct). classify_intent's own prompt
+# already lists the real skip phrases explicitly ("skip", "pass", "i don't
+# know", "idk", "no idea", "we didn't study this", "we haven't learned
+# this yet") — this is a cheap backstop requiring the message to actually
+# contain one of them (and be short, so a longer genuine answer that
+# happens to mention one of these phrases in passing isn't swept in)
+# rather than trusting the classifier's judgment call blindly.
+_SKIP_PHRASES = (
+    "skip", "pass", "next question", "don't know", "dont know", "no idea",
+    "not sure", "haven't learned", "havent learned", "didn't study", "didnt study", "idk",
+)
+
+
+def is_plausible_quiz_skip(message_text: str) -> bool:
+    lower = message_text.strip().lower()
+    if len(lower) > 40:
+        return False
+    return any(phrase in lower for phrase in _SKIP_PHRASES)
+
 
 async def start_quiz(db: Session, student: Student, topic: str) -> str:
     """Starts a short ad-hoc quiz on `topic`. Sets student.active_quiz_id and commits."""
@@ -106,6 +129,7 @@ async def handle_quiz_answer(db: Session, student: Student, message_text: str, q
         return "Looks like that quiz already wrapped up! What else can I help you with?"
 
     current_question = quiz_questions[answered_count]
+    quiz_skip = quiz_skip and is_plausible_quiz_skip(message_text)
     if quiz_skip:
         # No grading call needed — is_correct=None marks it as skipped
         # rather than wrong, so it doesn't count against the student's
