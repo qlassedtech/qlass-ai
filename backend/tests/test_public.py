@@ -25,34 +25,35 @@ def test_get_school_info_returns_name_and_logo(db_session):
     assert get_school_info("no-such-school", db_session) == {"name": None, "logo_url": None}
 
 
-async def _register_and_verify(db_session, request: RegisterRequest) -> dict:
+async def _register_and_verify(db_session, monkeypatch, request: RegisterRequest, sent: list | None = None) -> dict:
     """
     Drives the full two-step self-signup flow (see app.routers.public's
     module docstring on register/register_verify): step 1 sends a WhatsApp
     OTP instead of creating the student directly, so this helper captures
     the code from the mocked send_template_message call and immediately
     verifies it, giving tests the same "one call, get a created student"
-    shape they had before the OTP step was added.
+    shape they had before the OTP step was added. Every send_template_
+    message call (both the OTP itself and, on success, the welcome
+    message) is recorded into `sent` if given, exactly like the old
+    single-step test's own fake did.
     """
     captured_otp = {}
 
     async def fake_send_template(to_phone, template_name, params):
+        if sent is not None:
+            sent.append((to_phone, template_name, params))
         for param in params:
-            if param["name"] == "1":
+            if param["name"] == "1" and template_name != "student_signup_activation":
                 captured_otp["code"] = param["value"]
         return {"sent": True}
 
-    import app.routers.public as public_module
-    real_send_template = public_module.send_template_message
-    public_module.send_template_message = fake_send_template
-    try:
-        step1 = await register(request, _FakeRequest(), db_session)
-        assert step1["success"] is True
-        if step1.get("already_registered"):
-            return step1
-        assert step1["otp_required"] is True
-    finally:
-        public_module.send_template_message = real_send_template
+    monkeypatch.setattr("app.routers.public.send_template_message", fake_send_template)
+
+    step1 = await register(request, _FakeRequest(), db_session)
+    assert step1["success"] is True
+    if step1.get("already_registered"):
+        return step1
+    assert step1["otp_required"] is True
 
     return await register_verify(
         VerifyRegisterRequest(**request.model_dump(), otp=captured_otp["code"]), db_session,
@@ -61,12 +62,6 @@ async def _register_and_verify(db_session, request: RegisterRequest) -> dict:
 
 async def test_register_creates_student_with_trial_credits_and_full_features(db_session, monkeypatch):
     sent = []
-
-    async def fake_send_template(to_phone, template_name, params):
-        sent.append((to_phone, template_name, params))
-        return {"sent": True}
-
-    monkeypatch.setattr("app.routers.public.send_template_message", fake_send_template)
     # get_qlass_direct_centre_id caches the id at module scope across
     # calls/tests — the seeded centre from migration 0020 doesn't exist in
     # this per-test in-memory SQLite DB, so create it here under the exact
@@ -75,7 +70,7 @@ async def test_register_creates_student_with_trial_credits_and_full_features(db_
     db_session.add(Centre(name=tenancy.QLASS_DIRECT_CENTRE_NAME))
     db_session.commit()
 
-    result = await _register_and_verify(db_session, RegisterRequest(name="Nikhil", phone="8888800001"))
+    result = await _register_and_verify(db_session, monkeypatch, RegisterRequest(name="Nikhil", phone="8888800001"), sent)
 
     assert result["success"] is True
     assert result["already_registered"] is False
@@ -101,7 +96,7 @@ async def test_register_links_to_school_via_slug(db_session, monkeypatch):
     db_session.commit()
 
     result = await _register_and_verify(
-        db_session, RegisterRequest(name="Priya", phone="8888800002", school="sunrise-public-school"),
+        db_session, monkeypatch, RegisterRequest(name="Priya", phone="8888800002", school="sunrise-public-school"),
     )
 
     assert result["success"] is True
