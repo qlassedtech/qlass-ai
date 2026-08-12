@@ -315,18 +315,20 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     # real partner school's, then have it silently resolved as that school by
     # find_centre_by_slug (used by the public landing page and WhatsApp
     # first-contact school-name matching), intercepting signups meant for
-    # the real school. An exact case-insensitive name match is rejected
-    # outright — a genuinely new school essentially never collides with an
-    # existing name, so this only ever blocks the actual spoofing case.
-    existing_name = (
-        db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).first()
+    # the real school.
+    #
+    # Deliberately NOT a hard block, even on name+city together — both a
+    # school name (e.g. "Delhi Public School", "Saraswati Vidya Mandir")
+    # AND a city name can genuinely recur across unrelated parts of India
+    # with no relationship to each other, so any string-match rule here
+    # risks locking out a real school on a false positive, which is worse
+    # than the spoofing risk it's meant to catch. Instead this is surfaced
+    # as a flag on the review notification below — a human (who can ask
+    # "which district, which board, is this really the same school?")
+    # makes the call, not a string comparison.
+    name_matches = (
+        db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
     )
-    if existing_name:
-        raise HTTPException(
-            status_code=409,
-            detail="A school with this exact name is already registered — if this is your school, "
-                   "contact Qlass support instead of registering again",
-        )
 
     centre = Centre(name=body.school_name, city=body.city, sales_status="prospect")
     db.add(centre)
@@ -349,11 +351,19 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     # review trail where there was previously none at all. Best-effort: a
     # missed notification shouldn't block a legitimate school's signup.
     try:
+        duplicate_note = ""
+        if name_matches:
+            other_cities = ", ".join(c.city or "city not given" for c in name_matches)
+            duplicate_note = (
+                f" ⚠️ {len(name_matches)} existing school(s) already use this exact name (city: "
+                f"{other_cities}) — please confirm this isn't the same school registering twice, or "
+                f"impersonating one, before marking it active."
+            )
         await send_whatsapp_message(
             QLASS_SUPPORT_PHONE,
             f"New self-registered school pending review: \"{body.school_name}\" "
-            f"({body.city or 'city not given'}), admin {body.admin_name} ({admin_phone}), centre_id={centre.id}. "
-            f"Reply from the portal (PATCH /admin/school) to mark it active once verified.",
+            f"({body.city or 'city not given'}), admin {body.admin_name} ({admin_phone}), centre_id={centre.id}."
+            f"{duplicate_note} Reply from the portal (PATCH /admin/school) to mark it active once verified.",
         )
     except Exception:
         pass
