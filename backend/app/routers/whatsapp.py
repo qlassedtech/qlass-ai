@@ -152,6 +152,32 @@ async def _handle_school_review_button(db: Session, from_phone: str, new_status:
     if centre is None:
         await send_whatsapp_message(from_phone, "No self-registered school is currently awaiting review.")
         return
+    # Confirmed live (security review, Aug 2026): this webhook has no
+    # signature verification (WATI_WEBHOOK_SECRET unset — a known,
+    # accepted gap), so the SCHOOL_REVIEW_STAFF_PHONES check above is a
+    # phone-string match on attacker-controlled input, not real auth. For
+    # "Approve" the blast radius is limited (a prospect school already has
+    # working access — this just relabels the sales pipeline). "Reject"
+    # is the dangerous direction: it actively blocks real usage via
+    # school_billing.is_centre_churned. Once a school has real activity
+    # (more than a handful of real roster rows), a forged "Reject" tap
+    # would deny service to people who are actually using the product —
+    # that action now requires a real portal login (PATCH /admin/school)
+    # instead, which IS properly authenticated. A brand-new, still-empty
+    # prospect (the common case this button is actually for) can still be
+    # rejected straight from WhatsApp.
+    if new_status == "churned":
+        real_activity = (
+            db.query(Student.id).filter(Student.centre_id == centre.id).limit(6).count()
+            + db.query(Teacher.id).filter(Teacher.centre_id == centre.id).limit(6).count()
+        )
+        if real_activity > 5:
+            await send_whatsapp_message(
+                from_phone,
+                f"\"{centre.name}\" already has real students/teachers enrolled, so it can't be rejected from "
+                f"WhatsApp anymore — use the portal (PATCH /admin/school) to change its status instead.",
+            )
+            return
     centre.sales_status = new_status
     db.commit()
     audit_log.record(

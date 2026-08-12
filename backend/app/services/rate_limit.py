@@ -26,9 +26,20 @@ OTP_RATE_LIMIT_WINDOW_SECONDS = 600
 # this, letting a script mint unlimited accounts each carrying a real ₹50
 # trial-credit grant. A much larger window/threshold than the per-student
 # message or OTP limiters above, since this only needs to catch a scripted
-# burst — a real school's normal enrollment, even a rapid one, comes
-# nowhere near it.
-SIGNUP_RATE_LIMIT_MAX_ATTEMPTS = 30
+# burst.
+#
+# Raised from 30 to 300 (security-audit review, Aug 2026, ahead of a real
+# 200-student same-network onboarding): the original threshold assumed "a
+# real school's normal enrollment... comes nowhere near it," which turned
+# out false the moment a genuinely large classroom rollout was tested —
+# 200 students self-registering from a shared school WiFi/NAT all share
+# ONE X-Real-IP, and 30/10min would have 429'd roughly 85% of them. 300
+# still comfortably catches a scripted-abuse burst (this endpoint no
+# longer grants credit on its own since the OTP-gated /public/register/
+# verify split — see that endpoint's docstring — so this limiter's real
+# job now is bounding OTP-send volume/cost, not blocking free-credit
+# farming outright).
+SIGNUP_RATE_LIMIT_MAX_ATTEMPTS = 300
 SIGNUP_RATE_LIMIT_WINDOW_SECONDS = 600
 
 _redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if settings.redis_url else None

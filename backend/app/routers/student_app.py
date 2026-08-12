@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -161,7 +162,18 @@ def link_google_account(
     if existing:
         raise HTTPException(status_code=409, detail="This Google account is already linked to another student")
     student.email = email
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The check-then-write above has a real (if narrow) race: two
+        # concurrent link-google calls for the same Google email — e.g. a
+        # shared/synced account — can both pass the `existing is None`
+        # check before either commits. The DB's own unique constraint on
+        # Student.email is what actually prevents the double-link; this
+        # just turns the resulting crash into the same 409 the sequential
+        # case already returns, instead of an unhandled 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This Google account is already linked to another student")
     return {"linked": True, "email": email}
 
 
