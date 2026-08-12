@@ -14,8 +14,8 @@ from sqlalchemy.orm.query import Query
 
 from app.config import settings
 from app.database import get_db
-from app.models.core import Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
-from app.services import cost_tracker, school_billing
+from app.models.core import AuditLog, Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
+from app.services import audit_log, cost_tracker, school_billing
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
@@ -216,7 +216,7 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher or not teacher.password_hash or not verify_password(body.password, teacher.password_hash):
         raise HTTPException(status_code=401, detail="Invalid phone or password")
-    token = create_access_token(teacher.id)
+    token = create_access_token(teacher.id, teacher.token_version or 0)
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
@@ -272,7 +272,7 @@ async def verify_teacher_otp(body: VerifyTeacherOtpRequest, db: Session = Depend
     teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
-    token = create_access_token(teacher.id)
+    token = create_access_token(teacher.id, teacher.token_version or 0)
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
@@ -310,7 +310,25 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
-    centre = Centre(name=body.school_name, city=body.city)
+    # Confirmed live: this endpoint had zero identity verification — anyone
+    # could register a school under a name matching (or closely mimicking) a
+    # real partner school's, then have it silently resolved as that school by
+    # find_centre_by_slug (used by the public landing page and WhatsApp
+    # first-contact school-name matching), intercepting signups meant for
+    # the real school. An exact case-insensitive name match is rejected
+    # outright — a genuinely new school essentially never collides with an
+    # existing name, so this only ever blocks the actual spoofing case.
+    existing_name = (
+        db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).first()
+    )
+    if existing_name:
+        raise HTTPException(
+            status_code=409,
+            detail="A school with this exact name is already registered — if this is your school, "
+                   "contact Qlass support instead of registering again",
+        )
+
+    centre = Centre(name=body.school_name, city=body.city, sales_status="prospect")
     db.add(centre)
     db.commit()
     db.refresh(centre)
@@ -322,9 +340,26 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     )
     db.add(teacher)
     db.commit()
+    # Self-registered schools start "prospect" (not the model's normal
+    # "active" default) specifically so they're visibly distinct from a
+    # Qlass-vetted school in every existing sales-pipeline view (see
+    # app.services.sales) until a real human reviews and promotes them via
+    # PATCH /admin/school — this doesn't block the new admin's own portal
+    # access (the self-serve value prop stays intact), it just leaves a
+    # review trail where there was previously none at all. Best-effort: a
+    # missed notification shouldn't block a legitimate school's signup.
+    try:
+        await send_whatsapp_message(
+            QLASS_SUPPORT_PHONE,
+            f"New self-registered school pending review: \"{body.school_name}\" "
+            f"({body.city or 'city not given'}), admin {body.admin_name} ({admin_phone}), centre_id={centre.id}. "
+            f"Reply from the portal (PATCH /admin/school) to mark it active once verified.",
+        )
+    except Exception:
+        pass
     db.refresh(teacher)
 
-    token = create_access_token(teacher.id)
+    token = create_access_token(teacher.id, teacher.token_version or 0)
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
@@ -365,6 +400,11 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
     if not teacher:
         raise HTTPException(status_code=404, detail="Account not found")
     teacher.password_hash = hash_password(body.new_password)
+    # Invalidates every token issued before this reset — see
+    # Teacher.token_version / get_current_teacher's docstring. Without this,
+    # a stolen token kept working for up to 7 more days after the standard
+    # incident-response move of resetting the password.
+    teacher.token_version = (teacher.token_version or 0) + 1
     db.commit()
     return {"reset": True}
 
@@ -812,6 +852,10 @@ def add_student_credits(
         raise HTTPException(status_code=400, detail="reason must be 'refund', 'goodwill', or 'correction'")
     student = _get_scoped_student_or_404(db, teacher, student_id)
     new_balance = cost_tracker.add_credits(db, student.id, body.amount, body.note, service=body.reason)
+    audit_log.record(
+        db, teacher.id, "grant_student_credits", "student", student.id,
+        detail=f"amount=₹{body.amount:.2f} reason={body.reason} note={body.note or ''}",
+    )
     return {"balance": new_balance}
 
 
@@ -822,6 +866,7 @@ PAID_UNLIMITED_SERVICE = "unlimited_plan_activation"
 def _activate_unlimited(
     db: Session, student: Student, duration_days: int, is_trial: bool,
     payment_reference: str | None, note: str | None, full_term_price: float, full_term_days: int,
+    actor_teacher_id: int,
 ) -> None:
     """
     Shared by the single-student/single-teacher activation endpoints and
@@ -862,6 +907,10 @@ def _activate_unlimited(
             db, student.id, price, note=note or f"Unlimited plan activation ({duration_days} days)",
             external_ref=payment_reference, service=PAID_UNLIMITED_SERVICE,
         )
+    audit_log.record(
+        db, actor_teacher_id, "activate_subscription", "student", student.id,
+        detail=f"duration_days={duration_days} is_trial={is_trial} payment_reference={payment_reference or ''}",
+    )
 
 
 class SetSubscriptionRequest(BaseModel):
@@ -924,6 +973,7 @@ def set_student_subscription(
         _activate_unlimited(
             db, student, body.duration_days, body.is_trial, body.payment_reference, body.note,
             cost_tracker.UNLIMITED_STUDENT_ANNUAL_PRICE, cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS,
+            teacher.id,
         )
     else:
         student.subscription_plan = "credits"
@@ -991,6 +1041,7 @@ def activate_school_trial_subscriptions(
         _activate_unlimited(
             db, student, body.duration_days, True, None, body.note,
             cost_tracker.UNLIMITED_STUDENT_ANNUAL_PRICE, cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS,
+            teacher.id,
         )
         activated.append(student.name)
 
@@ -999,6 +1050,7 @@ def activate_school_trial_subscriptions(
         _activate_unlimited(
             db, my_tutor_student, body.duration_days, True, None, body.note,
             cost_tracker.UNLIMITED_TEACHER_MONTHLY_PRICE, cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS,
+            teacher.id,
         )
         activated.append(target_teacher.name)
 
@@ -1344,6 +1396,10 @@ def add_school_credits(
         raise HTTPException(status_code=400, detail="reason must be 'refund', 'goodwill', or 'correction'")
     centre = _resolve_centre_for_write(db, teacher, body.centre_id)
     new_balance = school_billing.add_credits(db, centre.id, body.amount, body.note, service=body.reason)
+    audit_log.record(
+        db, teacher.id, "grant_school_credits", "centre", centre.id,
+        detail=f"amount=₹{body.amount:.2f} reason={body.reason} note={body.note or ''}",
+    )
     return {"balance": new_balance}
 
 
@@ -2035,6 +2091,7 @@ def activate_teacher_tutor_subscription(
     _activate_unlimited(
         db, student, body.duration_days, body.is_trial, body.payment_reference, body.note,
         cost_tracker.UNLIMITED_TEACHER_MONTHLY_PRICE, cost_tracker.UNLIMITED_TEACHER_MONTHLY_DAYS,
+        teacher.id,
     )
     db.commit()
     return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
@@ -2125,8 +2182,37 @@ def fulfill_deletion(student_id: int, db: Session = Depends(get_db), teacher: Te
         raise HTTPException(status_code=404, detail="Student not found")
     if student.deletion_requested_at is None:
         raise HTTPException(status_code=400, detail="No pending deletion request for this student")
+    # Captured before the irreversible delete below, so the audit row still
+    # has something recognizable to point at — the student row itself won't
+    # exist to look this up afterward.
+    detail = f"name={student.name} phone={student.phone} centre_id={student.centre_id}"
     fulfill_deletion_request(db, student_id)
+    audit_log.record(db, teacher.id, "delete_student", "student", student_id, detail=detail)
     return {"deleted": True}
+
+
+@router.get("/admin/audit-log")
+def get_audit_log(
+    limit: int = QueryParam(default=100, ge=1, le=500),
+    offset: int = QueryParam(default=0, ge=0),
+    db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    """Qlass-staff-only view of every recorded high-blast-radius action —
+    see AuditLog's docstring for what gets logged here."""
+    if teacher.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Only Qlass staff can view the audit log")
+    rows = db.query(AuditLog).order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    actor_ids = {r.actor_teacher_id for r in rows if r.actor_teacher_id is not None}
+    actors = {t.id: t.name for t in db.query(Teacher).filter(Teacher.id.in_(actor_ids)).all()}
+    return [
+        {
+            "id": r.id, "actor_teacher_id": r.actor_teacher_id, "actor_name": actors.get(r.actor_teacher_id),
+            "action": r.action, "target_type": r.target_type, "target_id": r.target_id,
+            "detail": r.detail, "created_at": r.created_at,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/admin/schools")

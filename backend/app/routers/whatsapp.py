@@ -473,6 +473,27 @@ def _claim_webhook_job(db: Session, message_id: str, now: datetime) -> bool:
     return claimed > 0
 
 
+def _canonical_lock_phone(db: Session, from_phone: str) -> str:
+    """
+    Lock key for a student's billing critical section. Normally just
+    from_phone, but a student can have a distinct whatsapp_phone from their
+    login phone (see Student.whatsapp_phone) — if from_phone matches
+    someone's whatsapp_phone rather than their login phone, resolve to that
+    real `phone` instead, so a concurrent web/app request (which always
+    locks on `phone`, see app.routers.student_app._reply_to) and a WhatsApp
+    request from their alternate number serialize against the SAME lock.
+    Confirmed live this split could otherwise let the two channels overdraft
+    a wallet the same way the my-tutor endpoints could before that fix (see
+    app.routers.admin._my_tutor_reply).
+    """
+    student = (
+        db.query(Student)
+        .filter(Student.whatsapp_phone == from_phone, Student.phone != from_phone)
+        .first()
+    )
+    return student.phone if student else from_phone
+
+
 async def _process_queued_webhook(message_id: str) -> None:
     """
     Claim and process one persisted webhook job. The atomic claim means
@@ -501,7 +522,8 @@ async def _process_queued_webhook(message_id: str) -> None:
             return
 
         phone = payload.get("waId")
-        async with (student_lock(phone) if phone else nullcontext()):
+        lock_phone = _canonical_lock_phone(db, phone) if phone else None
+        async with (student_lock(lock_phone) if lock_phone else nullcontext()):
             await _handle_message(db, payload)
 
         job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()

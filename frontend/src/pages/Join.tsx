@@ -344,6 +344,13 @@ export default function Join() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [registered, setRegistered] = useState<{ alreadyRegistered: boolean } | null>(null);
+  // Set once the initial form is submitted and a WhatsApp OTP has been
+  // sent — the form then switches to asking for that code instead of
+  // creating the account immediately (see api.ts's publicApi.register vs
+  // registerVerify). Trial credit is only granted after the OTP step, so
+  // an unverified phone number can no longer farm free credit.
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [otp, setOtp] = useState("");
 
   useEffect(() => {
     if (schoolSlug) {
@@ -362,6 +369,32 @@ export default function Join() {
       const result = await publicApi.register({ name, phone, school: schoolSlug, student_class: studentClass || undefined });
       if (!result.success) {
         setError(result.error || "Something went wrong — please try again");
+        return;
+      }
+      if (result.otp_required) {
+        setOtpRequired(true);
+        return;
+      }
+      // Only reached for the "already registered" short-circuit — a new
+      // signup always goes through otp_required above now.
+      setRegistered({ alreadyRegistered: !!result.already_registered });
+    } catch {
+      setError("Something went wrong — please check your connection and try again");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleVerifyOtp(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const result = await publicApi.registerVerify({
+        name, phone, school: schoolSlug, student_class: studentClass || undefined, otp,
+      });
+      if (!result.success) {
+        setError(result.error || "Incorrect code — please try again");
         return;
       }
       setRegistered({ alreadyRegistered: !!result.already_registered });
@@ -384,6 +417,38 @@ export default function Join() {
               : "Check your WhatsApp for a welcome message with your free AI credits, and reply to begin learning."}
           </p>
         </div>
+      ) : otpRequired ? (
+        <form onSubmit={handleVerifyOtp}>
+          <h2>Verify Your WhatsApp Number</h2>
+          <p className="muted">We sent a code to {phone} on WhatsApp — enter it below to claim your free credits.</p>
+          <label>
+            Verification code
+            <input
+              value={otp}
+              onChange={(e) => setOtp(e.target.value)}
+              placeholder="6-digit code"
+              inputMode="numeric"
+              maxLength={6}
+              required
+            />
+          </label>
+          {error && <p className="error">{error}</p>}
+          <button type="submit" disabled={loading}>
+            {loading ? "Please wait..." : "Verify & Start Learning"}
+          </button>
+          <p className="auth-links">
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                setOtpRequired(false);
+                setError(null);
+              }}
+            >
+              Wrong number? Go back
+            </a>
+          </p>
+        </form>
       ) : (
         <form onSubmit={handleSubmit}>
           <h2>Begin Learning for Free</h2>

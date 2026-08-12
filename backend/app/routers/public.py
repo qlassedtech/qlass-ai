@@ -5,8 +5,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.core import Student
 from app.services import cost_tracker, tenancy
+from app.services.otp import LOGIN_OTP_TEMPLATE_NAME, generate_and_store_otp, verify_otp
 from app.services.phone import normalize_phone
-from app.services.rate_limit import is_signup_rate_limited
+from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited, student_lock
 from app.services.whatsapp_client import send_template_message, send_whatsapp_message
 
 router = APIRouter()
@@ -53,48 +54,52 @@ class RegisterRequest(BaseModel):
     student_class: str | None = Field(default=None, max_length=50)
 
 
+class VerifyRegisterRequest(RegisterRequest):
+    otp: str
+
+
+def _validate_registration(body: RegisterRequest) -> tuple[str, str] | None:
+    """Shared normalization for both steps below. Returns (name, phone), or
+    None if the phone doesn't look like a real 10-digit Indian mobile
+    number."""
+    name = body.name.strip() or "New Student"
+    phone = normalize_phone(body.phone)
+    if len(phone) < 12:  # "91" + 10 digits
+        return None
+    return name, phone
+
+
 @router.post("/public/register")
 async def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
-    # Confirmed live (code review, Aug 2026): this endpoint is unauthenticated
-    # with no CAPTCHA and previously no rate limit at all — a script could
-    # mint unlimited accounts, each carrying a real ₹50 trial-credit grant.
-    # X-Real-IP is set by nginx itself (proxy_set_header X-Real-IP
-    # $remote_addr — see /etc/nginx/sites-available/be-aitutor.qlass.in.conf),
-    # so it can't be spoofed by the client despite arriving as a header.
+    """
+    Step 1 of self-signup — sends a WhatsApp OTP; does NOT create the
+    student or grant trial credit yet (see /public/register/verify for
+    that). Confirmed live (code review, Aug 2026): this endpoint used to
+    grant a real ₹50 trial credit purely on submitting a phone-shaped
+    string, before any delivery/ownership confirmation at all, on top of
+    having no rate limit — a script could mint unlimited accounts. The
+    per-IP rate limit added earlier this audit bounds the volume; this OTP
+    step closes the "credit granted before we've confirmed anyone real is
+    behind that number" gap, and — since the actual student row is only
+    created in the locked critical section of /verify below — also closes
+    the race where two near-simultaneous submissions of the same phone
+    number could each create their own account and credit grant.
+    """
     client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
     if await is_signup_rate_limited(client_ip):
         raise HTTPException(status_code=429, detail="Too many signup attempts — please try again in a few minutes")
 
-    name = body.name.strip() or "New Student"
-    phone = normalize_phone(body.phone)
-    if len(phone) < 12:  # "91" + 10 digits
+    validated = _validate_registration(body)
+    if validated is None:
         return {"success": False, "error": "Please enter a valid 10-digit WhatsApp number"}
-
-    centre_id = tenancy.get_qlass_direct_centre_id(db)
-    # A student who came through a SPECIFIC school's own link starts
-    # "pending" UNLESS that school has opted into auto-approval (see
-    # Centre.auto_approve_students, a school's own choice via
-    # PATCH /admin/school — defaults to true, matching the behavior every
-    # school already had before this workflow existed). "pending" means
-    # that school's teachers get to confirm this is actually their student
-    # before it counts as a real enrolled roster member (see
-    # GET /admin/students/pending). The generic Qlass Direct fallback
-    # below (no school link at all) has no teacher to review it against,
-    # so it always stays "approved".
-    approval_status = "approved"
-    if body.school:
-        centre = tenancy.find_centre_by_slug(db, body.school)
-        if centre:
-            centre_id = centre.id
-            if centre.auto_approve_students is False:
-                approval_status = "pending"
+    _, phone = validated
 
     # Phone-only match: the form is deliberately too small to disambiguate
     # a shared family phone with more than one child (see
     # app.services.active_profile for how WhatsApp itself resolves that
     # once the student is actually chatting) — a second submission from an
     # already-registered number just re-sends the activation nudge rather
-    # than creating a duplicate account and re-granting trial credit.
+    # than starting a new OTP flow at all.
     existing = db.query(Student).filter(Student.phone == phone, Student.is_staff_profile.is_(False)).first()
     if existing:
         await send_whatsapp_message(
@@ -104,10 +109,63 @@ async def register(body: RegisterRequest, request: Request, db: Session = Depend
         )
         return {"success": True, "already_registered": True}
 
-    student = tenancy.create_student_profile(
-        db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES),
-        class_name=(body.student_class or "").strip() or None, approval_status=approval_status,
-    )
+    if await is_otp_rate_limited("public_signup_request", phone):
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
+    otp = await generate_and_store_otp("public_signup", phone)
+    result = await send_template_message(phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
+    if not result.get("sent"):
+        raise HTTPException(status_code=502, detail="Couldn't send the verification code — please try again shortly")
+    return {"success": True, "otp_required": True}
+
+
+@router.post("/public/register/verify")
+async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get_db)):
+    """Step 2 — creates the student and grants trial credit, only after the
+    WhatsApp OTP from /public/register is confirmed. See that endpoint's
+    docstring for why this two-step shape exists."""
+    validated = _validate_registration(body)
+    if validated is None:
+        return {"success": False, "error": "Please enter a valid 10-digit WhatsApp number"}
+    name, phone = validated
+
+    if await is_otp_rate_limited("public_signup_verify", phone):
+        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+    if not await verify_otp("public_signup", phone, body.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    # Locked so two near-simultaneous verify calls for the same phone (e.g.
+    # a double-tap, or a retried request) can't both pass the "not already
+    # registered" check below before either commits — the same TOCTOU shape
+    # already fixed for WhatsApp/web chat billing (see
+    # app.services.rate_limit.student_lock's other callers).
+    async with student_lock(phone):
+        existing = db.query(Student).filter(Student.phone == phone, Student.is_staff_profile.is_(False)).first()
+        if existing:
+            return {"success": True, "already_registered": True}
+
+        centre_id = tenancy.get_qlass_direct_centre_id(db)
+        # A student who came through a SPECIFIC school's own link starts
+        # "pending" UNLESS that school has opted into auto-approval (see
+        # Centre.auto_approve_students, a school's own choice via
+        # PATCH /admin/school — defaults to true, matching the behavior every
+        # school already had before this workflow existed). "pending" means
+        # that school's teachers get to confirm this is actually their student
+        # before it counts as a real enrolled roster member (see
+        # GET /admin/students/pending). The generic Qlass Direct fallback
+        # below (no school link at all) has no teacher to review it against,
+        # so it always stays "approved".
+        approval_status = "approved"
+        if body.school:
+            centre = tenancy.find_centre_by_slug(db, body.school)
+            if centre:
+                centre_id = centre.id
+                if centre.auto_approve_students is False:
+                    approval_status = "pending"
+
+        student = tenancy.create_student_profile(
+            db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES),
+            class_name=(body.student_class or "").strip() or None, approval_status=approval_status,
+        )
 
     # send_template_message (Wati's singular /api/v1/sendTemplateMessage),
     # not send_broadcast_template — the bulk endpoint silently degrades on

@@ -285,6 +285,15 @@ class Teacher(Base):
     # null for it.
     role = Column(Text, default="teacher")
     photo_url = Column(Text)
+    # Stamped into every JWT issued for this teacher (see
+    # app.services.teacher_auth.create_access_token) and checked on every
+    # authenticated request (get_current_teacher) — bumped whenever the
+    # password changes (see /auth/reset-password) so a token issued before
+    # a reset stops working immediately, instead of staying valid for the
+    # rest of its normal week-long life. Confirmed live this was a real gap:
+    # resetting a password (the standard response to a stolen token) didn't
+    # actually revoke any token already issued.
+    token_version = Column(Integer, default=0)
 
     centre = relationship("Centre", back_populates="teachers")
     organization = relationship("Organization")
@@ -602,4 +611,26 @@ class SchoolPilotGrant(Base):
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     pilot_started_at = Column(TIMESTAMP(timezone=True), nullable=False)
     amount = Column(Numeric, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    """
+    Actor attribution for high-blast-radius admin actions — confirmed live
+    (security audit, Aug 2026) that a manual credit grant, a subscription
+    activation, or a destructive student deletion recorded WHAT happened
+    (see CreditEvent.note, Student.subscription_plan) but never WHICH
+    teacher/admin login did it. A compromised or malicious super_admin
+    account could act with zero trace back to a specific account. See
+    app.services.audit_log.record for the write helper every sensitive
+    endpoint below calls into.
+    """
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    actor_teacher_id = Column(Integer, ForeignKey("teachers.id"))
+    action = Column(Text, nullable=False)  # e.g. "grant_student_credits", "activate_subscription", "delete_student"
+    target_type = Column(Text, nullable=False)  # e.g. "student", "centre", "teacher"
+    target_id = Column(Integer, nullable=False)
+    detail = Column(Text)  # free-text: amount, duration, note — whatever's relevant for that action
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

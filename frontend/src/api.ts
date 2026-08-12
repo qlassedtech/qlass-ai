@@ -734,5 +734,16 @@ export const publicApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
+    }).then((res) => res.json()) as Promise<{
+      success: boolean;
+      already_registered?: boolean;
+      otp_required?: boolean;
+      error?: string;
+    }>,
+  registerVerify: (data: { name: string; phone: string; school?: string; student_class?: string; otp: string }) =>
+    fetch(`${API_BASE}/public/register/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
     }).then((res) => res.json()) as Promise<{ success: boolean; already_registered?: boolean; error?: string }>,
 };
