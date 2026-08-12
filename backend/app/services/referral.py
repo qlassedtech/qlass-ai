@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.core import ChatHistory, Student
+from app.models.core import ChatHistory, CreditEvent, Student
 from app.services import cost_tracker
 from app.services.whatsapp_client import send_whatsapp_message
 
@@ -13,6 +13,20 @@ _CODE_PATTERN = re.compile(r"\bQL(\d{4,})\b")
 # Paid the moment someone signs up mentioning a referral code — see
 # whatsapp.py's _create_new_student. Not gated on any activity.
 REFERRAL_SIGNUP_BONUS = 10.0
+
+_SIGNUP_BONUS_NOTE = "Referral milestone: signup"
+
+# Confirmed live (code review, Aug 2026): being unconditional makes the
+# signup bonus the one milestone that doesn't require the referred student
+# to actually do anything, which is exactly what makes it farmable —
+# combined with new-account creation having no rate limit either (see
+# app.services.rate_limit.is_signup_rate_limited, fixed alongside this),
+# one operator with many throwaway numbers could otherwise collect an
+# unbounded stream of ₹10 payouts to a single "real" account. This doesn't
+# touch the day1/2/3/week2/3 milestones below — those already require the
+# referred student to have sent real messages, which is a much higher bar
+# than owning a phone number.
+MAX_SIGNUP_BONUSES_PER_REFERRER_PER_DAY = 5
 
 # (milestone name, day-window start, day-window end [exclusive], minimum
 # questions the referred student must have asked somewhere in that window,
@@ -44,6 +58,31 @@ REFERRAL_LIFETIME_CAP = REFERRAL_SIGNUP_BONUS + sum(bonus for _, _, _, _, bonus 
 REFERRAL_ACTIVE_WITHIN_DAYS = 7
 REFERRAL_STREAK_THRESHOLD_DAYS = 3
 REFERRAL_WEEKLY_MESSAGE_THRESHOLD = 10
+
+
+def grant_signup_referral_bonus(db: Session, referrer_id: int) -> bool:
+    """
+    Pays REFERRAL_SIGNUP_BONUS, capped at MAX_SIGNUP_BONUSES_PER_REFERRER_PER_DAY
+    per referrer per rolling day — see that constant for why only this
+    particular milestone needs a cap. Returns whether it was actually paid,
+    so the caller (whatsapp.py's _create_new_student) only sends the "you
+    earned a bonus" WhatsApp notification when something real happened.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    recent_count = (
+        db.query(CreditEvent)
+        .filter(
+            CreditEvent.student_id == referrer_id,
+            CreditEvent.service == cost_tracker.REFERRAL_BONUS_SERVICE,
+            CreditEvent.note == _SIGNUP_BONUS_NOTE,
+            CreditEvent.created_at >= since,
+        )
+        .count()
+    )
+    if recent_count >= MAX_SIGNUP_BONUSES_PER_REFERRER_PER_DAY:
+        return False
+    cost_tracker.grant_referral_credit(db, referrer_id, REFERRAL_SIGNUP_BONUS, note=_SIGNUP_BONUS_NOTE)
+    return True
 
 
 def is_worth_asking_to_refer(activity: dict, weekly_messages_sent: int) -> bool:

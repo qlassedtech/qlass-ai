@@ -13,7 +13,7 @@ from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
-from app.services.rate_limit import is_otp_rate_limited
+from app.services.rate_limit import is_otp_rate_limited, student_lock
 from app.services.referral import REFERRAL_SIGNUP_BONUS
 from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
@@ -245,6 +245,20 @@ async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
     note, document) — same billing gates and same process_web_message call
     WhatsApp effectively goes through, so a student sees identical behavior
     regardless of which endpoint got them here.
+    """
+    async with student_lock(student.phone):
+        return await _reply_to_locked(db, student, message_text)
+
+
+async def _reply_to_locked(db: Session, student: Student, message_text: str) -> dict:
+    """
+    The actual credits-check-through-deduction critical section, run inside
+    _reply_to's per-student lock. Confirmed live (code review, Aug 2026):
+    unlike WhatsApp (where app.routers.whatsapp already serializes a
+    student's turns with this same lock), this web endpoint had no lock at
+    all — two requests arriving close together could both pass the
+    has_credits() check below before either deduction committed, taking the
+    balance further negative than a single overdraft should allow.
     """
     if school_billing.is_centre_churned(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
         raise HTTPException(

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.core import Student
 from app.services import cost_tracker, tenancy
 from app.services.phone import normalize_phone
+from app.services.rate_limit import is_signup_rate_limited
 from app.services.whatsapp_client import send_template_message, send_whatsapp_message
 
 router = APIRouter()
@@ -48,7 +49,17 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/public/register")
-async def register(body: RegisterRequest, db: Session = Depends(get_db)):
+async def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    # Confirmed live (code review, Aug 2026): this endpoint is unauthenticated
+    # with no CAPTCHA and previously no rate limit at all — a script could
+    # mint unlimited accounts, each carrying a real ₹50 trial-credit grant.
+    # X-Real-IP is set by nginx itself (proxy_set_header X-Real-IP
+    # $remote_addr — see /etc/nginx/sites-available/be-aitutor.qlass.in.conf),
+    # so it can't be spoofed by the client despite arriving as a header.
+    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if await is_signup_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Too many signup attempts — please try again in a few minutes")
+
     name = body.name.strip() or "New Student"
     phone = normalize_phone(body.phone)
     if len(phone) < 12:  # "91" + 10 digits

@@ -39,10 +39,12 @@ from app.services.escalation import (
     format_student_requested_help_message,
 )
 from app.services.profile_builder import next_missing_field
-from app.services.rate_limit import is_rate_limited, student_lock
+from app.services.rate_limit import is_rate_limited, is_signup_rate_limited, student_lock
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
-from app.services.referral import generate_referral_code, extract_referral_code, REFERRAL_SIGNUP_BONUS
+from app.services.referral import (
+    generate_referral_code, extract_referral_code, grant_signup_referral_bonus, REFERRAL_SIGNUP_BONUS,
+)
 from app.services.active_profile import (
     classify_profile_routing,
     ProfileRouting,
@@ -199,16 +201,16 @@ async def _create_new_student(db: Session, from_phone: str, message_text: str = 
     if referred_by_id:
         # Signup itself is the first referral milestone — paid immediately,
         # not gated on any activity (see REFERRAL_MILESTONES for the rest,
-        # which DO require the referred student to actually engage).
-        cost_tracker.grant_referral_credit(
-            db, referred_by_id, REFERRAL_SIGNUP_BONUS, note="Referral milestone: signup"
-        )
+        # which DO require the referred student to actually engage) — capped
+        # per referrer per day (see referral.grant_signup_referral_bonus) so
+        # that lack of an activity gate isn't directly farmable.
+        paid = grant_signup_referral_bonus(db, referred_by_id)
         # Same silent-credit gap as the day1/2/3/week2/3 milestones (see
         # evaluate_referral_milestones) — a bonus the referrer never hears
         # about isn't a good referral experience. Best-effort: shouldn't
         # block the new student's own signup if this send fails.
         referrer = db.query(Student).filter(Student.id == referred_by_id).first()
-        if referrer is not None:
+        if paid and referrer is not None:
             try:
                 await send_whatsapp_message(
                     referrer.phone,
@@ -554,6 +556,26 @@ async def _handle_message(db: Session, payload: dict) -> None:
     else:
         parsed = parse_incoming_message(payload)
     probe_text = parsed[1] if parsed else ""
+
+    # Confirmed live (code review, Aug 2026): a cold WhatsApp message from
+    # any never-seen-before number silently creates a fresh account with a
+    # real ₹50 trial-credit grant, with nothing bounding how many distinct
+    # numbers could each claim one. Only checked for a genuinely new phone
+    # (an existing student/teacher must never be blocked from chatting by
+    # this) — global, not per-phone, since a per-phone limit can't stop an
+    # attacker with many different throwaway numbers, which is exactly the
+    # abuse this guards against (see rate_limit.is_signup_rate_limited).
+    is_known_phone = (
+        db.query(Student.id).filter(or_(Student.phone == from_phone, Student.whatsapp_phone == from_phone)).first()
+        is not None
+        or db.query(Teacher.id).filter(Teacher.phone == from_phone).first() is not None
+    )
+    if not is_known_phone and await is_signup_rate_limited("whatsapp_signup"):
+        await send_whatsapp_message(
+            from_phone, "We're seeing unusually high signup traffic right now — please try again in a few minutes!"
+        )
+        return
+
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
         await send_whatsapp_message(from_phone, early_reply)

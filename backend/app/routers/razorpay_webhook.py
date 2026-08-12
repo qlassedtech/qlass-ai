@@ -47,6 +47,16 @@ async def handle_razorpay_subscription_webhook(request: Request):
             _handle_ended(db, payload)
         else:
             logger.info("Ignoring unhandled Razorpay webhook event: %s", event)
+    except (KeyError, TypeError):
+        # A payload that doesn't match the documented shape (a Razorpay API
+        # version change, a partial/malformed delivery) used to raise an
+        # unhandled exception here — a 500 response, which Razorpay then
+        # redelivers indefinitely on the exact same malformed payload,
+        # spamming logs/alerts without ever succeeding. Logged with the full
+        # payload for a human to investigate, then acknowledged with a
+        # normal 2xx so it isn't retried forever — a signature-verified
+        # webhook we genuinely can't parse isn't something retrying fixes.
+        logger.exception("Malformed Razorpay webhook payload for event=%s: %r", event, payload)
     finally:
         db.close()
     return {"received": True}
@@ -77,7 +87,21 @@ async def _handle_charged(db: Session, payload: dict) -> None:
     )
     price = payment_entity["amount"] / 100
     student.subscription_plan = "unlimited"
-    student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+    # Confirmed live (code review, Aug 2026): extending from now() rather
+    # than from the existing expiry clips whatever time was still left on
+    # the current period if this renewal charge lands even slightly before
+    # it actually lapses (clock skew, processing delay, Razorpay's own
+    # retry timing) — real customer money lost silently every time it
+    # happens. Extending from whichever is later is the correct renewal
+    # semantic: never earlier than "now" (a lapsed subscription doesn't
+    # retroactively resume), never earlier than the still-unexpired term
+    # already paid for.
+    now = datetime.now(timezone.utc)
+    current_expiry = student.subscription_expires_at
+    if current_expiry is not None and current_expiry.tzinfo is None:
+        current_expiry = current_expiry.replace(tzinfo=timezone.utc)
+    base = max(current_expiry, now) if current_expiry is not None else now
+    student.subscription_expires_at = base + timedelta(days=days)
     cost_tracker.add_credits(
         db, student.id, price, note="Razorpay subscription renewal",
         external_ref=payment_id, service="unlimited_plan_recurring",
