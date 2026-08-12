@@ -49,22 +49,16 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/public/register")
-async def register(body: RegisterRequest, db: Session = Depends(get_db), request: Request | None = None):
+async def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     # Confirmed live (code review, Aug 2026): this endpoint is unauthenticated
     # with no CAPTCHA and previously no rate limit at all — a script could
     # mint unlimited accounts, each carrying a real ₹50 trial-credit grant.
     # X-Real-IP is set by nginx itself (proxy_set_header X-Real-IP
     # $remote_addr — see /etc/nginx/sites-available/be-aitutor.qlass.in.conf),
     # so it can't be spoofed by the client despite arriving as a header.
-    # `request` defaults to None (rather than being required) purely so
-    # existing tests that call register(body, db_session) directly, without
-    # going through FastAPI's real request pipeline, keep working — a real
-    # HTTP call always gets it injected regardless of parameter position,
-    # since FastAPI resolves Request by type annotation, not position.
-    if request is not None:
-        client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
-        if await is_signup_rate_limited(client_ip):
-            raise HTTPException(status_code=429, detail="Too many signup attempts — please try again in a few minutes")
+    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if await is_signup_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Too many signup attempts — please try again in a few minutes")
 
     name = body.name.strip() or "New Student"
     phone = normalize_phone(body.phone)
