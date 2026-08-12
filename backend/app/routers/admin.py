@@ -358,7 +358,10 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     # access (the self-serve value prop stays intact), it just leaves a
     # review trail where there was previously none at all. Best-effort: a
     # missed notification shouldn't block a legitimate school's signup.
-    duplicate_note = ""
+    # Confirmed live: Wati rejects a template send with a blank/empty
+    # parameter value ("Check your template, it cannot have typos or blank
+    # text") — every {{n}} placeholder needs a real, non-empty string.
+    duplicate_note = "No duplicate-name conflicts found."
     if name_matches:
         other_cities = ", ".join(c.city or "city not given" for c in name_matches)
         duplicate_note = (
