@@ -16,7 +16,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import AuditLog, Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import audit_log, cost_tracker, school_billing
-from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
+from app.services.escalation import QLASS_SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
@@ -276,6 +276,14 @@ async def verify_teacher_otp(body: VerifyTeacherOtpRequest, db: Session = Depend
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
+# Approved in Wati (Utility category) with two Quick Reply buttons —
+# "Approve School" / "Reject School" — matching app.routers.whatsapp.
+# SCHOOL_REVIEW_BUTTON_ACTIONS exactly. Body params in order: school name,
+# city, admin name, admin phone, centre_id, duplicate-name warning (blank
+# if none).
+SCHOOL_REVIEW_TEMPLATE_NAME = "school_onboarding_review_alert"
+
+
 class RegisterSchoolRequest(BaseModel):
     school_name: str = Field(max_length=200)
     city: str | None = Field(default=None, max_length=100)
@@ -350,23 +358,33 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     # access (the self-serve value prop stays intact), it just leaves a
     # review trail where there was previously none at all. Best-effort: a
     # missed notification shouldn't block a legitimate school's signup.
-    try:
-        duplicate_note = ""
-        if name_matches:
-            other_cities = ", ".join(c.city or "city not given" for c in name_matches)
-            duplicate_note = (
-                f" ⚠️ {len(name_matches)} existing school(s) already use this exact name (city: "
-                f"{other_cities}) — please confirm this isn't the same school registering twice, or "
-                f"impersonating one, before marking it active."
-            )
-        await send_whatsapp_message(
-            QLASS_SUPPORT_PHONE,
-            f"New self-registered school pending review: \"{body.school_name}\" "
-            f"({body.city or 'city not given'}), admin {body.admin_name} ({admin_phone}), centre_id={centre.id}."
-            f"{duplicate_note} Reply from the portal (PATCH /admin/school) to mark it active once verified.",
+    duplicate_note = ""
+    if name_matches:
+        other_cities = ", ".join(c.city or "city not given" for c in name_matches)
+        duplicate_note = (
+            f"⚠️ {len(name_matches)} existing school(s) already use this exact name (city: "
+            f"{other_cities}) — confirm this isn't a duplicate/impersonation before approving."
         )
-    except Exception:
-        pass
+    template_params = [
+        {"name": "1", "value": body.school_name},
+        {"name": "2", "value": body.city or "city not given"},
+        {"name": "3", "value": body.admin_name},
+        {"name": "4", "value": admin_phone},
+        {"name": "5", "value": str(centre.id)},
+        {"name": "6", "value": duplicate_note},
+    ]
+    # Sent to each Qlass staff number in SCHOOL_REVIEW_STAFF_PHONES — a
+    # template (not send_whatsapp_message) since staff numbers have no
+    # guaranteed open 24h session, and its attached Quick Reply buttons
+    # (see app.routers.whatsapp.SCHOOL_REVIEW_BUTTON_ACTIONS) let a
+    # reviewer approve/reject straight from WhatsApp, no portal login
+    # needed for the common case. Best-effort: a missed notification
+    # shouldn't block a legitimate school's signup.
+    for staff_phone in SCHOOL_REVIEW_STAFF_PHONES:
+        try:
+            await send_template_message(staff_phone, SCHOOL_REVIEW_TEMPLATE_NAME, template_params)
+        except Exception:
+            pass
     db.refresh(teacher)
 
     token = create_access_token(teacher.id, teacher.token_version or 0)

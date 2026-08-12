@@ -32,9 +32,10 @@ from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
-from app.services import cost_tracker, nudges, school_billing
+from app.services import audit_log, cost_tracker, nudges, school_billing
 from app.services.escalation import (
     QLASS_SUPPORT_PHONE,
+    SCHOOL_REVIEW_STAFF_PHONES,
     get_escalation_recipients,
     format_student_requested_help_message,
 )
@@ -118,6 +119,48 @@ LEVEL_OFFER_BUTTON_TO_COMMAND = {
 
 def _level_offer_buttons(offered_level: int) -> list[str]:
     return [f"⬇️ Try Level {offered_level}", "➡️ Stay As Is"]
+
+# Quick Reply buttons on the "school_onboarding_review_alert" WhatsApp
+# template (see app.routers.admin.register_school) — approved in Wati by
+# Qlass staff, not this codebase, so these labels must match exactly what
+# was configured there. Deliberately STATIC (no per-message dynamic
+# payload — Wati's template send API doesn't support that for Quick Reply
+# buttons), so a tap resolves to whichever self-registered school is most
+# recently still awaiting review (see _handle_school_review_button) rather
+# than one encoded in the button itself; fine given how infrequently
+# schools self-register.
+SCHOOL_REVIEW_BUTTON_ACTIONS = {"Approve School": "active", "Reject School": "churned"}
+
+
+async def _handle_school_review_button(db: Session, from_phone: str, new_status: str) -> None:
+    """
+    Approve/reject a self-registered school (see app.routers.admin.
+    register_school, which sends the alert this button is attached to)
+    directly from WhatsApp — no portal login needed for the common case.
+    "Reject" reuses sales_status="churned" rather than a new status value:
+    school_billing.is_centre_churned already gates real usage for exactly
+    that status, so rejecting immediately blocks the school's students
+    from free-riding on the trial credit, using logic that's already live
+    and tested rather than adding a new lifecycle state.
+    """
+    centre = (
+        db.query(Centre)
+        .filter(Centre.sales_status == "prospect")
+        .order_by(Centre.created_at.desc())
+        .first()
+    )
+    if centre is None:
+        await send_whatsapp_message(from_phone, "No self-registered school is currently awaiting review.")
+        return
+    centre.sales_status = new_status
+    db.commit()
+    audit_log.record(
+        db, None, f"school_review_{new_status}", "centre", centre.id,
+        detail=f"via WhatsApp button, staff phone {from_phone}",
+    )
+    verb = "Approved ✅" if new_status == "active" else "Rejected ❌"
+    await send_whatsapp_message(from_phone, f"{verb}: \"{centre.name}\" ({centre.city or 'no city given'}).")
+
 
 # Never keep production-cost bypasses for particular phone numbers. Feature
 # access is provisioned per learner (including by launch_pilot), and every
@@ -571,6 +614,21 @@ async def _handle_message(db: Session, payload: dict) -> None:
     from_phone = payload.get("waId")
     if not from_phone:
         return
+
+    # Handled before rate limiting / student resolution — Qlass staff
+    # tapping Approve/Reject on the school_onboarding_review_alert template
+    # aren't students at all, so routing this through the normal tutoring
+    # pipeline would (at best) spuriously create a "student" profile for a
+    # staff number, or (at worst) get rate-limited/misrouted like ordinary
+    # chat traffic. See _handle_school_review_button.
+    early_button_reply = parse_incoming_button_reply(payload)
+    if early_button_reply:
+        early_from_phone, early_button_text = early_button_reply
+        review_action = SCHOOL_REVIEW_BUTTON_ACTIONS.get(early_button_text)
+        if review_action:
+            if early_from_phone in SCHOOL_REVIEW_STAFF_PHONES:
+                await _handle_school_review_button(db, early_from_phone, review_action)
+            return
 
     if await is_rate_limited(from_phone):
         await send_whatsapp_message(

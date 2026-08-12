@@ -11,6 +11,12 @@ from app.models.core import Student, Teacher
 # than claiming a teacher was notified when nobody was.
 QLASS_SUPPORT_PHONE = "9031003985"
 
+# Qlass's own staff — notified when a school self-registers (see
+# app.routers.admin.register_school) and allowed to approve/reject it
+# straight from WhatsApp (see app.routers.whatsapp._handle_school_review_
+# button). A shared source of truth since both modules need the same list.
+SCHOOL_REVIEW_STAFF_PHONES = ("91" + QLASS_SUPPORT_PHONE, "918460184666")
+
 # After this many consecutive WRONG check-question answers, the student has
 # made several genuine attempts and still isn't getting it — worth a human
 # teacher's attention. Deliberately NOT based on the tutor giving a hint
