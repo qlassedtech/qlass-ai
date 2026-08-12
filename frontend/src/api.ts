@@ -316,7 +316,37 @@ export const api = {
       teacher: Teacher;
     }>,
   me: () => request("/admin/me") as Promise<Teacher>,
-  listStudents: () => request("/admin/students") as Promise<Student[]>,
+  // limit/offset default to the backend's own defaults (100/0) when
+  // omitted — see fetchAllStudents below for the "get every student
+  // regardless of how many" case a school roster page actually needs.
+  listStudents: (params?: { limit?: number; offset?: number }) => {
+    const query = params
+      ? `?${new URLSearchParams({
+          ...(params.limit !== undefined ? { limit: String(params.limit) } : {}),
+          ...(params.offset !== undefined ? { offset: String(params.offset) } : {}),
+        })}`
+      : "";
+    return request(`/admin/students${query}`) as Promise<Student[]>;
+  },
+  // Confirmed live: the roster page previously called listStudents() with
+  // no params at all, silently capping every school at the backend's
+  // default 100-row page with no way to see the rest — a school with 500
+  // students (the exact scale being onboarded) would only ever show its
+  // first 100 in the portal. Pages through in batches of the backend's
+  // own max page size (500) until a short page confirms there's nothing
+  // left, so this scales past 500 too without needing real pagination UI.
+  fetchAllStudents: async (): Promise<Student[]> => {
+    const pageSize = 500;
+    const all: Student[] = [];
+    let offset = 0;
+    for (;;) {
+      const page = await api.listStudents({ limit: pageSize, offset });
+      all.push(...page);
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+    return all;
+  },
   // Self-registered (via a school's own /join?school=... link) students
   // awaiting a teacher's confirmation — see Student.approval_status.
   listPendingStudents: () => request("/admin/students/pending") as Promise<Student[]>,

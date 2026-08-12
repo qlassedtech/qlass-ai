@@ -52,7 +52,7 @@ export default function Schools() {
     // listStudents/listTeachers return everyone across every school for
     // super_admin — filtered client-side to just this one below, since
     // there's no per-centre query param on those endpoints today.
-    const [students, teachers] = await Promise.all([api.listStudents(), api.listTeachers()]);
+    const [students, teachers] = await Promise.all([api.fetchAllStudents(), api.listTeachers()]);
     setAllStudents(students.filter((s) => s.centre_id === schoolId));
     setAllTeachers(teachers.filter((t) => t.centre_id === schoolId));
   }

@@ -57,7 +57,7 @@ export default function StudentDetail() {
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
-    api.listStudents().then((all) => {
+    api.fetchAllStudents().then((all) => {
       const found = all.find((s) => s.id === studentId) || null;
       setStudent(found);
       if (found) {

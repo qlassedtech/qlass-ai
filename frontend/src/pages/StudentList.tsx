@@ -16,7 +16,7 @@ export default function StudentList() {
 
   function load() {
     setLoading(true);
-    Promise.all([api.listStudents(), api.listPendingStudents()])
+    Promise.all([api.fetchAllStudents(), api.listPendingStudents()])
       .then(([all, pendingList]) => {
         setStudents(all);
         setPending(pendingList);

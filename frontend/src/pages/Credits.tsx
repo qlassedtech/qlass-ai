@@ -10,7 +10,7 @@ export default function Credits() {
   const [status, setStatus] = useState<string | null>(null);
 
   function load() {
-    api.listStudents().then(setStudents);
+    api.fetchAllStudents().then(setStudents);
     api.me().then(setTeacher);
   }
 
