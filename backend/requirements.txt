@@ -22,6 +22,7 @@ anthropic
 httpx
 pyjwt
 bcrypt
+google-auth
 razorpay
 pytest
 pytest-asyncio

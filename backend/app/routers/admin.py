@@ -21,6 +21,7 @@ from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
+from app.services.google_auth import GoogleAuthError, verify_google_id_token
 from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
@@ -220,6 +221,35 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
 
 
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+
+
+@router.post("/auth/google-login")
+def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """
+    Sign in with an already-linked Google account (see google_id_token on
+    /auth/register-school, which is how the link gets created in the first
+    place — this endpoint never creates a new account, same reasoning as
+    /auth/request-teacher-otp not creating one for OTP login). No rate
+    limiting needed here the way password login has: the "secret" being
+    checked is a cryptographically signed token from Google, not a
+    guessable credential — there's no brute-force surface to protect
+    against.
+    """
+    try:
+        payload = verify_google_id_token(body.id_token)
+    except GoogleAuthError as exc:
+        raise HTTPException(status_code=401, detail=f"Google sign-in failed: {exc}")
+    if not payload.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google account's email isn't verified")
+    teacher = db.query(Teacher).filter(Teacher.email == payload["email"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="No account found for this Google email — register your school first")
+    token = create_access_token(teacher.id, teacher.token_version or 0)
+    return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
+
+
 class TeacherPhoneRequest(BaseModel):
     phone: str
 
@@ -289,7 +319,13 @@ class RegisterSchoolRequest(BaseModel):
     city: str | None = Field(default=None, max_length=100)
     admin_name: str = Field(max_length=200)
     admin_phone: str = Field(max_length=20)
-    password: str
+    # Exactly one of these two must be given — a password (the original
+    # flow) or a Google ID token (see app.services.google_auth), letting
+    # the new admin sign in with Google instead of setting/remembering a
+    # portal password. Both remain valid ongoing login methods once set;
+    # this only decides which one is set up at registration time.
+    password: str | None = None
+    google_id_token: str | None = None
 
 
 @router.post("/auth/register-school")
@@ -313,7 +349,21 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
     if await is_signup_rate_limited(client_ip):
         raise HTTPException(status_code=429, detail="Too many school registrations from this network — please try again later")
-    _require_valid_password(body.password)
+    if bool(body.password) == bool(body.google_id_token):
+        raise HTTPException(status_code=400, detail="Provide exactly one of password or google_id_token")
+    google_email = None
+    if body.google_id_token:
+        try:
+            payload = verify_google_id_token(body.google_id_token)
+        except GoogleAuthError as exc:
+            raise HTTPException(status_code=401, detail=f"Google sign-in failed: {exc}")
+        if not payload.get("email_verified"):
+            raise HTTPException(status_code=401, detail="Your Google account's email isn't verified")
+        google_email = payload["email"]
+        if db.query(Teacher).filter(Teacher.email == google_email).first():
+            raise HTTPException(status_code=409, detail="An account with this Google email already exists")
+    else:
+        _require_valid_password(body.password)
     admin_phone = normalize_phone(body.admin_phone)
     if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
@@ -345,8 +395,9 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     school_billing.add_trial_credits(db, centre.id)
 
     teacher = Teacher(
-        name=body.admin_name, phone=admin_phone,
-        password_hash=hash_password(body.password), role="admin", centre_id=centre.id,
+        name=body.admin_name, phone=admin_phone, email=google_email,
+        password_hash=hash_password(body.password) if body.password else None,
+        role="admin", centre_id=centre.id,
     )
     db.add(teacher)
     db.commit()

@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi } from "../api";
+import GoogleSignInButton from "../components/GoogleSignInButton";
 import ThemeToggle from "../components/ThemeToggle";
+
+/**
+ * Pulls just the display name out of a Google ID token, client-side, with
+ * no backend call — this is autofill convenience only, never proof of
+ * identity. The actual identity check for this form stays the WhatsApp OTP
+ * step right after (see publicApi.register/registerVerify): a student
+ * still can't get trial credit without proving they control the phone
+ * number, regardless of what a Google token claims.
+ */
+function decodeGoogleName(idToken: string): string | null {
+  try {
+    const payload = JSON.parse(atob(idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof payload.name === "string" ? payload.name : null;
+  } catch {
+    return null;
+  }
+}
 
 // Credible, academic register — this page is often embedded on a school's
 // own website, so the tone needs to read as a serious learning product, not
@@ -458,6 +476,17 @@ export default function Join() {
             <li>No card or download required</li>
             <li>Replies arrive on WhatsApp instantly</li>
           </ul>
+          {/* Autofill only — decoded client-side, never sent anywhere. The
+              WhatsApp number below is still what actually proves who you
+              are (see the OTP step after submitting), same as if you'd
+              just typed your name in by hand. */}
+          <GoogleSignInButton
+            text="continue_with"
+            onCredential={(idToken) => {
+              const googleName = decodeGoogleName(idToken);
+              if (googleName) setName(googleName);
+            }}
+          />
           <label>
             Your name
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" required />

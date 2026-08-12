@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
 
+    # OAuth 2.0 Web Client ID from Google Cloud Console (APIs & Services ->
+    # Credentials) — distinct from google_api_key above (that's the Gemini
+    # API key, unrelated to sign-in). Used both by the frontend (to render
+    # the Google Sign-In button) and here server-side, to verify that a
+    # submitted ID token was actually issued for THIS app, not some other
+    # Google-integrated app (see app.services.google_auth).
+    google_oauth_client_id: str | None = None
+
     # Wati (WhatsApp BSP) — https://live-mt-server.wati.io/<tenant_id>
     whatsapp_token: str | None = None
     wati_api_endpoint: str | None = None

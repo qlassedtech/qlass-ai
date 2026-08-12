@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { absoluteUrl, api, normalizePhone, parentApi, publicApi, setParentToken, setStudentToken, setToken } from "../api";
+import GoogleSignInButton from "../components/GoogleSignInButton";
 import ThemeToggle from "../components/ThemeToggle";
 
 type Step = "phone" | "password" | "otp" | "parent_otp" | "teacher_otp" | "student_password";
@@ -84,6 +85,25 @@ export default function Login() {
       navigate("/chat");
     } catch (err) {
       setError(err instanceof Error ? err.message : "We couldn't sign you in — please try again");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogleCredential(idToken: string) {
+    setError(null);
+    setLoading(true);
+    try {
+      const { access_token } = await api.googleLogin(idToken);
+      setToken(access_token);
+      const me = await api.me();
+      navigate(me.role === "org_admin" ? "/schools" : "/students");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "No school account is linked to this Google account — register your school first",
+      );
     } finally {
       setLoading(false);
     }
@@ -238,6 +258,13 @@ export default function Login() {
           <button type="button" className="button-secondary" disabled={loading} onClick={handleTeacherOtpRequest}>
             Login with WhatsApp OTP instead
           </button>
+        )}
+
+        {step === "phone" && (
+          <>
+            <p className="auth-divider">or</p>
+            <GoogleSignInButton onCredential={handleGoogleCredential} text="signin_with" />
+          </>
         )}
 
         {step !== "phone" && (

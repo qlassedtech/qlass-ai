@@ -306,6 +306,15 @@ export const api = {
       access_token: string;
       teacher: Teacher;
     }>,
+  // id_token is the credential Google Identity Services hands back after
+  // the user picks an account in the Google sign-in popup — see
+  // components/GoogleSignInButton. Only ever exchanges an ALREADY-linked
+  // Google account for a session; registerSchool below is what links one.
+  googleLogin: (idToken: string) =>
+    request("/auth/google-login", { method: "POST", body: JSON.stringify({ id_token: idToken }) }) as Promise<{
+      access_token: string;
+      teacher: Teacher;
+    }>,
   me: () => request("/admin/me") as Promise<Teacher>,
   listStudents: () => request("/admin/students") as Promise<Student[]>,
   // Self-registered (via a school's own /join?school=... link) students
@@ -411,7 +420,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }) as Promise<{ pilot_status: string; pilot_expires_at: string; credits_per_student: number; teacher_tool_credits: number; enabled_features: string[]; granted_count: number; granted: string[] }>,
-  registerSchool: (data: { school_name: string; city?: string; admin_name: string; admin_phone: string; password: string }) =>
+  // Exactly one of password/google_id_token — see RegisterSchoolRequest's
+  // own docstring on the backend for why both exist.
+  registerSchool: (data: {
+    school_name: string; city?: string; admin_name: string; admin_phone: string;
+    password?: string; google_id_token?: string;
+  }) =>
     request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       access_token: string;
       teacher: Teacher;

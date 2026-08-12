@@ -285,6 +285,11 @@ class Teacher(Base):
     # null for it.
     role = Column(Text, default="teacher")
     photo_url = Column(Text)
+    # Set only for an account created/linked via "Sign in with Google" (see
+    # app.services.google_auth, POST /auth/google-login) — null for every
+    # phone+password account, which has no email at all. Unique so the same
+    # Google account can't be linked to two different teacher rows.
+    email = Column(Text, unique=True)
     # Stamped into every JWT issued for this teacher (see
     # app.services.teacher_auth.create_access_token) and checked on every
     # authenticated request (get_current_teacher) — bumped whenever the
