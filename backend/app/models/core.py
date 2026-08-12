@@ -109,6 +109,14 @@ class Student(Base):
     # on chatting — purely a review/visibility flag, see
     # GET /admin/students/pending.
     approval_status = Column(Text, default="approved")
+    # Set only once a student links a Google account from inside the
+    # already-logged-in chat app (see POST /student-app/auth/link-google) —
+    # never a way to sign up or bypass the WhatsApp OTP that grants trial
+    # credit; purely an ALTERNATE login path for an account that already
+    # exists and is already phone-verified. Null for every student who
+    # hasn't linked one. Unique so the same Google account can't be linked
+    # to two different students.
+    email = Column(Text, unique=True)
     class_ = Column("class", Text)
     board = Column(Text)
     school = Column(Text)

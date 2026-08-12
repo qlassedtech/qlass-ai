@@ -1,15 +1,28 @@
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { setStudentToken, studentApi, type StudentProfile } from "../api";
+import GoogleSignInButton from "./GoogleSignInButton";
 import ThemeToggle from "./ThemeToggle";
 
 export default function StudentLayout() {
   const navigate = useNavigate();
   const [student, setStudent] = useState<StudentProfile | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   useEffect(() => {
     studentApi.me().then(setStudent).catch(() => {});
   }, []);
+
+  async function handleLinkGoogle(idToken: string) {
+    setLinkError(null);
+    try {
+      await studentApi.linkGoogleAccount(idToken);
+      const me = await studentApi.me();
+      setStudent(me);
+    } catch (err) {
+      setLinkError(err instanceof Error ? err.message : "Couldn't link that Google account");
+    }
+  }
 
   function logout() {
     setStudentToken(null);
@@ -40,6 +53,19 @@ export default function StudentLayout() {
             AI Tutor Chat
           </span>
         </div>
+        {student && (
+          <div className="nav-group">
+            <span className="nav-group-label">Account</span>
+            {student.email ? (
+              <p className="muted" style={{ fontSize: 12, padding: "0 14px" }}>✅ Google linked ({student.email})</p>
+            ) : (
+              <div style={{ padding: "0 14px" }}>
+                <GoogleSignInButton onCredential={handleLinkGoogle} text="continue_with" width="200" />
+                {linkError && <p className="error" style={{ fontSize: 12 }}>{linkError}</p>}
+              </div>
+            )}
+          </div>
+        )}
         <button className="logout" onClick={logout}>
           Sign Out
         </button>

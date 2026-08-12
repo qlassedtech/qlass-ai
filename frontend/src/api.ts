@@ -536,6 +536,15 @@ export const api = {
     request("/student-app/auth/verify-otp", {
       method: "POST", body: JSON.stringify({ phone, otp, name, referral_code }),
     }) as Promise<{ access_token: string; student: StudentProfile }>,
+  // Only ever signs in to an account that already exists AND already
+  // linked Google (see studentApi.linkGoogleAccount below) — never
+  // creates a student or grants trial credit; WhatsApp OTP stays the
+  // only way to do that.
+  studentGoogleLogin: (idToken: string) =>
+    request("/student-app/auth/google-login", { method: "POST", body: JSON.stringify({ id_token: idToken }) }) as Promise<{
+      access_token: string;
+      student: StudentProfile;
+    }>,
   getMyTutor: () =>
     request("/admin/my-tutor") as Promise<{
       id: number;
@@ -592,6 +601,9 @@ export interface StudentProfile {
   focus_topic: string | null;
   credit_balance: number;
   referral_code: string | null;
+  // Set only once a Google account has been linked (see
+  // studentApi.linkGoogleAccount) — null for every student who hasn't.
+  email: string | null;
 }
 
 export interface ChatMessage {
@@ -630,6 +642,14 @@ export const studentApi = {
     formData.append("file", file);
     return requestStudentMultipart("/student-app/chat/send-document", formData) as Promise<ChatReplyResponse>;
   },
+  // Attaches a Google account to the currently logged-in student — see
+  // api.studentGoogleLogin for the sign-in-time counterpart. Requires an
+  // existing student session, so this can only ever link Google onto an
+  // account whose phone was already verified via OTP.
+  linkGoogleAccount: (idToken: string) =>
+    requestStudent("/student-app/auth/link-google", {
+      method: "POST", body: JSON.stringify({ id_token: idToken }),
+    }) as Promise<{ linked: boolean; email: string }>,
 };
 
 export interface CreateOrderResponse {

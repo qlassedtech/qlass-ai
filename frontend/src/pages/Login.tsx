@@ -93,16 +93,31 @@ export default function Login() {
   async function handleGoogleCredential(idToken: string) {
     setError(null);
     setLoading(true);
+    // Tried in this order (teacher/admin, then student) since a Google
+    // credential alone doesn't say which kind of account it's linked to —
+    // same priority as check_phone's own "teacher login always takes
+    // priority" comment on the backend.
     try {
       const { access_token } = await api.googleLogin(idToken);
       setToken(access_token);
       const me = await api.me();
       navigate(me.role === "org_admin" ? "/schools" : "/students");
+      return;
+    } catch {
+      // fall through to the student attempt below
+    } finally {
+      setLoading(false);
+    }
+    setLoading(true);
+    try {
+      const { access_token } = await api.studentGoogleLogin(idToken);
+      setStudentToken(access_token);
+      navigate("/chat");
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : "No school account is linked to this Google account — register your school first",
+          : "No account is linked to this Google account yet — sign in with your phone number and link Google from your account settings",
       );
     } finally {
       setLoading(false);

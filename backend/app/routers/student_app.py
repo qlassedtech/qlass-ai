@@ -9,6 +9,7 @@ from app.services import cost_tracker, school_billing
 from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.document_client import extract_text_from_document
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
+from app.services.google_auth import GoogleAuthError, verify_google_id_token
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
@@ -40,6 +41,7 @@ def student_summary(db: Session, student: Student) -> dict:
         "focus_topic": student.focus_topic,
         "credit_balance": cost_tracker.get_balance(db, student.id),
         "referral_code": student.referral_code,
+        "email": student.email,
     }
 
 
@@ -99,6 +101,68 @@ def student_login(body: StudentLoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid phone or password")
     token = create_student_access_token(student.id)
     return {"access_token": token, "student": student_summary(db, student)}
+
+
+class StudentGoogleLoginRequest(BaseModel):
+    id_token: str
+
+
+@router.post("/student-app/auth/google-login")
+def student_google_login(body: StudentGoogleLoginRequest, db: Session = Depends(get_db)):
+    """
+    Sign in with an already-linked Google account — see
+    /student-app/auth/link-google, the only way that link gets created.
+    Never creates a new student or grants trial credit; WhatsApp OTP stays
+    the sole way to prove phone ownership and get credit in the first
+    place (see app.routers.public.register/whatsapp._create_new_student).
+    This is purely an alternate way back into an account that already
+    exists, same reasoning as the teacher/admin equivalent
+    (app.routers.admin.google_login).
+    """
+    try:
+        payload = verify_google_id_token(body.id_token)
+    except GoogleAuthError as exc:
+        raise HTTPException(status_code=401, detail=f"Google sign-in failed: {exc}")
+    if not payload.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google account's email isn't verified")
+    student = (
+        db.query(Student)
+        .filter(Student.email == payload["email"], Student.is_staff_profile.is_(False))
+        .first()
+    )
+    if not student:
+        raise HTTPException(
+            status_code=404,
+            detail="No account found for this Google email — sign in with your WhatsApp number first, "
+                   "then link Google from your account settings",
+        )
+    token = create_student_access_token(student.id)
+    return {"access_token": token, "student": student_summary(db, student)}
+
+
+@router.post("/student-app/auth/link-google")
+def link_google_account(
+    body: StudentGoogleLoginRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    Links a Google account to the CALLER's own already-authenticated
+    student account — requires a valid student session (phone/OTP or
+    password login), so this can only ever attach Google to an account
+    whose phone was already verified, never bypass that verification.
+    """
+    try:
+        payload = verify_google_id_token(body.id_token)
+    except GoogleAuthError as exc:
+        raise HTTPException(status_code=401, detail=f"Google sign-in failed: {exc}")
+    if not payload.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google account's email isn't verified")
+    email = payload["email"]
+    existing = db.query(Student).filter(Student.email == email, Student.id != student.id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="This Google account is already linked to another student")
+    student.email = email
+    db.commit()
+    return {"linked": True, "email": email}
 
 
 @router.post("/student-app/auth/request-otp")

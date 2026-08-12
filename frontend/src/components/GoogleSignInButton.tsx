@@ -51,6 +51,8 @@ interface GoogleSignInButtonProps {
   onCredential: (idToken: string) => void;
   /** GIS's own button copy — "signin_with" | "signup_with" | "continue_with". */
   text?: "signin_with" | "signup_with" | "continue_with";
+  /** Button width in px, as a string (GIS's own API takes it that way). */
+  width?: string;
 }
 
 /**
@@ -60,7 +62,7 @@ interface GoogleSignInButtonProps {
  * on top of the phone-based flows every account already has, never the
  * only way in.
  */
-export default function GoogleSignInButton({ onCredential, text = "signin_with" }: GoogleSignInButtonProps) {
+export default function GoogleSignInButton({ onCredential, text = "signin_with", width = "320" }: GoogleSignInButtonProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
   const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
@@ -80,7 +82,7 @@ export default function GoogleSignInButton({ onCredential, text = "signin_with" 
           theme: "outline",
           size: "large",
           text,
-          width: "320",
+          width,
         });
       })
       .catch(() => setFailed(true));
@@ -88,7 +90,7 @@ export default function GoogleSignInButton({ onCredential, text = "signin_with" 
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientId, text]);
+  }, [clientId, text, width]);
 
   if (!clientId || failed) return null;
   return <div ref={containerRef} />;
