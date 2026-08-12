@@ -1,5 +1,6 @@
 import { Navigate, Route, BrowserRouter, Routes } from "react-router-dom";
 import { isParentAuthenticated, isStudentAuthenticated } from "./api";
+import Join from "./pages/Join";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -18,7 +19,6 @@ import MyTutor from "./pages/MyTutor";
 import Chat from "./pages/Chat";
 import ParentDashboard from "./pages/ParentDashboard";
 import Pay from "./pages/Pay";
-import Join from "./pages/Join";
 import Layout from "./components/Layout";
 import StudentLayout from "./components/StudentLayout";
 
@@ -45,6 +45,13 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* The public marketing/self-registration page doubles as the site
+            root for a logged-out visitor — aitutor.qlass.in previously
+            just bounced straight to /login with no explanation of what the
+            product even is. An already-signed-in admin/teacher still lands
+            on their dashboard as before; this only changes what an
+            anonymous visitor sees. */}
+        <Route path="/" element={isAuthenticated() ? <Navigate to="/students" replace /> : <Join />} />
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -69,7 +76,6 @@ export default function App() {
           <Route path="/presentations" element={<Presentations />} />
           <Route path="/assign-quiz" element={<AssignQuiz />} />
           <Route path="/my-tutor" element={<MyTutor />} />
-          <Route path="/" element={<Navigate to="/students" replace />} />
         </Route>
         <Route
           element={

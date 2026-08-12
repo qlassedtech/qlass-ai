@@ -21,6 +21,49 @@ const FEATURES = [
   { icon: "📚", title: "Grounded in Your NCERT Textbook", text: "Answers are drawn directly from your NCERT syllabus, with the exact chapter cited — never a generic guess." },
 ];
 
+// A school evaluating this page cares about a different question than a
+// student does — not "will this help me learn" but "can I run my school on
+// this." Every item here maps to a real, shipped feature (the admin
+// console's own sidebar: Student Roster, Bulk Enrollment, Assign Quiz,
+// Analytics, Billing & Credits, School Profile's approval toggle) rather
+// than aspirational copy — a school that signs up on the strength of a
+// claim this product doesn't back up is a support ticket waiting to happen.
+const SCHOOL_BENEFITS = [
+  { icon: "🏫", title: "Your School's Own Branded Portal", text: "Students see your school's name and logo, not a generic app — the sign-in and sign-up pages carry your identity." },
+  { icon: "👩‍🏫", title: "One Dashboard for Every Teacher", text: "Enroll students, assign quizzes, generate worksheets and presentations, and see class-wide analytics from a single console." },
+  { icon: "📲", title: "Nothing for Students to Install", text: "Every student already has WhatsApp — there's no app to download and no login to forget, which is exactly why adoption doesn't stall." },
+  { icon: "✅", title: "You Decide Who Joins", text: "Auto-approve every signup, or review each one yourself before they're added to your roster — your school's call, changeable anytime." },
+  { icon: "💳", title: "Transparent Usage, Not a Black Box", text: "See exactly how much AI usage each student and teacher account has drawn, in real time, from your billing dashboard." },
+  { icon: "🔒", title: "Curriculum-Safe by Design", text: "Every answer is grounded in the NCERT syllabus and moderated for a school setting — not an open-ended chatbot with no guardrails." },
+];
+
+function SchoolBenefits({ benefits }: { benefits: typeof SCHOOL_BENEFITS }) {
+  return (
+    <div className="landing-school-band">
+      <div className="landing-school-band-inner">
+        <span className="landing-eyebrow landing-eyebrow-on-dark">For Schools</span>
+        <h2>Bring Qlass to Your Whole School</h2>
+        <p>
+          The same AI tutor your students already love, wrapped in the tools your teachers and
+          administrators actually need to run it.
+        </p>
+        <div className="landing-school-grid">
+          {benefits.map((b) => (
+            <div className="landing-school-tile" key={b.title}>
+              <span className="landing-school-tile-icon" aria-hidden="true">{b.icon}</span>
+              <div>
+                <h3>{b.title}</h3>
+                <p>{b.text}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <Link to="/register" className="button-link landing-school-cta">Register Your School</Link>
+      </div>
+    </div>
+  );
+}
+
 type ChatMsg =
   | { from: string; kind: "text"; text: string; time: string }
   | { from: string; kind: "image"; caption: string; time: string }
@@ -418,32 +461,39 @@ export default function Join() {
         )}
 
         <div className="landing-hero-split">
-          <div className="landing-hero-headline">
-            <span className="landing-eyebrow">AI-Powered Academic Support</span>
-            <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
-            <p>
-              {schoolName
-                ? `24/7 academic support from a dedicated AI tutor, directly on WhatsApp.`
-                : "Round-the-clock academic support, directly on WhatsApp — no app, no waiting."}
-            </p>
-            <ul className="landing-trust-pills">
-              <li>🔒 Safe &amp; Moderated</li>
-              <li>🎓 NCERT Aligned</li>
-              <li>⏱️ 24/7 Availability</li>
-            </ul>
+          <div className="landing-hero-left">
+            <div className="landing-hero-headline">
+              <span className="landing-eyebrow">AI-Powered Academic Support</span>
+              <h1>{schoolName ? `${schoolName}'s AI Academic Tutor` : "Your Personal AI Academic Tutor, on WhatsApp"}</h1>
+              <p>
+                {schoolName
+                  ? `24/7 academic support from a dedicated AI tutor, directly on WhatsApp.`
+                  : "Round-the-clock academic support, directly on WhatsApp — no app, no waiting."}
+              </p>
+              <ul className="landing-trust-pills">
+                <li>🔒 Safe &amp; Moderated</li>
+                <li>🎓 NCERT Aligned</li>
+                <li>⏱️ 24/7 Availability</li>
+              </ul>
+            </div>
+            <div className="landing-hero-demo">
+              <AnimatedChatDemo scenarios={CHAT_SCENARIOS} />
+            </div>
           </div>
           {/* On mobile this sits right after the headline, before the
               demo — a signup form buried below a full chat mockup meant
               scrolling past the whole demo before any action was
-              possible. Desktop keeps it beside the hero via grid areas. */}
+              possible. Desktop keeps it beside the hero as its own column
+              (see .landing-hero-left / display:contents in index.css). */}
           <div className="landing-hero-form" id="signup">{registrationForm}</div>
-          <div className="landing-hero-demo">
-            <AnimatedChatDemo scenarios={CHAT_SCENARIOS} />
-          </div>
         </div>
 
         <FeatureGrid features={FEATURES} />
+      </div>
 
+      <SchoolBenefits benefits={SCHOOL_BENEFITS} />
+
+      <div className="landing-inner">
         <div className="landing-closing-cta">
           <h2>Ready to get started?</h2>
           <p className="muted">Registration takes under a minute — your first reply arrives on WhatsApp right away.</p>

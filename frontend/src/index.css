@@ -858,56 +858,55 @@ label {
    Character.AI's own landing page is a headline and a sign-up gate with
    nothing in between; the feature grid here is supporting content for
    people who scroll further, not a gate the primary action sits behind. */
-/* Three grid areas instead of two — headline, form, and demo (trust pills
-   + chat mockup) can each be positioned independently per breakpoint. On
-   mobile this puts the signup form right after the headline, ahead of the
-   large chat demo, so the primary action doesn't require scrolling past
-   the whole mockup first. */
+/* Two real columns, not three grid areas — a form spanning two auto-sized
+   rows (the previous approach) forces CSS Grid to inflate whichever row
+   has slack to give the spanning item the height it needs, which showed up
+   as a large dead gap under the trust pills whenever the form was taller
+   than the headline block alone (confirmed live). .landing-hero-left
+   groups the headline and demo into a single flex column instead, so the
+   grid only ever has one real row — align-items: center then centers
+   whichever side is shorter against the taller one, with no forced growth
+   and no phantom whitespace. */
 .landing-hero-split {
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
-  grid-template-areas:
-    "headline form"
-    "demo     form";
-  gap: 14px 48px;
-  align-items: start;
+  gap: 32px 48px;
+  align-items: center;
   margin-bottom: 32px;
 }
 
-.landing-hero-headline {
-  grid-area: headline;
-}
-
-.landing-hero-demo {
-  grid-area: demo;
-}
-
-.landing-hero-form {
-  grid-area: form;
-  /* The left column's total height (headline + demo) is now constant —
-     the chat body is a fixed height regardless of scenario — so the form
-     can be reliably stretched to match it and centered within, instead of
-     top-aligning and leaving its bottom edge floating out of sync with
-     the mockup below it. */
-  align-self: stretch;
+.landing-hero-left {
   display: flex;
-  align-items: center;
-}
-
-@media (max-width: 860px) {
-  .landing-hero-form {
-    align-self: auto;
-  }
+  flex-direction: column;
+  gap: 28px;
+  min-width: 0;
 }
 
 @media (max-width: 860px) {
   .landing-hero-split {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "headline"
-      "form"
-      "demo";
     text-align: center;
+  }
+
+  /* display: contents drops this wrapper out of layout entirely while
+     keeping its children (headline, demo) as direct grid items — that's
+     what lets `order` below interleave the form BETWEEN them on mobile
+     (primary action right after the headline, ahead of the full chat
+     mockup) despite them sharing one flex column on desktop. */
+  .landing-hero-left {
+    display: contents;
+  }
+
+  .landing-hero-headline {
+    order: 1;
+  }
+
+  .landing-hero-form {
+    order: 2;
+  }
+
+  .landing-hero-demo {
+    order: 3;
   }
 }
 
@@ -1567,6 +1566,116 @@ label {
   padding: 12px 26px;
   border-radius: var(--radius);
   text-decoration: none;
+}
+
+/* A full-bleed dark section — deliberately breaking from the light
+   card-on-gradient treatment used everywhere else on this page — so a
+   school administrator scrolling past the student-facing feature grid
+   gets an unmistakable signal that the next block is written for them,
+   not just one more card in the same list. Colors are pinned rather than
+   tied to the light/dark theme tokens, since the contrast against the
+   light sections around it IS the point, regardless of which theme the
+   visitor's OS prefers (same reasoning as .landing-chat-preview pinning
+   color-scheme: light for the WhatsApp mockup above). */
+.landing-school-band {
+  color-scheme: dark;
+  background:
+    radial-gradient(circle at 15% 15%, rgba(123, 139, 245, 0.35), transparent 55%),
+    radial-gradient(circle at 88% 88%, rgba(219, 39, 119, 0.16), transparent 50%),
+    linear-gradient(160deg, #1b1a42, #171f52 45%, #1c2a8f);
+  padding: 72px 20px;
+  margin: 12px 0 44px;
+}
+
+.landing-school-band-inner {
+  max-width: 920px;
+  margin: 0 auto;
+  text-align: center;
+  color: #f2f2fb;
+}
+
+.landing-eyebrow-on-dark {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #cfd3ff;
+}
+
+.landing-school-band-inner h2 {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 14px 0 10px;
+  color: #fff;
+  text-wrap: balance;
+}
+
+.landing-school-band-inner > p {
+  color: rgba(242, 242, 251, 0.72);
+  font-size: 15.5px;
+  max-width: 540px;
+  margin: 0 auto 40px;
+  line-height: 1.5;
+}
+
+.landing-school-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 18px;
+  text-align: left;
+  margin-bottom: 40px;
+}
+
+.landing-school-tile {
+  display: flex;
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 18px 20px;
+}
+
+.landing-school-tile-icon {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+
+.landing-school-tile h3 {
+  font-size: 14.5px;
+  margin: 0 0 4px;
+  color: #fff;
+}
+
+.landing-school-tile p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  color: rgba(242, 242, 251, 0.68);
+}
+
+.landing-school-cta {
+  background: #fff;
+  color: #1c2a8f;
+}
+
+.landing-school-cta:hover {
+  background: #eef0fd;
+}
+
+@media (max-width: 640px) {
+  .landing-school-band {
+    padding: 56px 16px;
+  }
+
+  .landing-school-band-inner h2 {
+    font-size: 25px;
+  }
 }
 
 .landing-support-line {

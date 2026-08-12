@@ -259,6 +259,8 @@ export default function Login() {
             <Link to="/forgot-password">Forgot password?</Link>
             <span> · </span>
             <Link to="/register">Register your school</Link>
+            <span> · </span>
+            <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New student? Start free</Link>
           </p>
         )}
       </form>
