@@ -1,8 +1,11 @@
 import asyncio
 import importlib
+import math
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from app.routers import whatsapp, health, broadcast, admin, payments, student_app, parent_app, razorpay_webhook, public
 from app.database import Base, engine
@@ -47,6 +50,35 @@ app.include_router(student_app.router, tags=["student-app"])
 app.include_router(parent_app.router, tags=["parent-app"])
 app.include_router(razorpay_webhook.router, tags=["razorpay-webhook"])
 app.include_router(public.router, tags=["public"])
+
+
+def _sanitize_non_finite(value):
+    """Replace inf/-inf/NaN with a plain string, recursively — see the
+    exception handler below for why."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_non_finite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_non_finite(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """
+    Confirmed live: a request body containing a non-finite float
+    (Infinity/-Infinity/NaN — non-standard JSON tokens that Python's own
+    json.loads still accepts) correctly FAILS Pydantic validation, but
+    FastAPI's default error handler then crashes trying to render the
+    response — it echoes the rejected raw value back for debugging
+    (errors()[i]["input"]), and Starlette's JSONResponse explicitly sets
+    allow_nan=False, so json.dumps raises ValueError mid-response. The net
+    effect was a correctly-validated 422 turning into an unhandled 500.
+    This mirrors FastAPI's own default handler exactly, except it
+    sanitizes non-finite floats out of the echoed input first.
+    """
+    return JSONResponse(status_code=422, content={"detail": _sanitize_non_finite(exc.errors())})
 
 
 @app.on_event("startup")
