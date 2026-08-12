@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models.core import ChatHistory, Centre, Student
 from app.services import cost_tracker
@@ -15,7 +15,7 @@ from app.services.referral import (
 # datetime comparison inside evaluate_referral_milestones even though that
 # logic is correct against real Postgres (verified live during development).
 def _utcnow():
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def _make_pair(pg_db_session):

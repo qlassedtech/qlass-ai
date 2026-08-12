@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models.core import ChatHistory, Centre, Student
 from app.services import cost_tracker
@@ -6,7 +6,7 @@ from app.services.habit import evaluate_habit_milestones, HABIT_MILESTONES
 
 
 def _utcnow():
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def _make_student(pg_db_session):
