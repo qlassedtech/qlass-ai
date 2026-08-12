@@ -201,14 +201,12 @@ export default function Login() {
           <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
         )}
         <h1>{schoolName ? `Welcome back, ${schoolName}` : "Welcome to Qlass"}</h1>
-        <p className="login-subtitle">
-          {step === "phone" && "Sign in as a school, teacher, parent, or student"}
-          {step === "password" && "Enter your portal password"}
-          {step === "student_password" && "Enter your password"}
-          {step === "otp" && "Enter the code we sent over WhatsApp"}
-          {step === "parent_otp" && "Enter the code we sent over WhatsApp"}
-          {step === "teacher_otp" && "Enter the code we sent over WhatsApp"}
-        </p>
+        {step !== "phone" && (
+          <p className="login-subtitle">
+            {(step === "password" || step === "student_password") && "Enter your password"}
+            {(step === "otp" || step === "parent_otp" || step === "teacher_otp") && "Enter the code"}
+          </p>
+        )}
 
         {step === "phone" && (
           <label>
