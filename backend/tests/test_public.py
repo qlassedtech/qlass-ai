@@ -1,5 +1,5 @@
 from app.models.core import Centre, Student
-from app.routers.public import RegisterRequest, get_school_info, register
+from app.routers.public import RegisterRequest, VerifyRegisterRequest, get_school_info, register, register_verify
 from app.services import cost_tracker, tenancy
 
 
@@ -25,6 +25,40 @@ def test_get_school_info_returns_name_and_logo(db_session):
     assert get_school_info("no-such-school", db_session) == {"name": None, "logo_url": None}
 
 
+async def _register_and_verify(db_session, request: RegisterRequest) -> dict:
+    """
+    Drives the full two-step self-signup flow (see app.routers.public's
+    module docstring on register/register_verify): step 1 sends a WhatsApp
+    OTP instead of creating the student directly, so this helper captures
+    the code from the mocked send_template_message call and immediately
+    verifies it, giving tests the same "one call, get a created student"
+    shape they had before the OTP step was added.
+    """
+    captured_otp = {}
+
+    async def fake_send_template(to_phone, template_name, params):
+        for param in params:
+            if param["name"] == "1":
+                captured_otp["code"] = param["value"]
+        return {"sent": True}
+
+    import app.routers.public as public_module
+    real_send_template = public_module.send_template_message
+    public_module.send_template_message = fake_send_template
+    try:
+        step1 = await register(request, _FakeRequest(), db_session)
+        assert step1["success"] is True
+        if step1.get("already_registered"):
+            return step1
+        assert step1["otp_required"] is True
+    finally:
+        public_module.send_template_message = real_send_template
+
+    return await register_verify(
+        VerifyRegisterRequest(**request.model_dump(), otp=captured_otp["code"]), db_session,
+    )
+
+
 async def test_register_creates_student_with_trial_credits_and_full_features(db_session, monkeypatch):
     sent = []
 
@@ -41,7 +75,7 @@ async def test_register_creates_student_with_trial_credits_and_full_features(db_
     db_session.add(Centre(name=tenancy.QLASS_DIRECT_CENTRE_NAME))
     db_session.commit()
 
-    result = await register(RegisterRequest(name="Nikhil", phone="8888800001"), _FakeRequest(), db_session)
+    result = await _register_and_verify(db_session, RegisterRequest(name="Nikhil", phone="8888800001"))
 
     assert result["success"] is True
     assert result["already_registered"] is False
@@ -50,26 +84,24 @@ async def test_register_creates_student_with_trial_credits_and_full_features(db_
     assert student.name == "Nikhil"
     assert cost_tracker.get_balance(db_session, student.id) == cost_tracker.TRIAL_CREDITS
     assert student.has_feature("youtube_videos") is True  # full features, not the conservative default
-    assert len(sent) == 1
-    to_phone, template_name, params = sent[0]
-    assert template_name == "student_signup_activation"
-    assert to_phone == "918888800001"
-    assert {"name": "1", "value": "Nikhil"} in params
+    # Two template sends now: the OTP itself (step 1) and the welcome
+    # message with credits (step 2, after verification).
+    assert len(sent) == 2
+    welcome_to_phone, welcome_template, welcome_params = sent[1]
+    assert welcome_template == "student_signup_activation"
+    assert welcome_to_phone == "918888800001"
+    assert {"name": "1", "value": "Nikhil"} in welcome_params
 
 
 async def test_register_links_to_school_via_slug(db_session, monkeypatch):
-    async def fake_send_template(to_phone, template_name, params):
-        return {"sent": True}
-
-    monkeypatch.setattr("app.routers.public.send_template_message", fake_send_template)
     tenancy._qlass_direct_centre_id = None
     db_session.add(Centre(name=tenancy.QLASS_DIRECT_CENTRE_NAME))
     school = Centre(name="Sunrise Public School", board="CBSE")
     db_session.add(school)
     db_session.commit()
 
-    result = await register(
-        RegisterRequest(name="Priya", phone="8888800002", school="sunrise-public-school"), _FakeRequest(), db_session,
+    result = await _register_and_verify(
+        db_session, RegisterRequest(name="Priya", phone="8888800002", school="sunrise-public-school"),
     )
 
     assert result["success"] is True
