@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from pydantic import model_validator
@@ -114,6 +115,23 @@ class Settings(BaseSettings):
             self.secret_key == "changeme" or len(self.secret_key) < 32
         ):
             raise ValueError("SECRET_KEY must be at least 32 characters outside development")
+        # A missing wati_webhook_secret makes app.services.whatsapp_client.
+        # verify_webhook_auth accept ANY unauthenticated POST to /whatsapp/
+        # webhook as if it were a real Wati-delivered message — full
+        # impersonation of any student's WhatsApp identity/wallet by whoever
+        # finds the URL. Deliberately a warning, not a raised error: unlike
+        # secret_key (generated once, locally, before first deploy), this
+        # value has to round-trip through Wati's own dashboard, so a hard
+        # failure here would take down the whole backend on a routine
+        # restart if that manual step hasn't happened yet. Logged instead so
+        # it's loud in `journalctl`/startup logs without being an outage.
+        if self.environment.lower() in {"production", "staging"} and not self.wati_webhook_secret:
+            logging.getLogger(__name__).warning(
+                "SECURITY WARNING: WATI_WEBHOOK_SECRET is not set — the WhatsApp webhook is accepting "
+                "UNAUTHENTICATED requests and will process a POST from anyone as a real inbound message. "
+                "Set a custom Authorization value in Wati's Webhook settings and WATI_WEBHOOK_SECRET here "
+                "to the same value."
+            )
         return self
 
     model_config = {"env_file": str(REPO_ROOT / ".env")}

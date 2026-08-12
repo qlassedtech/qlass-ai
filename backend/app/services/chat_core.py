@@ -65,6 +65,16 @@ logger = logging.getLogger(__name__)
 tutor_agent = TutorAgent()
 
 HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
+# No caller-side cap existed on a single turn's message_text before it hit
+# classify_intent + the main tutoring LLM call — a WhatsApp text message is
+# capped by WhatsApp itself (~65k chars) but this module is also reachable
+# from the web/app/teacher endpoints and (if the WhatsApp webhook auth is
+# ever misconfigured — see whatsapp_client.verify_webhook_auth) from an
+# unauthenticated caller not bound by WhatsApp's own client-side limit.
+# Every real question this product needs to answer fits comfortably under
+# this; it exists to bound worst-case LLM cost/latency per turn, not to
+# restrict legitimate use.
+MAX_MESSAGE_CHARS = 6000
 WEAK_TOPICS_LIMIT = 5
 OFF_LEVEL_SUGGEST_THRESHOLD = 3  # consecutive off-level questions before suggesting a class update
 USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]  # weekly voice/image/video soft-cap warnings only
@@ -196,6 +206,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     message (voice/photo/document input must already be
     transcribed/OCR'd/extracted by the caller before this point).
     """
+    message_text = message_text[:MAX_MESSAGE_CHARS]
     # Computed BEFORE this message is saved, so "days since last message"
     # reflects the prior session, not this one — otherwise it would always
     # read as 0 days once this message is in chat_history.

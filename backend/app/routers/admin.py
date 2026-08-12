@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import razorpay
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query as QueryParam
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query as QueryParam
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,7 +17,7 @@ from app.database import get_db
 from app.models.core import Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
-from app.services.school_pilot import PILOT_STUDENT_FEATURES, launch_pilot, pilot_outcome_report
+from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
@@ -25,7 +25,7 @@ from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
 from app.services.school_statement import generate_school_statement_pdf
-from app.services.rate_limit import is_otp_rate_limited
+from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited, student_lock
 from app.services.pdf_render import render_workbook_pdf
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage, format_teacher_digest
 from app.services.gamma_service import create_presentation_generation, get_generation_status
@@ -51,6 +51,26 @@ DEFAULT_FEATURES = {"voice": False, "ocr": False, "image_generation": False, "do
 # Same rationale as student_app.py's CHAT_HISTORY_LIMIT — a long-running
 # "My AI Tutor" chat shouldn't return an ever-growing unbounded history.
 MY_TUTOR_CHAT_HISTORY_LIMIT = 200
+
+# Applied everywhere a teacher/admin password is SET (register-school,
+# create-teacher, bulk teacher upload, reset-password) — previously only
+# set_student_password enforced this, so a school admin's own login
+# (unlike a student's) could be a single character, trivially guessable.
+MIN_PASSWORD_LENGTH = 6
+
+
+def _require_valid_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+
+
+# Bulk roster/teacher upload — see _rows_from_roster_upload and the
+# confirm endpoints below. Each created row grants a real ₹50 trial credit
+# (students) or a real login-capable account (teachers), so both the raw
+# upload and the confirm step (which takes its own `rows` directly from the
+# client, not necessarily the same ones just previewed) need a ceiling.
+MAX_ROSTER_UPLOAD_BYTES = 5 * 1024 * 1024  # 5MB, matching app.services.uploads.MAX_IMAGE_BYTES
+MAX_ROSTER_UPLOAD_ROWS = 2000
 
 
 class LoginRequest(BaseModel):
@@ -183,8 +203,17 @@ def _get_scoped_student_or_404(db: Session, teacher: Teacher, student_id: int) -
 
 
 @router.post("/auth/login")
-def login(body: LoginRequest, db: Session = Depends(get_db)):
-    teacher = db.query(Teacher).filter(Teacher.phone == normalize_phone(body.phone)).first()
+async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    phone = normalize_phone(body.phone)
+    # Unlike the OTP flows below, this endpoint previously had NO rate
+    # limiting at all — confirmed live an attacker could brute-force a
+    # known/guessed teacher/admin/super_admin phone's password with
+    # unlimited attempts. Same 5-attempts/10-minutes budget as OTP verify,
+    # keyed by the target phone (not the caller's IP) so an attacker can't
+    # reset their budget by rotating source IPs.
+    if await is_otp_rate_limited("teacher_login_password", phone):
+        raise HTTPException(status_code=429, detail="Too many login attempts — please wait a few minutes and try again")
+    teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher or not teacher.password_hash or not verify_password(body.password, teacher.password_hash):
         raise HTTPException(status_code=401, detail="Invalid phone or password")
     token = create_access_token(teacher.id)
@@ -248,15 +277,15 @@ async def verify_teacher_otp(body: VerifyTeacherOtpRequest, db: Session = Depend
 
 
 class RegisterSchoolRequest(BaseModel):
-    school_name: str
-    city: str | None = None
-    admin_name: str
-    admin_phone: str
+    school_name: str = Field(max_length=200)
+    city: str | None = Field(default=None, max_length=100)
+    admin_name: str = Field(max_length=200)
+    admin_phone: str = Field(max_length=20)
     password: str
 
 
 @router.post("/auth/register-school")
-def register_school(body: RegisterSchoolRequest, db: Session = Depends(get_db)):
+async def register_school(body: RegisterSchoolRequest, request: Request, db: Session = Depends(get_db)):
     """
     Self-serve entry point for a new school signing up — creates both the
     school (Centre, the tenant boundary) and its first admin account in one
@@ -264,7 +293,19 @@ def register_school(body: RegisterSchoolRequest, db: Session = Depends(get_db)):
     Any additional teacher/admin accounts for this school are added
     afterward from the portal (see POST /admin/teachers), not through this
     endpoint again.
+
+    Confirmed live this had NO rate limiting at all, unlike every other
+    account-creation endpoint (/public/register, WhatsApp cold-start) —
+    unlimited script-driven calls could mint unlimited fully-privileged
+    school-admin accounts, each carrying a real ₹-equivalent school trial
+    credit (see school_billing.add_trial_credits below), with zero human
+    review. Same per-IP budget as /public/register; X-Real-IP is set by
+    nginx itself, not client-controllable (see app.routers.public.register).
     """
+    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if await is_signup_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Too many school registrations from this network — please try again later")
+    _require_valid_password(body.password)
     admin_phone = normalize_phone(body.admin_phone)
     if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
@@ -319,6 +360,7 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
     if not await verify_otp("password_reset", body.phone, body.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
+    _require_valid_password(body.new_password)
     teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -434,11 +476,20 @@ async def _rows_from_roster_upload(file: UploadFile, extract_rows_fn, db: Sessio
     content_type = (file.content_type or "").lower()
     filename = (file.filename or "").lower()
     raw_bytes = await file.read()
+    # No cap existed here before — unlike save_image_upload's MAX_IMAGE_
+    # BYTES, an admin (already an authenticated, school-scoped account, but
+    # still worth bounding) could upload an arbitrarily large file and have
+    # it fully buffered in memory before any row-count check downstream.
+    if len(raw_bytes) > MAX_ROSTER_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail=f"File too large — max {MAX_ROSTER_UPLOAD_BYTES // (1024 * 1024)}MB")
 
     if filename.endswith(".csv") or content_type in ("text/csv", "application/vnd.ms-excel"):
         reader = csv.DictReader(io.StringIO(raw_bytes.decode("utf-8-sig")))
         reader.fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
-        return [dict(row) for row in reader]
+        rows = [dict(row) for row in reader]
+        if len(rows) > MAX_ROSTER_UPLOAD_ROWS:
+            raise HTTPException(status_code=400, detail=f"Too many rows in one upload (max {MAX_ROSTER_UPLOAD_ROWS}) — split into batches")
+        return rows
 
     if content_type.startswith("image/"):
         source_text = await extract_text_from_image(raw_bytes)
@@ -478,7 +529,10 @@ async def preview_student_bulk_upload(
 
 
 class ConfirmStudentBulkUploadRequest(BaseModel):
-    rows: list[dict]
+    # max_length: this is the actual create step (unlike preview above, it
+    # doesn't require rows to have come from a preview call at all) — each
+    # row grants a real ₹50 trial credit, so it needs its own ceiling.
+    rows: list[dict] = Field(max_length=MAX_ROSTER_UPLOAD_ROWS)
     features: dict[str, bool] = {}
     centre_id: int | None = None
 
@@ -779,7 +833,22 @@ def _activate_unlimited(
     that reference as external_ref, so it both shows up in
     reconciliation/statements and correctly counts as an independent
     payment for churn-gating purposes.
+
+    duration_days is bounded here (not just at each caller) since this is
+    the one choke point every activation path — single-student, single-
+    teacher, and bulk school-level — actually goes through. A negative
+    value would compute a negative prorated `price` and backdate
+    subscription_expires_at into the past. The upper bound is a generous
+    sanity ceiling (a decade), not full_term_days itself — full_term_days
+    is only the prorating denominator (365 for a student, 30 for a
+    teacher) and a single bulk-activation call can legitimately mix both,
+    so a tighter per-call cap here would reject a perfectly normal
+    combined batch; the real "trial shouldn't outlast the paid term"
+    business rule belongs at the caller that knows which kind of grant
+    this is (see the bulk endpoint's own check).
     """
+    if not 1 <= duration_days <= 3650:
+        raise HTTPException(status_code=400, detail="duration_days must be between 1 and 3650")
     student.subscription_plan = "unlimited"
     student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=duration_days)
     if is_trial:
@@ -891,6 +960,23 @@ def activate_school_trial_subscriptions(
     """
     if not body.student_ids and not body.teacher_ids:
         raise HTTPException(status_code=400, detail="Select at least one student or teacher")
+    # Confirmed live this had NO upper bound, unlike the sibling pilot
+    # endpoint just below (school_pilot.MAX_PILOT_STUDENTS/MAX_PILOT_DAYS) —
+    # an org_admin (a lower-trust, customer-facing role, not Qlass staff)
+    # could grant a school's entire roster the paid "unlimited" plan for
+    # e.g. 100 years, for free, in one call. A "trial" longer than the real
+    # paid plan's own term (UNLIMITED_STUDENT_ANNUAL_DAYS) makes no
+    # business sense, so that's the ceiling here.
+    if not 1 <= body.duration_days <= cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Trial duration must be between 1 and {cost_tracker.UNLIMITED_STUDENT_ANNUAL_DAYS} days",
+        )
+    if len(body.student_ids) + len(body.teacher_ids) > MAX_PILOT_STUDENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many recipients in one activation (max {MAX_PILOT_STUDENTS}) — split into batches",
+        )
     centre = db.query(Centre).filter(Centre.id == centre_id).first()
     if centre is None:
         raise HTTPException(status_code=404, detail="School not found")
@@ -1020,6 +1106,7 @@ async def create_teacher(
         raise HTTPException(status_code=403, detail="Only admins can add teacher accounts")
     if body.role not in ("teacher", "admin"):
         raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'admin'")
+    _require_valid_password(body.password)
     phone = normalize_phone(body.phone)
     if db.query(Teacher).filter(Teacher.phone == phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
@@ -1079,7 +1166,7 @@ async def preview_teacher_bulk_upload(
 
 
 class ConfirmTeacherBulkUploadRequest(BaseModel):
-    rows: list[dict]
+    rows: list[dict] = Field(max_length=MAX_ROSTER_UPLOAD_ROWS)
 
 
 @router.post("/admin/teachers/bulk-upload/confirm")
@@ -1142,6 +1229,9 @@ def confirm_teacher_bulk_upload(
         if not password:
             password = secrets.token_urlsafe(6)
             generated_passwords[phone] = password
+        elif len(password) < MIN_PASSWORD_LENGTH:
+            skipped.append(row)
+            continue
 
         db.add(Teacher(name=name, phone=phone, password_hash=hash_password(password), role=role, centre_id=centre_id))
         created.append(phone)
@@ -1698,6 +1788,26 @@ def _my_tutor_credits_exhausted_detail(student: Student) -> str:
     return f"You're out of AI credits for your personal tutor account — top up from the My AI Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}"
 
 
+async def _my_tutor_reply(db: Session, student: Student, message_text: str) -> dict:
+    """
+    Mirrors app.routers.student_app._reply_to's per-student lock — these
+    four /admin/my-tutor/chat/send* endpoints run the exact same
+    has_credits-check-through-deduction sequence (via process_web_message)
+    but, until this fix, had no lock at all, unlike WhatsApp and the
+    student web app. Two concurrent requests from the same teacher's own
+    tutor session could both pass has_credits() before either deduction
+    committed, taking the balance further negative than a single overdraft
+    should allow, and could double-pay a habit/referral milestone bonus the
+    same way (see evaluate_habit_milestones/evaluate_referral_milestones,
+    both read-check-write against the student row this lock now serializes).
+    """
+    async with student_lock(student.phone):
+        if not cost_tracker.has_credits(db, student.id):
+            raise HTTPException(status_code=402, detail=_my_tutor_credits_exhausted_detail(student))
+        reply = await process_web_message(db, student, message_text)
+        return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
 @router.get("/admin/my-tutor")
 def get_my_tutor_profile(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
     """
@@ -1828,10 +1938,7 @@ async def send_my_tutor_message(
     body: MyTutorSendRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     student = _my_tutor_student(db, teacher)
-    if not cost_tracker.has_credits(db, student.id):
-        raise HTTPException(status_code=402, detail=_my_tutor_credits_exhausted_detail(student))
-    reply = await process_web_message(db, student, body.message)
-    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+    return await _my_tutor_reply(db, student, body.message)
 
 
 @router.post("/admin/my-tutor/chat/send-image")
@@ -1849,8 +1956,7 @@ async def send_my_tutor_image(
     if not message_text:
         raise HTTPException(status_code=422, detail="Couldn't read any text in that photo — try a clearer picture")
     cost_tracker.record_flat_usage(db, "azure_ocr", student.id)
-    reply = await process_web_message(db, student, message_text)
-    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+    return await _my_tutor_reply(db, student, message_text)
 
 
 @router.post("/admin/my-tutor/chat/send-voice")
@@ -1873,8 +1979,7 @@ async def send_my_tutor_voice(
         if detected_gender:
             student.gender = detected_gender
             db.commit()
-    reply = await process_web_message(db, student, message_text)
-    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+    return await _my_tutor_reply(db, student, message_text)
 
 
 @router.post("/admin/my-tutor/chat/send-document")
@@ -1891,8 +1996,7 @@ async def send_my_tutor_document(
     message_text = extract_text_from_document(document_bytes, file.filename or "")
     if not message_text:
         raise HTTPException(status_code=422, detail="Couldn't read any text in that file — try a different file")
-    reply = await process_web_message(db, student, message_text)
-    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+    return await _my_tutor_reply(db, student, message_text)
 
 
 class ActivateTutorSubscriptionRequest(BaseModel):

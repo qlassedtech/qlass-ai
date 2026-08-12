@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import razorpay
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -9,7 +9,10 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import Student
 from app.services import cost_tracker, razorpay_client
+from app.services.otp import generate_and_store_otp, verify_otp
+from app.services.rate_limit import is_otp_rate_limited
 from app.services.razorpay_client import client as _client, MIN_TOPUP_AMOUNT
+from app.services.whatsapp_client import send_whatsapp_message
 
 router = APIRouter()
 
@@ -53,7 +56,13 @@ def _find_real_student(db: Session, phone: str, student_id: int | None = None) -
 
 class CreateOrderRequest(BaseModel):
     phone: str
-    amount: float
+    # gt/lt reject the non-standard JSON tokens Infinity/-Infinity/NaN
+    # (stdlib json.loads accepts them; Python's `inf < MIN_TOPUP_AMOUNT` and
+    # `nan < MIN_TOPUP_AMOUNT` both evaluate False, so a bare lower-bound
+    # check below let either through to `int(round(body.amount * 100))`,
+    # which raises an unhandled OverflowError/ValueError — an easy 500).
+    # An upper bound also caps how large a single top-up order can be.
+    amount: float = Field(gt=0, lt=1_000_000)
     student_id: int | None = None
 
 
@@ -212,18 +221,51 @@ def verify_student_subscription(body: VerifySubscriptionRequest, db: Session = D
     return {"subscription_plan": student.subscription_plan, "subscription_expires_at": student.subscription_expires_at}
 
 
-@router.post("/pay/cancel-subscription")
-def cancel_student_subscription(body: CreateSubscriptionRequest, db: Session = Depends(get_db)):
+@router.post("/pay/request-cancel-otp")
+async def request_cancel_subscription_otp(body: CreateSubscriptionRequest, db: Session = Depends(get_db)):
     """
-    Self-serve cancellation of the auto-renewal mandate. Cancelling stops
-    future charges but doesn't immediately revoke access — the student
-    keeps their unlimited plan until subscription_expires_at (the period
-    they already paid for), matching how cancelling any subscription
-    normally works. That expiry is picked up naturally by the existing
-    has_credits/is_unlimited_active check once it passes.
+    Step 1 of cancelling an auto-renewal mandate — sends a WhatsApp OTP to
+    the student's own phone. Confirmed live: cancel-subscription previously
+    took just {phone, student_id} with nothing else, and student_id is a
+    small sequential integer that's already visible in this same file's own
+    top-up links (see _find_real_student's docstring) — anyone who'd seen a
+    student's payment/top-up link (routinely forwarded over WhatsApp) could
+    silently kill a paying family's subscription. This proves the caller
+    actually has the phone in hand before cancel-subscription below acts.
+    """
+    if await is_otp_rate_limited("subscription_cancel_request", body.phone):
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
+    student = _find_real_student(db, body.phone, body.student_id)
+    if not student.razorpay_subscription_id:
+        raise HTTPException(status_code=400, detail="No active auto-renewing subscription found for this student")
+    otp = await generate_and_store_otp("subscription_cancel", body.phone)
+    await send_whatsapp_message(
+        body.phone, f"Your code to cancel your Qlass AI Tutor subscription is *{otp}*. It expires in 10 minutes."
+    )
+    return {"sent": True}
+
+
+class CancelSubscriptionRequest(CreateSubscriptionRequest):
+    otp: str
+
+
+@router.post("/pay/cancel-subscription")
+async def cancel_student_subscription(body: CancelSubscriptionRequest, db: Session = Depends(get_db)):
+    """
+    Self-serve cancellation of the auto-renewal mandate — step 2, after
+    /pay/request-cancel-otp. Cancelling stops future charges but doesn't
+    immediately revoke access — the student keeps their unlimited plan
+    until subscription_expires_at (the period they already paid for),
+    matching how cancelling any subscription normally works. That expiry is
+    picked up naturally by the existing has_credits/is_unlimited_active
+    check once it passes.
     """
     if _client is None:
         raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+    if await is_otp_rate_limited("subscription_cancel_verify", body.phone):
+        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+    if not await verify_otp("subscription_cancel", body.phone, body.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
     student = _find_real_student(db, body.phone, body.student_id)
     if not student.razorpay_subscription_id:
         raise HTTPException(status_code=400, detail="No active auto-renewing subscription found for this student")

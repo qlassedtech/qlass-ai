@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -42,10 +42,15 @@ def get_school_info(school: str | None = None, db: Session = Depends(get_db)):
 
 
 class RegisterRequest(BaseModel):
-    name: str
-    phone: str
-    school: str | None = None
-    student_class: str | None = None
+    # No field had a max_length before — an attacker could POST a
+    # multi-MB name/school string, stored straight into an unbounded
+    # Postgres Text column and interpolated verbatim into an outgoing
+    # WhatsApp template send. These caps are generous for any real name/
+    # school/class value, just closing the unbounded-storage/DoS gap.
+    name: str = Field(max_length=200)
+    phone: str = Field(max_length=20)
+    school: str | None = Field(default=None, max_length=200)
+    student_class: str | None = Field(default=None, max_length=50)
 
 
 @router.post("/public/register")

@@ -50,7 +50,21 @@ async def send_broadcast(
                 status_code=400,
                 detail=f"Too many recipients in one broadcast (max {MAX_BROADCAST_RECIPIENTS}) — split into batches",
             )
-        receivers = [{"whatsappNumber": phone, "customParams": []} for phone in req.phone_numbers]
+        phone_numbers = req.phone_numbers
+        # Same "own school only" boundary as the filter-based path below —
+        # confirmed live this explicit-list path was skipping it entirely,
+        # letting a single school's own admin message ANY phone number
+        # platform-wide (or arbitrary non-Qlass numbers) using Qlass's
+        # WhatsApp sending reputation. Only super_admin (Qlass staff) may
+        # target numbers outside their own school this way.
+        if teacher.role != "super_admin":
+            allowed = {
+                phone for (phone,) in db.query(Student.phone).filter(
+                    Student.phone.in_(phone_numbers), Student.centre_id == teacher.centre_id,
+                )
+            }
+            phone_numbers = [phone for phone in phone_numbers if phone in allowed]
+        receivers = [{"whatsappNumber": phone, "customParams": []} for phone in phone_numbers]
     else:
         query = db.query(Student.phone, Student.name)
         if req.filters.class_:

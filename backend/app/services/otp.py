@@ -1,4 +1,5 @@
-import random
+import hmac
+import secrets
 
 import redis.asyncio as redis
 
@@ -28,7 +29,7 @@ def _key(purpose: str, phone: str) -> str:
 
 
 async def generate_and_store_otp(purpose: str, phone: str) -> str:
-    otp = f"{random.randint(0, 999999):06d}"
+    otp = f"{secrets.randbelow(1_000_000):06d}"
     key = _key(purpose, phone)
     if _redis is None:
         _fallback_store[key] = otp
@@ -40,7 +41,7 @@ async def generate_and_store_otp(purpose: str, phone: str) -> str:
 async def verify_otp(purpose: str, phone: str, otp: str) -> bool:
     key = _key(purpose, phone)
     stored = _fallback_store.get(key) if _redis is None else await _redis.get(key)
-    if not stored or stored != otp:
+    if not stored or not hmac.compare_digest(stored, otp):
         return False
     if _redis is None:
         _fallback_store.pop(key, None)

@@ -1,3 +1,4 @@
+import hmac
 import uuid
 from urllib.parse import urlparse, parse_qs
 
@@ -10,13 +11,20 @@ def verify_webhook_auth(auth_header: str | None) -> bool:
     Wati doesn't sign webhook bodies with HMAC like Meta does. Instead, if you
     set a custom "Authorization" value under Wati's Webhook settings, Wati
     sends that same value back on every webhook call for you to check.
-    Skips verification (returns True) if WATI_WEBHOOK_SECRET isn't configured.
+    Skips verification (returns True) if WATI_WEBHOOK_SECRET isn't configured
+    — app.config logs a loud startup warning when that's true outside
+    development, since an unset secret means this webhook accepts ANY
+    POST as if it were a real inbound WhatsApp message (see the SECURITY
+    WARNING in that log line for what to do about it).
+
+    hmac.compare_digest (not ==) so a byte-by-byte timing side-channel can't
+    help an attacker recover the secret across many requests.
     """
     if not settings.wati_webhook_secret:
         return True
     if not auth_header:
         return False
-    return auth_header.removeprefix("Bearer ") == settings.wati_webhook_secret
+    return hmac.compare_digest(auth_header.removeprefix("Bearer "), settings.wati_webhook_secret)
 
 
 AUDIO_TYPES = {"audio", "voice", "ptt"}
@@ -114,9 +122,29 @@ def parse_incoming_document(payload: dict) -> tuple[str, str] | None:
     return from_phone, media_url
 
 
+def _is_wati_media_host(media_url: str) -> bool:
+    """
+    media_url comes straight from an inbound webhook payload — untrusted
+    input. Without this check, download_media would fetch ANY attacker-
+    supplied URL while attaching the real WhatsApp API bearer token in the
+    request headers (an SSRF that also exfiltrates a live credential to
+    whatever host the attacker names, e.g. an internal service or a
+    server they control). Only ever fetch from Wati's own domain, derived
+    from the already-trusted wati_api_endpoint config rather than a
+    hardcoded string, so a sandbox/different-tenant Wati host still works.
+    """
+    if not settings.wati_api_endpoint:
+        return False
+    expected_host = urlparse(settings.wati_api_endpoint).hostname
+    actual_host = urlparse(media_url).hostname
+    return bool(expected_host) and actual_host == expected_host
+
+
 async def download_media(media_url: str) -> bytes | None:
     """Fetch the raw bytes of an incoming media message (e.g. a voice note)."""
     if not settings.whatsapp_token:
+        return None
+    if not _is_wati_media_host(media_url):
         return None
 
     headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
