@@ -51,6 +51,10 @@ REFERRAL_BONUS_SERVICE = "referral_bonus"
 PRICING = {
     "claude_sonnet": {"input_per_1k_tokens": 0.26, "output_per_1k_tokens": 1.31},  # ~$3 / $15 per 1M tokens
     "claude_haiku": {"input_per_1k_tokens": 0.07, "output_per_1k_tokens": 0.35},  # ~$0.80 / $4 per 1M tokens
+    # Tutor levels 1-2 (see app.business_rules.TUTOR_LEVEL_MODELS) — rates
+    # confirmed live against official pricing pages at ~₹87/USD, 2026-08-11.
+    "gpt4o_mini": {"input_per_1k_tokens": 0.01305, "output_per_1k_tokens": 0.0522},  # $0.15 / $0.60 per 1M tokens
+    "gemini_flash_lite": {"input_per_1k_tokens": 0.02175, "output_per_1k_tokens": 0.1305},  # $0.25 / $1.50 per 1M tokens
     "sarvam_tts": {"per_char": 0.00301},  # Bulbul v3: ₹34.31 / 11,400 chars
     "sarvam_stt": {"per_minute": 0.503},  # Saaras v3: ₹1.46 / 2.9 min
     "sarvam_translate": {"per_char": 0.00200},  # Mayura v1: ₹70.06 / 35,000 chars
@@ -68,7 +72,13 @@ PRICING = {
 
 
 def _tier_for_model(model: str) -> str:
-    return "claude_haiku" if "haiku" in model else "claude_sonnet"
+    if "haiku" in model:
+        return "claude_haiku"
+    if "gemini" in model:
+        return "gemini_flash_lite"
+    if "gpt-4o-mini" in model:
+        return "gpt4o_mini"
+    return "claude_sonnet"
 
 
 def get_balance(db: Session, student_id: int) -> float:

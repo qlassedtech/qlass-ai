@@ -54,6 +54,35 @@ UNLIMITED_PERIOD_SPEND_CAPS = {
 # warn a student, so hitting the actual limit is never a surprise.
 WALLET_USAGE_WARNING_FRACTIONS = [0.5, 0.75, 0.9]
 
+# Which LLM answers a student's questions, by tutor_level (see
+# Student.tutor_level) — one tutor ("Diya"), four cost/quality levels, all
+# billed through the same PRICING x MARKUP_MULTIPLIER mechanism as every
+# other model (see cost_tracker.PRICING/_tier_for_model), not a separate
+# per-level margin scheme. Locked 2026-08-11 against LIVE model
+# availability (Gemini 2.0 Flash/1.5 Pro, assumed earlier, turned out to
+# be fully retired; every Gemini 3.x model except flash-lite generates
+# large, unpredictable hidden "thinking token" costs — see llm_client.py).
+# Level 4 is the default/ceiling so no existing student's day-one
+# experience changes; see Student.level_nudges_sent for the 50%/75%
+# trial-credit downgrade-offer mechanism that steers heavy users toward
+# cheaper levels.
+TUTOR_LEVEL_MODELS = {
+    1: "gpt-4o-mini",
+    2: "gemini-3.1-flash-lite",
+    3: "claude-haiku-4-5-20251001",
+    4: "claude-sonnet-4-6",
+}
+DEFAULT_TUTOR_LEVEL = 4
+
+# Nudge copy shown when a student crosses 50%/75% of their trial credit —
+# offers the next cheaper level down. Keyed by the WALLET_USAGE_WARNING_
+# FRACTIONS threshold that triggers it; 90% deliberately has no entry
+# (kept as the plain low-balance notice it already was).
+TUTOR_LEVEL_NUDGE_OFFERS = {
+    0.5: 2,
+    0.75: 1,
+}
+
 # Per-student weekly caps on the extra (non-core-text) features — the AI
 # cost per voice-reply/diagram/video is high enough that unlimited usage
 # isn't sustainable at a mass-market price; these are the lever that keeps

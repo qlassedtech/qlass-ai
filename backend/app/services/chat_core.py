@@ -37,7 +37,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.business_rules import FEATURE_LIMITS
+from app.business_rules import FEATURE_LIMITS, TUTOR_LEVEL_MODELS, DEFAULT_TUTOR_LEVEL, TUTOR_LEVEL_NUDGE_OFFERS
 from app.config import settings
 from app.models.core import ChatHistory, Student, TopicProgress
 from app.services import cost_tracker
@@ -97,6 +97,25 @@ CANONICAL_COMMAND_INTENT = {
     "my progress": "progress",
     "credit usage": "credit_usage",
     "refer a friend": "referral",
+    "change level": "change_level",
+    "switch level": "change_level",
+    "level 1": "change_level",
+    "level 2": "change_level",
+    "level 3": "change_level",
+    "level 4": "change_level",
+    "stay on current level": "change_level",
+}
+
+# Level a plain "level N" command switches to — kept a plain dict rather
+# than parsing the digit out of message_text at use-site, so an unexpected
+# phrasing never risks int()-ing garbage.
+LEVEL_COMMAND_TARGET = {"level 1": 1, "level 2": 2, "level 3": 3, "level 4": 4}
+
+TUTOR_LEVEL_LABELS = {
+    1: "Level 1 — fastest replies, lightest on credits",
+    2: "Level 2 — quick and well-formatted",
+    3: "Level 3 — more detailed explanations",
+    4: "Level 4 — most thorough, uses the most credits",
 }
 
 # Opposite-gender voice: a female voice for a detected-male student, a male
@@ -117,6 +136,28 @@ def assistant_voice_gender(student: Student) -> str:
     """
     speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender, settings.sarvam_tts_speaker)
     return "male" if speaker == "shubh" else "female"
+
+
+def _level_downgrade_offer(student: Student, fraction_before: float | None, fraction_after: float | None) -> tuple[int | None, str | None]:
+    """
+    (offered_level, nudge_key) for a NEW 50%/75% trial-credit downgrade
+    offer this turn crossed into — see app.business_rules.
+    TUTOR_LEVEL_NUDGE_OFFERS and Student.level_nudges_sent. (None, None)
+    when nothing new to offer: no threshold crossed, this milestone was
+    already offered before (level_nudges_sent), or the student is already
+    at/below the level that milestone would offer (nothing cheaper to
+    suggest — e.g. a student who already switched to Level 1 shouldn't be
+    re-offered Level 2 at 75%).
+    """
+    if fraction_after is None:
+        return None, None
+    before = fraction_before if fraction_before is not None else 0.0
+    already_sent = set(student.level_nudges_sent or [])
+    for threshold, offered_level in sorted(TUTOR_LEVEL_NUDGE_OFFERS.items()):
+        key = str(int(threshold * 100))
+        if before < threshold <= fraction_after and key not in already_sent and offered_level < student.tutor_level:
+            return offered_level, key
+    return None, None
 
 
 def _weekly_usage_snapshot(db: Session, student: Student) -> dict[str, int]:
@@ -141,6 +182,7 @@ class ChatTurnResult:
     wants_audio_reply: bool = False  # set only if the student explicitly asked for a voice reply
     menu_buttons: list[str] | None = None  # present only for the "menu" intent; channels without button UI can ignore
     video: dict | None = None  # {"title", "url"} — kept OUT of reply_text so voice-reply TTS never reads a raw URL aloud
+    level_offer: int | None = None  # set only when a NEW 50%/75% downgrade nudge fired this turn — see _level_downgrade_offer
 
 
 async def process_message(db: Session, student: Student, message_text: str) -> ChatTurnResult:
@@ -354,6 +396,25 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 f"Reply \"top up credits\" anytime to add more."
             )
         detected_lang = student.preferred_language or "en-IN"
+    elif intent == "change_level":
+        command_text = message_text.strip().lower()
+        target_level = LEVEL_COMMAND_TARGET.get(command_text)
+        if command_text == "stay on current level":
+            student.pending_level_offer = None
+            db.commit()
+            reply_text = f"Got it — staying on Level {student.tutor_level}."
+        elif target_level:
+            student.tutor_level = target_level
+            student.pending_level_offer = None
+            db.commit()
+            reply_text = f"Done — you're now on {TUTOR_LEVEL_LABELS[target_level]}. Reply \"change level\" anytime to switch again."
+        else:
+            options = "\n".join(f"- {label}" for label in TUTOR_LEVEL_LABELS.values())
+            reply_text = (
+                f"You're currently on Level {student.tutor_level}.\n\n{options}\n\n"
+                f"Reply \"level 1\", \"level 2\", \"level 3\", or \"level 4\" to switch."
+            )
+        detected_lang = student.preferred_language or "en-IN"
     elif intent == "referral":
         # Generated lazily here too (not just at signup) so students
         # created before this feature shipped still get a code the first
@@ -468,6 +529,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             pending_class_confirm=pending_class_confirm,
             pending_profile_field=pending_profile_field,
             retrieved_chunks=relevant_chunks,
+            model=TUTOR_LEVEL_MODELS.get(student.tutor_level, TUTOR_LEVEL_MODELS[DEFAULT_TUTOR_LEVEL]),
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
@@ -632,10 +694,21 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # surprise. Only relevant when a real LLM call actually happened this
     # turn (not the progress/credit_usage/referral/quiz branches, which
     # never touch billing).
+    level_offer = None
     if did_answer_via_llm:
         usage_fraction_after = cost_tracker.get_usage_fraction(db, student)
         usage_notice = cost_tracker.usage_threshold_notice(usage_fraction_before, usage_fraction_after)
         if usage_notice:
+            offered_level, nudge_key = _level_downgrade_offer(student, usage_fraction_before, usage_fraction_after)
+            if offered_level:
+                student.pending_level_offer = offered_level
+                student.level_nudges_sent = list(student.level_nudges_sent or []) + [nudge_key]
+                db.commit()
+                level_offer = offered_level
+                usage_notice = (
+                    f"{usage_notice} Want your credits to go further? Switch to {TUTOR_LEVEL_LABELS[offered_level]} "
+                    f"— reply \"level {offered_level}\" anytime, or just keep chatting to stay as you are."
+                )
             reply_text = f"{reply_text}\n\n{usage_notice} Reply \"credit usage\" anytime for the full breakdown."
 
     # Translate into the student's language for what actually gets sent.
@@ -694,7 +767,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     return ChatTurnResult(
         reply_text=outgoing_text, detected_lang=detected_lang, did_answer_via_llm=did_answer_via_llm,
         image_prompt=image_prompt, wants_audio_reply=wants_audio_reply, menu_buttons=menu_buttons,
-        video=video_result,
+        video=video_result, level_offer=level_offer,
     )
 
 

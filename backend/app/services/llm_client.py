@@ -1,12 +1,24 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 
 import anthropic
+import httpx
+from google import genai as google_genai
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+_gemini_client = google_genai.Client(api_key=settings.google_api_key) if settings.google_api_key else None
+
+# Which provider a given tutor-level model name belongs to (see
+# app.business_rules.TUTOR_LEVEL_MODELS) — everything not listed here falls
+# through to Claude, the original/default provider.
+GEMINI_MODELS = {"gemini-3.1-flash-lite"}
+OPENAI_MODELS = {"gpt-4o-mini"}
+
+_UNREACHABLE_REPLY = "Sorry, I'm having trouble reaching the AI service right now. Please try again in a bit."
 
 
 @dataclass
@@ -45,19 +57,101 @@ def _cached_system(system_prompt: str | list[dict]) -> list[dict]:
     return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
 
 
+def _flatten_system(system_prompt: str | list[dict]) -> str:
+    if isinstance(system_prompt, list):
+        return "\n\n".join(block["text"] for block in system_prompt)
+    return system_prompt
+
+
+async def _call_gemini(system_prompt: str | list[dict], messages: list[dict], model: str) -> LLMResult:
+    """
+    Via the google-genai SDK's Interactions API (client.interactions.create)
+    — NOT the older generate_content, which returns a 404 "no longer
+    available to new users" for every account tested. The SDK call itself
+    is synchronous, so it's run off the event loop via asyncio.to_thread,
+    same reasoning as AsyncAnthropic being used for Claude above.
+
+    The Interactions API takes a single `input` string rather than Claude's
+    separate system+messages shape, so the system prompt and conversation
+    history are flattened into one turn-labeled block — confirmed live
+    (test_all_levels.py) this produces coherent, correctly-scoped answers.
+    """
+    if _gemini_client is None:
+        last_message = messages[-1]["content"] if messages else ""
+        return LLMResult(text=f"[LLM not configured] Set GOOGLE_API_KEY in .env. Would have answered: {last_message}", model=model)
+
+    system_text = _flatten_system(system_prompt)
+    convo = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+    full_input = f"{system_text}\n\n---\n\n{convo}"
+    try:
+        result = await asyncio.to_thread(_gemini_client.interactions.create, model=model, input=full_input, stream=False)
+        usage = result.usage
+        return LLMResult(
+            text=result.output_text,
+            model=model,
+            input_tokens=usage.total_input_tokens or 0,
+            # Hidden "thinking" tokens (total_thought_tokens) are billed as
+            # output by Google but gemini-3.1-flash-lite — the only model
+            # actually routed here — reliably produces zero of them
+            # (confirmed live on both trivial and hard questions), so
+            # there's nothing to fold in for the model this is ever called
+            # with. Adding it defensively in case that ever changes.
+            output_tokens=(usage.total_output_tokens or 0) + (usage.total_thought_tokens or 0),
+        )
+    except Exception as exc:
+        logger.error("Gemini API error in call_llm (model=%s): %s", model, exc)
+        return LLMResult(text=_UNREACHABLE_REPLY, model=model)
+
+
+async def _call_openai(system_prompt: str | list[dict], messages: list[dict], model: str) -> LLMResult:
+    if not settings.openai_api_key:
+        last_message = messages[-1]["content"] if messages else ""
+        return LLMResult(text=f"[LLM not configured] Set OPENAI_API_KEY in .env. Would have answered: {last_message}", model=model)
+
+    system_text = _flatten_system(system_prompt)
+    oai_messages = [{"role": "system", "content": system_text}] + messages
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={"model": model, "messages": oai_messages},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        usage = data["usage"]
+        return LLMResult(
+            text=data["choices"][0]["message"]["content"],
+            model=model,
+            input_tokens=usage["prompt_tokens"],
+            output_tokens=usage["completion_tokens"],
+        )
+    except (httpx.HTTPError, KeyError, IndexError) as exc:
+        logger.error("OpenAI API error in call_llm (model=%s): %s", model, exc)
+        return LLMResult(text=_UNREACHABLE_REPLY, model=model)
+
+
 async def call_llm(system_prompt: str | list[dict], messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
     """
-    Single point of contact with the LLM. Swap `model` or the provider
-    here later without touching any agent code.
+    Single point of contact with the LLM. Dispatches by `model` name to
+    whichever provider it belongs to (see GEMINI_MODELS/OPENAI_MODELS above)
+    — everything else falls through to Claude below, the original/default
+    provider. Swap `model` here (or in app.business_rules.TUTOR_LEVEL_MODELS)
+    without touching any agent code.
 
     `messages` is the full conversation so far, oldest first:
     [{"role": "user"|"assistant", "content": "..."}, ...] ending with the
     latest user message.
-
-    Uses AsyncAnthropic so a slow LLM call doesn't block FastAPI's event loop
-    from handling other incoming webhook requests concurrently (a sync client
-    call here would stall every other request for the full LLM round-trip).
     """
+    if model in GEMINI_MODELS:
+        return await _call_gemini(system_prompt, messages, model)
+    if model in OPENAI_MODELS:
+        return await _call_openai(system_prompt, messages, model)
+
+    # Uses AsyncAnthropic so a slow LLM call doesn't block FastAPI's event
+    # loop from handling other incoming webhook requests concurrently (a
+    # sync client call here would stall every other request for the full
+    # LLM round-trip).
     if _client is None:
         last_message = messages[-1]["content"] if messages else ""
         return LLMResult(

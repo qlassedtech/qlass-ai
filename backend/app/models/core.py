@@ -211,6 +211,23 @@ class Student(Base):
     # once true. Doesn't affect real tutoring replies, only this one
     # unprompted-outreach feature.
     nudges_opt_out = Column(Boolean, default=False)
+    # Which model tier answers this student's questions — see
+    # app.business_rules.TUTOR_LEVEL_MODELS. 1 (cheapest, GPT-4o-mini)
+    # through 4 (Sonnet, the original unchanged default).
+    # Every new student starts at 4 so nobody's day-one experience quietly
+    # gets worse when this shipped — see tenancy.create_student_profile.
+    tutor_level = Column(Integer, default=4)
+    # Set to the level being offered (2 or 1) while a 50%/75%
+    # trial-credit-threshold downgrade nudge is awaiting a yes/no reply —
+    # see chat_core.py's usage-threshold block. Cleared once answered
+    # either way. Mirrors pending_profile_field's "ask once, wait for an
+    # answer" shape rather than adding a new state machine.
+    pending_level_offer = Column(Integer)
+    # Which threshold nudges ("50", "75") have already been sent to this
+    # student, so a student who says no to the 50% offer isn't asked again
+    # every subsequent message before they cross 75% — same
+    # once-per-milestone list shape as referral_milestones_paid above.
+    level_nudges_sent = Column(JSONType, default=list)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     def has_feature(self, name: str) -> bool:

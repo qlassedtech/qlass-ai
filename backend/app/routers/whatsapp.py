@@ -103,6 +103,22 @@ CREDIT_BUTTON_TO_COMMAND = {
     "📞 Call Us": "call qlass",
 }
 
+# Attached to a 50%/75% trial-credit downgrade nudge (see
+# app.services.chat_core._level_downgrade_offer / ChatTurnResult.
+# level_offer) — button text maps onto the exact same canonical phrases
+# "level N"/"stay on current level" a typed command already matches (see
+# CANONICAL_COMMAND_INTENT), so a tap routes through the identical
+# deterministic path as if the student had typed it.
+LEVEL_OFFER_BUTTON_TO_COMMAND = {
+    "⬇️ Try Level 1": "level 1",
+    "⬇️ Try Level 2": "level 2",
+    "➡️ Stay As Is": "stay on current level",
+}
+
+
+def _level_offer_buttons(offered_level: int) -> list[str]:
+    return [f"⬇️ Try Level {offered_level}", "➡️ Stay As Is"]
+
 # Never keep production-cost bypasses for particular phone numbers. Feature
 # access is provisioned per learner (including by launch_pilot), and every
 # account remains subject to the same spend controls.
@@ -551,7 +567,11 @@ async def _handle_message(db: Session, payload: dict) -> None:
     button_reply = parse_incoming_button_reply(payload)
     if button_reply:
         button_from_phone, button_text = button_reply
-        command = MENU_BUTTON_TO_COMMAND.get(button_text) or CREDIT_BUTTON_TO_COMMAND.get(button_text, button_text)
+        command = (
+            MENU_BUTTON_TO_COMMAND.get(button_text)
+            or CREDIT_BUTTON_TO_COMMAND.get(button_text)
+            or LEVEL_OFFER_BUTTON_TO_COMMAND.get(button_text, button_text)
+        )
         parsed = (button_from_phone, command)
     else:
         parsed = parse_incoming_message(payload)
@@ -827,6 +847,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
     if result.menu_buttons:
         button_result = await send_whatsapp_buttons(from_phone, result.reply_text, result.menu_buttons)
+        if not button_result.get("sent"):
+            await send_whatsapp_message(from_phone, result.reply_text)
+        return
+
+    if result.level_offer:
+        button_result = await send_whatsapp_buttons(
+            from_phone, result.reply_text, _level_offer_buttons(result.level_offer)
+        )
         if not button_result.get("sent"):
             await send_whatsapp_message(from_phone, result.reply_text)
         return

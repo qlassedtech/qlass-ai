@@ -502,6 +502,7 @@ class TutorAgent(BaseAgent):
         pending_class_confirm: str | None = None,
         pending_profile_field: str | None = None,
         retrieved_chunks: list[RetrievedChunk] | None = None,
+        model: str = "claude-sonnet-4-6",
     ) -> dict:
         # Retrieval itself (Postgres full-text candidate search + the LLM
         # relevance judgment) happens in the caller, before this is called
@@ -533,8 +534,13 @@ class TutorAgent(BaseAgent):
         # consistent turn-to-turn, since it was prone to occasional
         # inconsistency when it rode on the same non-deterministic sampling
         # as the main reply.
+        # `model` picks which LLM answers, per the student's tutor_level
+        # (see app.business_rules.TUTOR_LEVEL_MODELS) — the language
+        # classifier below always stays on Haiku regardless of level, since
+        # it's a narrow, cheap, deterministic judgment call, not part of the
+        # level's quality/cost tradeoff.
         llm_result, classify_result = await asyncio.gather(
-            call_llm(system_prompt=system_prompt, messages=messages),
+            call_llm(system_prompt=system_prompt, messages=messages, model=model),
             classify(
                 self._language_classifier_prompt(current_lang),
                 # Only the latest message, not the full conversation history
