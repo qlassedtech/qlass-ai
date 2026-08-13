@@ -113,6 +113,11 @@ export default function Register() {
         </button>
         <p className="auth-links">
           <Link to="/login">Already have an account? Sign in</Link>
+          {/* Someone landing here as a STUDENT (wrong link, or a parent
+              rather than an admin) had no way back to the page meant for
+              them — this form only makes sense for someone registering a
+              whole school. */}
+          <Link to="/join">Are you a student? Sign up here</Link>
         </p>
       </form>
     </div>
