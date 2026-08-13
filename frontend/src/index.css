@@ -188,7 +188,11 @@ label {
 }
 
 .auth-links {
-  text-align: center;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  row-gap: 6px;
   font-size: 13px;
   margin-top: 16px;
   color: var(--text-muted);
@@ -198,10 +202,32 @@ label {
   color: var(--accent);
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .auth-links a:hover {
   text-decoration: underline;
+}
+
+/* Each link is its own flex item (rather than one line of text with
+   inline "·" separators) so a wrap always falls between whole links,
+   never mid-phrase — the separator is a pseudo-element on the gap
+   between items instead of literal text, so it never orphans onto its
+   own line either. */
+.auth-links > *:not(:last-child)::after {
+  content: "·";
+  margin: 0 8px;
+  color: var(--border);
+}
+
+.auth-links-secondary {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.auth-links-secondary a {
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .auth-divider {
