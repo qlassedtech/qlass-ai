@@ -294,7 +294,7 @@ export default function Login() {
         {step === "phone" && (
           <div className="auth-links">
             <Link to="/forgot-password">Forgot password?</Link>
-            <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New? Start free</Link>
+            <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New here? Sign up</Link>
           </div>
         )}
       </form>
