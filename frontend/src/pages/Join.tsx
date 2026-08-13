@@ -57,7 +57,7 @@ const SCHOOL_BENEFITS = [
 
 function SchoolBenefits({ benefits }: { benefits: typeof SCHOOL_BENEFITS }) {
   return (
-    <div className="landing-school-band">
+    <div className="landing-school-band" id="for-schools">
       <div className="landing-school-band-inner">
         <span className="landing-eyebrow landing-eyebrow-on-dark">For Schools</span>
         <h2>Bring Qlass to Your Whole School</h2>
@@ -529,7 +529,14 @@ export default function Join() {
 
   return (
     <div className="landing-page">
-      <div style={{ position: "absolute", top: 20, right: 20, zIndex: 2 }}>
+      <div className="landing-topbar">
+        {/* Only on the generic landing page — a school-branded link
+            (/join?school=...) is that school's own students landing on
+            THEIR sign-up page, where "For Schools" would be a confusing,
+            irrelevant detour. Jumps straight to the schools section below
+            instead of making an admin scroll past the whole student hero,
+            demo, and feature grid to find it. */}
+        {!schoolName && <a href="#for-schools" className="landing-topbar-link">For Schools</a>}
         <ThemeToggle />
       </div>
       <div className="landing-inner">

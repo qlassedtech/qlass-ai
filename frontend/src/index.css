@@ -1618,6 +1618,37 @@ label {
   margin: 0 0 20px;
 }
 
+.landing-topbar {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* A school administrator landing on the generic /join page has to scroll
+   past the entire student hero, chat demo, and 9-tile feature grid before
+   reaching the dedicated "For Schools" section further down — this jumps
+   them straight there instead. */
+.landing-topbar-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border);
+  background: var(--card-bg);
+  white-space: nowrap;
+}
+
+.landing-topbar-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .button-link {
   display: inline-block;
   background: var(--primary, #4f46e5);
