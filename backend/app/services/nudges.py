@@ -150,36 +150,53 @@ def _next_feature_highlight(db: Session, student: Student) -> tuple[str, str] | 
     return None
 
 
+NO_FACT_SENTINEL = "NO_FACT"
+
+# How many different random chunks to try before giving up on this cycle —
+# a single random chunk is often a word problem's setup line ("Atul is 19,
+# Parul is 7") or exercise instructions with no real standalone fact in it,
+# so the LLM needs the freedom to reject a bad draw and the caller needs to
+# actually retry with a fresh one rather than force a "fact" out of
+# whatever it happened to get (confirmed live, Aug 2026 — that's exactly
+# what produced the odd age-gap "fact" sent to a real student).
+FUN_FACT_MAX_ATTEMPTS = 4
+
+
 async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] | None:
     """Returns (message, chapter) so the chapter can be recorded as this
     nudge's detail — see get_know_more_reply."""
     if not student.class_:
         return None
-    row = db.execute(
+    rows = db.execute(
         text(
             "SELECT dc.content, d.subject, d.chapter FROM document_chunks dc "
             "JOIN documents d ON d.id = dc.document_id "
             "WHERE d.class = :class_ AND (:board IS NULL OR d.board = :board) "
-            "ORDER BY random() LIMIT 1"
+            "ORDER BY random() LIMIT :limit"
         ),
-        {"class_": student.class_, "board": student.board},
-    ).first()
-    if row is None:
-        return None
-    content, subject, chapter = row
+        {"class_": student.class_, "board": student.board, "limit": FUN_FACT_MAX_ATTEMPTS},
+    ).all()
     system_prompt = (
         "You write a single, short, exciting WhatsApp message (max 2 sentences, one relevant emoji) "
-        "starting with \"Did you know?\" that shares one genuinely interesting fact drawn ONLY from the "
-        "textbook excerpt given. Never add any fact, number, or claim not present in the excerpt. "
-        "Write for a curious school student, not a textbook."
+        "starting with \"Did you know?\" that shares one genuinely interesting, standalone fact drawn ONLY "
+        "from the textbook excerpt given. Never add any fact, number, or claim not present in the excerpt. "
+        "Write for a curious school student, not a textbook.\n\n"
+        "Many excerpts are just word-problem setups, exercise instructions, or answer keys — these have "
+        "NO real fact in them, just incidental numbers or names (e.g. a word problem naming two people's "
+        "ages to set up a subtraction question is NOT an interesting fact about age). If the excerpt has "
+        f"no genuinely interesting, standalone fact worth sharing, respond with exactly \"{NO_FACT_SENTINEL}\" "
+        "and nothing else — do not force a fact out of it."
     )
-    result = await call_llm(
-        system_prompt,
-        [{"role": "user", "content": f"Subject: {subject}\nChapter: {chapter}\n\nExcerpt:\n{content[:1200]}"}],
-        model=FUN_FACT_MODEL,
-    )
-    message = result.text.strip()
-    return (message, chapter) if message else None
+    for content, subject, chapter in rows:
+        result = await call_llm(
+            system_prompt,
+            [{"role": "user", "content": f"Subject: {subject}\nChapter: {chapter}\n\nExcerpt:\n{content[:1200]}"}],
+            model=FUN_FACT_MODEL,
+        )
+        message = result.text.strip()
+        if message and NO_FACT_SENTINEL not in message:
+            return message, chapter
+    return None
 
 
 async def pick_next_nudge(db: Session, student: Student) -> tuple[str, str, str | None] | None:
