@@ -292,15 +292,8 @@ export default function Login() {
           </p>
         )}
         {step === "phone" && (
-          <div className="auth-links auth-links-stacked">
+          <div className="auth-links">
             <Link to="/forgot-password">Forgot password?</Link>
-            {/* Confirmed live: showing "Register your school" on a
-                school-branded login link (this page reached via a
-                specific school's own /login?school=... link) confused a
-                student/teacher who's already at THEIR school's page —
-                that option is only relevant on the generic, no-school
-                login page. */}
-            {!schoolSlug && <Link to="/register">Register your school</Link>}
             <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New? Start free</Link>
           </div>
         )}

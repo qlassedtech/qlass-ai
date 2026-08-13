@@ -93,5 +93,9 @@ export default function GoogleSignInButton({ onCredential, text = "signin_with",
   }, [clientId, text, width]);
 
   if (!clientId || failed) return null;
-  return <div ref={containerRef} />;
+  // Clips Google's own rendered iframe to the app's standard 10px input/
+  // button radius — GIS's renderButton API has no border-radius option of
+  // its own, and its default corners read as visibly sharper than every
+  // other control on the page.
+  return <div ref={containerRef} className="google-signin-wrap" />;
 }

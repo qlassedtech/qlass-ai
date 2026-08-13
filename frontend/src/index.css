@@ -220,16 +220,11 @@ label {
   color: var(--border);
 }
 
-/* Three links, three lines — simplest way to guarantee no wrapping or
-   crowding regardless of screen width, requested after the row-based
-   layout still felt cluttered. */
-.auth-links-stacked {
-  flex-direction: column;
-  gap: 6px;
-}
-
-.auth-links-stacked > *:not(:last-child)::after {
-  content: none;
+.google-signin-wrap {
+  border-radius: 10px;
+  overflow: hidden;
+  width: fit-content;
+  margin: 0 auto;
 }
 
 .auth-divider {
