@@ -60,7 +60,11 @@ export default function StudentLayout() {
               <p className="muted" style={{ fontSize: 12, padding: "0 14px" }}>✅ Google linked ({student.email})</p>
             ) : (
               <div style={{ padding: "0 14px" }}>
-                <GoogleSignInButton onCredential={handleLinkGoogle} text="continue_with" width="200" />
+                {/* Sidebar is 232px wide with 18px side padding (see
+                    .sidebar in index.css) — 196px of real inner width.
+                    Confirmed live the previous 200px value overflowed
+                    past the sidebar's left edge. */}
+                <GoogleSignInButton onCredential={handleLinkGoogle} text="continue_with" width="180" />
                 {linkError && <p className="error" style={{ fontSize: 12 }}>{linkError}</p>}
               </div>
             )}

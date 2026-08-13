@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -11,6 +13,7 @@ from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited,
 from app.services.whatsapp_client import send_template_message, send_whatsapp_message
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Approved in Wati (Utility category) specifically so a brand-new signup
 # who has never messaged the bot is actually guaranteed delivery —
@@ -102,11 +105,22 @@ async def register(body: RegisterRequest, request: Request, db: Session = Depend
     # than starting a new OTP flow at all.
     existing = db.query(Student).filter(Student.phone == phone, Student.is_staff_profile.is_(False)).first()
     if existing:
-        await send_whatsapp_message(
+        # A plain session message (not a template) — only deliverable if
+        # this phone already has an open 24h WhatsApp session with the bot
+        # (i.e. they've messaged it before). For a genuinely cold contact
+        # (only ever received outbound OTP templates, never replied) this
+        # silently fails to deliver — WhatsApp's own platform rule, not
+        # fixable without a dedicated approved "welcome back" template.
+        # Logged rather than swallowed so a real delivery failure is at
+        # least visible, even though the student isn't blocked either way
+        # (they still complete login via the normal OTP flow).
+        result = await send_whatsapp_message(
             phone,
             f"Hi {existing.name}! You're already set up with Qlass AI Tutor — just message me here "
             f"anytime to keep learning. 🎓",
         )
+        if not result.get("sent"):
+            logger.warning("already-registered re-notify failed for student_id=%s: %s", existing.id, result.get("reason"))
         return {"success": True, "already_registered": True}
 
     if await is_otp_rate_limited("public_signup_request", phone):
@@ -172,13 +186,19 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
     # this account (accepts the call, reports isValidWhatsAppNumber: false,
     # never delivers) even for a number confirmed to have WhatsApp. This
     # welcome message is what actually gets a brand-new student to reply
-    # and start using their trial credits, so a swallowed failure here
-    # means a real signup with no idea what to do next.
-    await send_template_message(
+    # and start using their trial credits — confirmed live this was
+    # completely unchecked, so a real delivery failure had zero trace and
+    # the student was simply left with no idea what to do next.
+    welcome_result = await send_template_message(
         phone, REGISTRATION_TEMPLATE_NAME,
         [
             {"name": "1", "value": student.name},
             {"name": "2", "value": f"{cost_tracker.TRIAL_CREDITS:.0f}"},
         ],
     )
+    if not welcome_result.get("sent"):
+        logger.error(
+            "welcome-message send FAILED for new student_id=%s phone=%s: %s",
+            student.id, phone, welcome_result.get("reason") or welcome_result.get("response"),
+        )
     return {"success": True, "already_registered": False}

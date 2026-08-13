@@ -352,8 +352,9 @@ label {
 /* The generic (non-school) /join hero sits beside a large 44px headline —
    the shared 152px login-page logo size reads as tiny next to it. */
 .landing-logo-large {
-  width: 220px;
-  padding: 14px 24px;
+  width: 180px;
+  padding: 10px 18px;
+  margin: 0 auto 16px;
 }
 
 .sidebar-logo {
@@ -737,7 +738,12 @@ label {
     radial-gradient(circle at 78% 96%, rgba(196, 76, 160, 0.10), transparent 46%),
     radial-gradient(circle at 4% 92%, rgba(43, 62, 196, 0.12), transparent 42%),
     var(--bg);
-  padding: 48px 20px 80px;
+  /* Confirmed live: the hero (logo through the chat mockup/signup form)
+     didn't fit a typical desktop viewport height without scrolling,
+     cutting off the form's submit button and the mockup mid-message.
+     Trimmed top/bottom padding here plus the logo/headline/gap sizes
+     below to bring the whole hero back within one screen. */
+  padding: 24px 20px 40px;
 }
 
 .landing-page::before {
@@ -891,13 +897,13 @@ label {
   grid-template-columns: 1.1fr 0.9fr;
   gap: 32px 48px;
   align-items: center;
-  margin-bottom: 32px;
+  margin-bottom: 20px;
 }
 
 .landing-hero-left {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -943,9 +949,9 @@ label {
 }
 
 .landing-hero-headline h1 {
-  font-size: 44px;
-  line-height: 1.08;
-  margin: 14px 0 10px;
+  font-size: 36px;
+  line-height: 1.1;
+  margin: 10px 0 8px;
   letter-spacing: -0.03em;
   font-weight: 800;
 }
@@ -961,7 +967,7 @@ label {
   font-size: 16px;
   line-height: 1.45;
   max-width: 480px;
-  margin: 0 0 14px;
+  margin: 0 0 10px;
 }
 
 @media (max-width: 860px) {
@@ -973,6 +979,15 @@ label {
 .landing-hero-form .landing-form-card {
   margin: 0;
   width: 100%;
+  /* Confirmed live: the default .landing-form-card padding (40px 34px)
+     was part of why the signup form's own submit button got cut off
+     below the fold — the hero specifically needs a tighter version than
+     the standalone /register-style card this class is normally used for. */
+  padding: 26px 30px;
+}
+
+.landing-hero-form .landing-form-checklist {
+  margin-bottom: 14px;
 }
 
 /* A subtle bezel around the chat mockup so it reads as a device screen
@@ -1065,7 +1080,11 @@ label {
      gets extra room since the same text wraps to more lines at that width
      and would otherwise auto-scroll away the top of a photo/video bubble
      before it's even been seen. */
-  height: 346px;
+  /* Trimmed from 346px (security/UX review, Aug 2026) — the hero didn't
+     fit one screen without scrolling, cutting off the signup form's own
+     submit button. overflow-y: auto below is the real safety net for any
+     scenario that still runs long at this height, same as before. */
+  height: 300px;
   overflow-y: auto;
   scrollbar-width: thin;
   transition: opacity 0.35s ease;

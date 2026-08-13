@@ -15,7 +15,6 @@ export default function Login() {
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
-  const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
@@ -158,7 +157,11 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const { access_token } = await api.verifyStudentOtp(phone, otp, name || undefined);
+      // No name collected here anymore — a genuinely new student's name
+      // (and class/board/school) is asked naturally by the chat's own
+      // onboarding flow on their first real message instead, same as
+      // every WhatsApp-native first contact already works.
+      const { access_token } = await api.verifyStudentOtp(phone, otp);
       setStudentToken(access_token);
       navigate("/chat");
     } catch (err) {
@@ -247,12 +250,6 @@ export default function Login() {
               6-digit code
               <input value={otp} onChange={(e) => setOtp(e.target.value)} required maxLength={6} />
             </label>
-            {step === "otp" && (
-              <label>
-                Your name (first time only)
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Optional" />
-              </label>
-            )}
           </>
         )}
 
@@ -297,8 +294,18 @@ export default function Login() {
         {step === "phone" && (
           <p className="auth-links">
             <Link to="/forgot-password">Forgot password?</Link>
-            <span> · </span>
-            <Link to="/register">Register your school</Link>
+            {/* Confirmed live: showing "Register your school" on a
+                school-branded login link (this page reached via a
+                specific school's own /login?school=... link) confused a
+                student/teacher who's already at THEIR school's page —
+                that option is only relevant on the generic, no-school
+                login page. */}
+            {!schoolSlug && (
+              <>
+                <span> · </span>
+                <Link to="/register">Register your school</Link>
+              </>
+            )}
             <span> · </span>
             <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New student? Start free</Link>
           </p>

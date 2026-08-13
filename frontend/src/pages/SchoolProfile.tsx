@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { api, absoluteUrl, type School } from "../api";
 
+// Same list used across AssignQuiz/Presentations/StudentDetail/Workbook —
+// kept in sync manually since there's no shared constants module yet.
+const BOARD_OPTIONS = ["CBSE", "ICSE", "BSEB", "State Board"];
+
 // The bot's real WhatsApp Business number (connected via Wati) — the
 // click-to-chat link below opens a chat with this number pre-filled, so a
 // student never has to know or type it themselves.
@@ -34,6 +38,22 @@ export default function SchoolProfile() {
   const [waLinkCopied, setWaLinkCopied] = useState(false);
   const [loginLinkCopied, setLoginLinkCopied] = useState(false);
   const [savingApproval, setSavingApproval] = useState(false);
+  const [savingBoard, setSavingBoard] = useState(false);
+
+  // Confirmed live (real school onboarding): with no board on file, every
+  // student joining through this school's /join link got asked "which
+  // board?" in chat — this is the fix for a school that registered before
+  // /auth/register-school collected it at signup, or just needs to change it.
+  async function handleBoardChange(newBoard: string) {
+    if (!school) return;
+    setSavingBoard(true);
+    try {
+      const updated = await api.updateSchool({ board: newBoard });
+      setSchool(updated);
+    } finally {
+      setSavingBoard(false);
+    }
+  }
 
   async function toggleAutoApprove() {
     if (!school) return;
@@ -110,6 +130,25 @@ export default function SchoolProfile() {
           <p className="muted" style={{ marginTop: 12, fontSize: 13 }}>
             Shown in your sidebar and stamped on practice-set PDFs generated for your students.
           </p>
+          <label style={{ marginTop: 16, display: "block", maxWidth: 240 }}>
+            Board
+            <select value={school.board || ""} onChange={(e) => handleBoardChange(e.target.value)} disabled={savingBoard}>
+              <option value="" disabled>
+                Not set — students will be asked in chat
+              </option>
+              {BOARD_OPTIONS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!school.board && (
+            <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+              ⚠️ Every new student joining through your link will be asked which board they're on
+              in chat until this is set.
+            </p>
+          )}
         </div>
       </div>
 

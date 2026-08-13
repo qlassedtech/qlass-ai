@@ -317,6 +317,14 @@ SCHOOL_REVIEW_TEMPLATE_NAME = "school_onboarding_review_alert"
 class RegisterSchoolRequest(BaseModel):
     school_name: str = Field(max_length=200)
     city: str | None = Field(default=None, max_length=100)
+    # Confirmed live (real school onboarding, Aug 2026): a self-registered
+    # school never had anywhere to set this, so tenancy.
+    # default_board_for_centre had nothing to default new students to —
+    # every single student joining through this school's own /join link
+    # then got asked "which board?" in chat, even though a school always
+    # already knows its own board. Optional (a school can still set/fix it
+    # later via PATCH /admin/school) so this doesn't block registration.
+    board: str | None = Field(default=None, max_length=40)
     admin_name: str = Field(max_length=200)
     admin_phone: str = Field(max_length=20)
     # Exactly one of these two must be given — a password (the original
@@ -388,7 +396,7 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
         db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
     )
 
-    centre = Centre(name=body.school_name, city=body.city, sales_status="prospect")
+    centre = Centre(name=body.school_name, city=body.city, board=body.board, sales_status="prospect")
     db.add(centre)
     db.commit()
     db.refresh(centre)

@@ -38,11 +38,28 @@ def slugify_centre_name(name: str) -> str:
 
 
 def find_centre_by_slug(db: Session, slug: str) -> Centre | None:
+    """
+    Confirmed live (real school onboarding, Aug 2026) this is a genuine
+    production bug, not just a theoretical edge case: two schools named
+    "Leed's Asian School" existed (one a stale leftover from unrelated
+    earlier testing, one the school's own real, current registration) —
+    both slugify identically, and the old plain `db.query(Centre).all()`
+    iteration order (effectively insertion/id order) always matched the
+    OLDER one first, silently routing a real self-signed-up student onto
+    a dead/abandoned centre the school's own admin has never seen. There's
+    still no way to fully disambiguate two DIFFERENT real schools sharing
+    a name (see /auth/register-school's own docstring on why that isn't
+    hard-blocked), but "prefer the most recently active, most recently
+    created match" is a far better default than "prefer the oldest row in
+    the table" for the overwhelmingly common real case — a stale/abandoned
+    duplicate registration losing out to a real, current one.
+    """
     slug = slug.lower()
-    for centre in db.query(Centre).all():
-        if slugify_centre_name(centre.name) == slug:
-            return centre
-    return None
+    matches = [c for c in db.query(Centre).all() if slugify_centre_name(c.name) == slug]
+    if not matches:
+        return None
+    matches.sort(key=lambda c: (c.sales_status == "active", c.created_at), reverse=True)
+    return matches[0]
 
 
 def default_board_for_centre(db: Session, centre_id: int | None) -> str | None:

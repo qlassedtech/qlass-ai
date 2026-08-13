@@ -453,7 +453,7 @@ export const api = {
   // Exactly one of password/google_id_token — see RegisterSchoolRequest's
   // own docstring on the backend for why both exist.
   registerSchool: (data: {
-    school_name: string; city?: string; admin_name: string; admin_phone: string;
+    school_name: string; city?: string; board?: string; admin_name: string; admin_phone: string;
     password?: string; google_id_token?: string;
   }) =>
     request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{
@@ -470,7 +470,7 @@ export const api = {
   createTeacher: (data: { name: string; phone: string; password: string; role: string; centre_id?: number }) =>
     request("/admin/teachers", { method: "POST", body: JSON.stringify(data) }) as Promise<TeacherAccount>,
   getSchool: () => request("/admin/school") as Promise<School>,
-  updateSchool: (data: { auto_approve_students?: boolean }) =>
+  updateSchool: (data: { auto_approve_students?: boolean; board?: string }) =>
     request("/admin/school", { method: "PATCH", body: JSON.stringify(data) }) as Promise<School>,
   getAnalytics: (centreId?: number) =>
     request(`/admin/analytics${centreId ? `?centre_id=${centreId}` : ""}`) as Promise<Analytics>,

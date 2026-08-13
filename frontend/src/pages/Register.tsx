@@ -3,9 +3,18 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, setToken } from "../api";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 
+// Same list used across AssignQuiz/Presentations/StudentDetail/Workbook —
+// kept in sync manually since there's no shared constants module yet.
+const BOARD_OPTIONS = ["CBSE", "ICSE", "BSEB", "State Board"];
+
 export default function Register() {
   const [schoolName, setSchoolName] = useState("");
   const [city, setCity] = useState("");
+  // Confirmed live (real school onboarding): with no board set at
+  // registration, every student joining through this school's /join link
+  // got asked "which board?" in chat, even though a school always already
+  // knows its own board — this closes that gap at signup time.
+  const [board, setBoard] = useState("");
   const [adminName, setAdminName] = useState("");
   const [adminPhone, setAdminPhone] = useState("");
   const [password, setPassword] = useState("");
@@ -25,6 +34,7 @@ export default function Register() {
       const { access_token } = await api.registerSchool({
         school_name: schoolName,
         city: city || undefined,
+        board: board || undefined,
         admin_name: adminName,
         admin_phone: adminPhone,
         password: googleIdToken ? undefined : password,
@@ -52,6 +62,19 @@ export default function Register() {
         <label>
           City (optional)
           <input value={city} onChange={(e) => setCity(e.target.value)} />
+        </label>
+        <label>
+          Board
+          <select value={board} onChange={(e) => setBoard(e.target.value)} required>
+            <option value="" disabled>
+              Select your school's board
+            </option>
+            {BOARD_OPTIONS.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           Your name
