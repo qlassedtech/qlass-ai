@@ -292,26 +292,17 @@ export default function Login() {
           </p>
         )}
         {step === "phone" && (
-          <>
-            {/* The two links people reach for on every visit share one
-                row. "Register your school" is a rare, one-time action —
-                giving it equal visual weight crowded the row on a phone
-                screen (the width most students/teachers actually use),
-                so it gets its own quieter row below instead of competing
-                for the same line. Also hidden entirely on a school-
-                branded login link (reached via a specific school's own
-                /login?school=... link) — confirmed live that it confused
-                a student/teacher already at THEIR school's page. */}
-            <div className="auth-links">
-              <Link to="/forgot-password">Forgot password?</Link>
-              <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New? Start free</Link>
-            </div>
-            {!schoolSlug && (
-              <div className="auth-links auth-links-secondary">
-                <Link to="/register">Register your school</Link>
-              </div>
-            )}
-          </>
+          <div className="auth-links auth-links-stacked">
+            <Link to="/forgot-password">Forgot password?</Link>
+            {/* Confirmed live: showing "Register your school" on a
+                school-branded login link (this page reached via a
+                specific school's own /login?school=... link) confused a
+                student/teacher who's already at THEIR school's page —
+                that option is only relevant on the generic, no-school
+                login page. */}
+            {!schoolSlug && <Link to="/register">Register your school</Link>}
+            <Link to={schoolSlug ? `/join?school=${schoolSlug}` : "/join"}>New? Start free</Link>
+          </div>
         )}
       </form>
       {schoolName && (

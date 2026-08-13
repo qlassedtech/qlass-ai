@@ -220,14 +220,16 @@ label {
   color: var(--border);
 }
 
-.auth-links-secondary {
-  margin-top: 6px;
-  font-size: 12px;
+/* Three links, three lines — simplest way to guarantee no wrapping or
+   crowding regardless of screen width, requested after the row-based
+   layout still felt cluttered. */
+.auth-links-stacked {
+  flex-direction: column;
+  gap: 6px;
 }
 
-.auth-links-secondary a {
-  color: var(--text-muted);
-  font-weight: 500;
+.auth-links-stacked > *:not(:last-child)::after {
+  content: none;
 }
 
 .auth-divider {
