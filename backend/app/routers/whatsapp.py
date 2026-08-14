@@ -456,9 +456,12 @@ async def receive_message(request: Request):
     separate outbound call to Wati's API, not dependent on this response.
 
     Unlike Meta's Cloud API, Wati has no GET verification handshake — you just
-    point Wati's dashboard webhook setting at this URL.
+    point Wati's dashboard webhook setting at this URL. The secret can be
+    supplied either as a custom Authorization header (see Wati's Webhook
+    settings) or as a `?secret=...` query parameter baked directly into the
+    URL registered with Wati — see verify_webhook_auth for why both exist.
     """
-    if not verify_webhook_auth(request.headers.get("authorization")):
+    if not verify_webhook_auth(request.headers.get("authorization"), request.query_params.get("secret")):
         raise HTTPException(status_code=403, detail="Invalid webhook auth")
 
     try:

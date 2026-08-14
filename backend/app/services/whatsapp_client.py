@@ -6,21 +6,28 @@ import httpx
 from app.config import settings
 
 
-def verify_webhook_auth(auth_header: str | None) -> bool:
+def verify_webhook_auth(auth_header: str | None, query_secret: str | None = None) -> bool:
     """
-    Wati doesn't sign webhook bodies with HMAC like Meta does. Instead, if you
-    set a custom "Authorization" value under Wati's Webhook settings, Wati
-    sends that same value back on every webhook call for you to check.
-    Skips verification (returns True) if WATI_WEBHOOK_SECRET isn't configured
-    — app.config logs a loud startup warning when that's true outside
-    development, since an unset secret means this webhook accepts ANY
-    POST as if it were a real inbound WhatsApp message (see the SECURITY
-    WARNING in that log line for what to do about it).
+    Wati doesn't sign webhook bodies with HMAC like Meta does. Two ways to
+    authenticate a call are accepted, either is enough:
+      1. A custom "Authorization" header value set under Wati's Webhook
+         settings, sent back on every call.
+      2. A `?secret=...` query parameter embedded directly in the webhook
+         URL registered with Wati — added as an alternative for a webhook
+         dashboard (or a person configuring it) that doesn't expose a way
+         to set a custom header, only a plain URL to paste in.
+    Skips verification entirely (returns True) if WATI_WEBHOOK_SECRET isn't
+    configured — app.config logs a loud startup warning when that's true
+    outside development, since an unset secret means this webhook accepts
+    ANY POST as if it were a real inbound WhatsApp message (see the
+    SECURITY WARNING in that log line for what to do about it).
 
     hmac.compare_digest (not ==) so a byte-by-byte timing side-channel can't
     help an attacker recover the secret across many requests.
     """
     if not settings.wati_webhook_secret:
+        return True
+    if query_secret and hmac.compare_digest(query_secret, settings.wati_webhook_secret):
         return True
     if not auth_header:
         return False
