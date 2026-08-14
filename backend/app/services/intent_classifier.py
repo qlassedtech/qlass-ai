@@ -99,20 +99,29 @@ _RELEVANCE_SYSTEM_PROMPT = (
 # Used only for app.services.retrieval.fetch_higher_class_chunks' fallback
 # (see that function's docstring) — these excerpts are from a class ABOVE
 # the student's own, offered only because nothing in their own class
-# matched at all. The normal bar ("actually about the same topic") is
-# still not enough here: a same-subject-different-topic excerpt is exactly
-# the kind of false positive a fallback with no same-class competition to
-# lose against is most likely to wave through.
+# matched at all. Confirmed live: an earlier version of this prompt
+# ("DIRECTLY and PRECISELY answer this specific message... their exact
+# question") was miscalibrated — it rejected a chunk literally titled
+# "Thermodynamics" for the message "Explain thermodynamics", because a
+# broad topic request read as failing an "exact question" bar meant for
+# narrow fact-lookups. The real distinction that matters is same-SUBJECT
+# vs same-TOPIC: a same-subject-different-topic excerpt (e.g. rotational
+# motion cited for a gravitation question) is the false positive this
+# stricter check exists to catch — a genuine, on-topic chapter passage for
+# a broad "explain X" request is not.
 _RELEVANCE_SYSTEM_PROMPT_HIGHER_CLASS = (
     "You are given a student's message and a numbered list of candidate textbook excerpts — "
     "these excerpts are from a MORE ADVANCED class than the student's own, offered only "
     "because nothing in the student's own class covered this. Decide which numbered excerpts "
-    "(if any) DIRECTLY and PRECISELY answer this specific message — being from the same "
-    "general subject is not enough, and neither is loosely related; only mark an excerpt "
-    "relevant if you are highly confident a student reading it would recognize it as "
-    "genuinely answering their exact question, not just adjacent to it. When in doubt, answer "
-    "NONE — most everyday replies (greetings, \"I don't know\", short answers, thanks) have no "
-    "relevant excerpt at all regardless.\n\n"
+    "(if any) are genuinely about the SAME SPECIFIC TOPIC the message is asking about — not "
+    "merely the same general subject area. A broad request (\"explain thermodynamics\", "
+    "\"what is gravitation\") is satisfied by an excerpt that is actually about that named "
+    "topic, even a general/introductory passage — that counts as relevant. What must be "
+    "rejected is an excerpt from the same subject but a DIFFERENT topic (e.g. a chunk about "
+    "rotational motion when the message asked about gravitation) — that kind of same-subject "
+    "mismatch is exactly what this stricter check exists to catch, since there's no same-class "
+    "competition here to weed it out otherwise. Most everyday replies (greetings, \"I don't "
+    "know\", short answers, thanks) have no relevant excerpt at all regardless.\n\n"
     "Respond with ONLY one line in EXACTLY this format, nothing else — no explanation, no "
     "markdown:\n"
     "[[RELEVANT excerpts=<comma-separated numbers|NONE>]]"
