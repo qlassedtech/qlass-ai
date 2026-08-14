@@ -86,7 +86,11 @@ _RELEVANCE_SYSTEM_PROMPT = (
     "responding to this specific message — sharing a single common word with the message is "
     "not enough, an excerpt only counts if it's actually about the same topic. Most everyday "
     "replies (greetings, \"I don't know\", short answers, thanks) have NO relevant excerpt at "
-    "all, and that's the correct, expected answer for most messages — don't force a match.\n\n"
+    "all, and that's the correct, expected answer for most messages — don't force a match. A "
+    "short reply like \"yes\", \"not really\", or a one-word answer carries no topic of its own "
+    "— if a [Last assistant message] is given, use it to see what was actually being discussed, "
+    "and still only match an excerpt genuinely about THAT topic, not one that merely shares a "
+    "common word with either message.\n\n"
     "Respond with ONLY one line in EXACTLY this format, nothing else — no explanation, no "
     "markdown:\n"
     "[[RELEVANT excerpts=<comma-separated numbers|NONE>]]"
@@ -229,7 +233,9 @@ async def classify_intent(
     relevant_excerpts: list[int] = []
     relevance_result: LLMResult | None = None
     if candidate_chunks:
-        relevant_excerpts, relevance_result = await classify_relevant_excerpts(message_text, candidate_chunks)
+        relevant_excerpts, relevance_result = await classify_relevant_excerpts(
+            message_text, candidate_chunks, last_assistant_message=last_assistant_message,
+        )
 
     return MessageClassification(
         intent=parsed["intent"], quiz_topic=parsed["quiz_topic"], mock_test_topic=parsed["mock_test_topic"],
@@ -239,7 +245,7 @@ async def classify_intent(
 
 
 async def classify_relevant_excerpts(
-    message_text: str, candidate_chunks: list[RetrievedChunk],
+    message_text: str, candidate_chunks: list[RetrievedChunk], last_assistant_message: str | None = None,
 ) -> tuple[list[int], LLMResult]:
     """
     Judges which candidate excerpts are actually relevant to message_text —
@@ -252,17 +258,25 @@ async def classify_relevant_excerpts(
     the time at temperature=0 via a controlled sweep varying only excerpt
     count, not sampling noise, and not fixable by rewording the combined
     prompt (tried and re-measured, no change). Isolating the excerpt
-    judgment into its own focused prompt — no intent taxonomy, no
-    last-assistant-message — removed the destabilizing combination
-    entirely: the intent call alone was 100% reliable on Haiku (5/5 in the
-    same sweep), and this call only ever answers the narrower relevance
-    question.
+    judgment into its own focused prompt — no intent taxonomy — removed the
+    destabilizing combination entirely: the intent call alone was 100%
+    reliable on Haiku (5/5 in the same sweep), and this call only ever
+    answers the narrower relevance question. last_assistant_message was
+    dropped along with intent taxonomy at the time; re-added on its own
+    afterward (confirmed live: a bare quiz-check reply like "Not at all",
+    with zero topical words of its own, got wrongly matched to an unrelated
+    Class 5 English chunk because the relevance judge had no way to know a
+    Physics explanation was even in progress) — this is a different
+    combination than the one that caused the original misfire, and the
+    prompt below still carries no intent taxonomy.
     """
     excerpt_lines = [
         f"{i}. [{chunk.chapter or 'unknown chapter'}] {chunk.content[:_EXCERPT_PREVIEW_CHARS]}"
         for i, chunk in enumerate(candidate_chunks, start=1)
     ]
-    context = "[Candidate excerpts:\n" + "\n\n".join(excerpt_lines) + "]\n" + message_text
+    context_lines = [f'[Last assistant message: "{last_assistant_message}"]'] if last_assistant_message else []
+    context_lines.append("[Candidate excerpts:\n" + "\n\n".join(excerpt_lines) + "]")
+    context = "\n".join(context_lines) + "\n" + message_text
     result = await classify(
         _RELEVANCE_SYSTEM_PROMPT,
         [{"role": "user", "content": context}],
