@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal
 from app.models.core import Centre, Student, Teacher, ProcessedWebhookMessage
-from app.services.chat_core import process_message
+from app.services.chat_core import process_message, MENU_BUTTON_TO_COMMAND
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -77,11 +77,14 @@ WEBHOOK_RETRY_BATCH_SIZE = 100
 # it (still handled via the teacher_help intent, regardless of any button),
 # or the automatic hint-streak escalation offers it after the student has
 # genuinely struggled (see app.services.escalation).
-MENU_BUTTON_TO_COMMAND = {
-    "📊 My Progress": "my progress",
-    "💳 Credit Usage": "credit usage",
-    "🎁 Refer a Friend": "refer a friend",
-}
+#
+# MENU_BUTTON_TO_COMMAND itself is imported from chat_core (see the import
+# at the top of this file) rather than redefined here — confirmed live:
+# this used to be a SEPARATE duplicate dict in this file, silently drifting
+# out of sync with chat_core's own copy the moment one was edited without
+# the other (exactly what happened when "🎓 Change Level" was added to
+# MENU_BUTTONS_BASE — the button was offered but a real tap on it couldn't
+# resolve to a command, since this file's stale copy had no entry for it).
 
 # Offered instead of a plain "you're out of credits" text (see the credit
 # gate in _handle_message) — a real option to act on beats a dead end.
