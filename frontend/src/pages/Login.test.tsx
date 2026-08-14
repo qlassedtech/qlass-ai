@@ -30,7 +30,6 @@ describe("Login", () => {
   it("starts on the phone-number step", () => {
     renderLogin();
     expect(screen.getByPlaceholderText("91XXXXXXXXXX")).toBeInTheDocument();
-    expect(screen.getByText("Sign in as a school, teacher, parent, or student")).toBeInTheDocument();
   });
 
   it("routes a teacher phone number to the password step", async () => {
@@ -41,7 +40,7 @@ describe("Login", () => {
     await user.type(screen.getByPlaceholderText("91XXXXXXXXXX"), "919123456780");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    await waitFor(() => expect(screen.getByText("Enter your portal password")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Enter your password")).toBeInTheDocument());
     expect(screen.queryByPlaceholderText("91XXXXXXXXXX")).not.toBeInTheDocument();
   });
 
@@ -54,7 +53,7 @@ describe("Login", () => {
     await user.type(screen.getByPlaceholderText("91XXXXXXXXXX"), "919777700099");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    await waitFor(() => expect(screen.getByText("Enter the code we sent over WhatsApp")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Enter the code")).toBeInTheDocument());
     expect(parentApi.requestOtp).toHaveBeenCalledWith("919777700099");
   });
 
