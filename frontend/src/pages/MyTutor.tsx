@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import ChatWindow from "../components/ChatWindow";
+import LevelSwitcher from "../components/LevelSwitcher";
 import { api } from "../api";
 
 declare global {
@@ -26,6 +27,7 @@ export default function MyTutor() {
   const [autoRenewing, setAutoRenewing] = useState(false);
   const [subLoading, setSubLoading] = useState(false);
   const [subStatus, setSubStatus] = useState<string | null>(null);
+  const [tutorLevel, setTutorLevel] = useState<number | null>(null);
 
   function loadProfile() {
     api.getMyTutor().then((t) => {
@@ -33,6 +35,7 @@ export default function MyTutor() {
       setSubscriptionPlan(t.subscription_plan);
       setSubscriptionExpiresAt(t.subscription_expires_at);
       setAutoRenewing(t.auto_renewing);
+      setTutorLevel(t.tutor_level);
     });
   }
 
@@ -96,7 +99,16 @@ export default function MyTutor() {
           <h1>My AI Tutor</h1>
           <p>Your own personal tutor account, separate from any student's — ask anything, send a photo of a question, record a voice note, or share a PDF</p>
         </div>
-        {subscriptionPlan !== "unlimited" && balance !== null && <p className="muted">₹{balance.toFixed(2)} credits</p>}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {subscriptionPlan !== "unlimited" && balance !== null && <p className="muted">₹{balance.toFixed(2)} credits</p>}
+          <LevelSwitcher
+            level={tutorLevel}
+            onChange={async (level) => {
+              const updated = await api.setMyTutorLevel(level);
+              setTutorLevel(updated.tutor_level);
+            }}
+          />
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>

@@ -583,6 +583,16 @@ export const api = {
       subscription_plan: string;
       subscription_expires_at: string | null;
       auto_renewing: boolean;
+      tutor_level: number;
+    }>,
+  // Structured level switch for the header control — the WhatsApp/typed-
+  // command equivalent is "level N", both resolve to the exact same
+  // student.tutor_level write server-side (see app.routers.admin's
+  // set_my_tutor_level).
+  setMyTutorLevel: (level: number) =>
+    request("/admin/my-tutor/tutor-level", { method: "POST", body: JSON.stringify({ level }) }) as Promise<{
+      id: number;
+      tutor_level: number;
     }>,
   createMyTutorSubscription: () =>
     request("/admin/my-tutor/subscription/create", { method: "POST" }) as Promise<CreateSubscriptionResponse>,
@@ -634,6 +644,7 @@ export interface StudentProfile {
   // Set only once a Google account has been linked (see
   // studentApi.linkGoogleAccount) — null for every student who hasn't.
   email: string | null;
+  tutor_level: number;
 }
 
 export interface ChatMessage {
@@ -680,6 +691,12 @@ export const studentApi = {
     requestStudent("/student-app/auth/link-google", {
       method: "POST", body: JSON.stringify({ id_token: idToken }),
     }) as Promise<{ linked: boolean; email: string }>,
+  // Structured level switch for the header control — the WhatsApp/typed-
+  // command equivalent is "level N", both resolve to the exact same
+  // student.tutor_level write server-side (see app.routers.student_app's
+  // set_tutor_level).
+  setLevel: (level: number) =>
+    requestStudent("/student-app/tutor-level", { method: "POST", body: JSON.stringify({ level }) }) as Promise<StudentProfile>,
 };
 
 export interface CreateOrderResponse {
