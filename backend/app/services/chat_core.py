@@ -44,7 +44,7 @@ from app.services import cost_tracker
 from app.services.document_client import apply_active_document_pin
 from app.services.escalation import get_escalation_recipients, format_escalation_message
 from app.services.habit import evaluate_habit_milestones
-from app.services.intent_classifier import classify_intent
+from app.services.intent_classifier import classify_intent, classify_relevant_excerpts
 from app.services.llm_client import translate_with_claude
 from app.services.profile_builder import is_plausible_profile_answer, next_missing_field, should_ask_this_turn
 from app.services.progress_report import (
@@ -55,7 +55,9 @@ from app.services.referral import (
     generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer,
     REFERRAL_SIGNUP_BONUS, REFERRAL_LIFETIME_CAP,
 )
-from app.services.retrieval import MAX_CANDIDATES, MAX_CHUNKS, fetch_candidate_chunks, fetch_semantic_candidates
+from app.services.retrieval import (
+    MAX_CANDIDATES, MAX_CHUNKS, fetch_candidate_chunks, fetch_higher_class_chunks, fetch_semantic_candidates,
+)
 from app.services.sarvam_client import translate_text
 from app.services.youtube_client import find_best_video
 from app.agents.tutor_agent import TutorAgent
@@ -523,6 +525,31 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                     continue
                 seen.add(chunk.content)
                 relevant_chunks.append(chunk)
+        # The normal same-class pipeline above (keyword, relevance-judged,
+        # plus semantic) found nothing usable at all — rather than answer
+        # completely ungrounded, try a class above the student's own (see
+        # fetch_higher_class_chunks' docstring for why only upward, and why
+        # this is narrower than the unscoped-fallback mistake retrieval.py's
+        # own module docstring already warns against). Judged under a
+        # stricter bar (higher_confidence=True) since there's no same-class
+        # competition here to weed out a same-subject-different-topic
+        # false positive.
+        if not relevant_chunks and student.class_:
+            higher_class_candidates = fetch_higher_class_chunks(db, message_text, student.class_, student.board)
+            if higher_class_candidates:
+                higher_excerpts, higher_relevance_result = await classify_relevant_excerpts(
+                    message_text, higher_class_candidates, last_assistant_message=last_assistant_message,
+                    higher_confidence=True,
+                )
+                cost_tracker.record_claude_usage(
+                    db, higher_relevance_result.model, higher_relevance_result.input_tokens,
+                    higher_relevance_result.output_tokens, student.id,
+                    cache_write_tokens=higher_relevance_result.cache_write_tokens,
+                    cache_read_tokens=higher_relevance_result.cache_read_tokens,
+                )
+                relevant_chunks = [
+                    higher_class_candidates[i - 1] for i in higher_excerpts if 1 <= i <= len(higher_class_candidates)
+                ]
         # Capped to MAX_CHUNKS (not MAX_CANDIDATES) for what actually goes
         # into the LLM's context — every chunk here costs real input tokens
         # on every single call since this part of the prompt can't be

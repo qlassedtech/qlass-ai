@@ -88,6 +88,18 @@ def _candidate_words(query_text: str) -> list[str]:
     return list(dict.fromkeys(words))  # de-duped, order preserved
 
 
+def _class_as_int(class_: str | None) -> int | None:
+    """None for an unknown/non-numeric class (e.g. "Other") — the higher-
+    class fallback below only makes sense when there's an actual number to
+    compare against."""
+    if class_ is None:
+        return None
+    try:
+        return int(class_)
+    except ValueError:
+        return None
+
+
 def fetch_candidate_chunks(
     db: Session, query_text: str, class_: str | None, board: str | None, limit: int = MAX_CANDIDATES,
 ) -> list[RetrievedChunk]:
@@ -129,6 +141,60 @@ def fetch_candidate_chunks(
 
     sql = f"{base_query} AND {' AND '.join(scoping)} ORDER BY rank DESC LIMIT :limit"
     rows = db.execute(text(sql), params).fetchall()
+    return [
+        RetrievedChunk(content=row[0][:MAX_CHUNK_CHARS], class_=row[1], subject=row[2], chapter=row[3], board=row[4])
+        for row in rows
+    ]
+
+
+def fetch_higher_class_chunks(
+    db: Session, query_text: str, class_: str, board: str | None, limit: int = MAX_CANDIDATES,
+) -> list[RetrievedChunk]:
+    """
+    Same recall as fetch_candidate_chunks, but scoped to d.class STRICTLY
+    GREATER than the student's own — never lower, and only ever tried by
+    app.services.chat_core as a second-tier fallback once the FULL normal
+    same-class pipeline (keyword recall, relevance-judged, plus semantic
+    recall) still comes up with nothing usable at all — not triggered by
+    keyword recall alone coming up empty, since same-class semantic search
+    might still find a real paraphrase match keyword search would miss.
+
+    This is deliberately narrower than the unscoped fallback this module's
+    docstring already warns against ("an earlier version fell back to an
+    unscoped search whenever the scoped one came up empty... a wrong-class
+    chunk is worse than none at all"): reaching UP to a more advanced class
+    for the same topic is still a real, correct answer to the same
+    question (calling it out as "from the Class 11 chapter" rather than
+    passing it off as this student's own syllabus is chat_core/tutor_agent's
+    job) — reaching DOWN or sideways to an unrelated class is not, which is
+    why this only ever queries class_ > the student's own. Combined with a
+    stricter relevance bar (see intent_classifier.classify_relevant_excerpts'
+    higher_confidence flag) rather than the normal one, so a same-subject-
+    different-topic false positive doesn't slip through just because
+    nothing else was available.
+    """
+    class_int = _class_as_int(class_)
+    if class_int is None:
+        return []
+    words = _candidate_words(query_text)
+    if not words:
+        return []
+    tsquery_str = " | ".join(words)
+    board = board or DEFAULT_BOARD
+
+    sql = """
+        SELECT dc.content, d.class, d.subject, d.chapter, d.board,
+               ts_rank(dc.content_tsv, to_tsquery('english', :query)) AS rank
+        FROM document_chunks dc
+        JOIN documents d ON d.id = dc.document_id
+        WHERE dc.content_tsv @@ to_tsquery('english', :query)
+          AND d.board = :board
+          AND d.class ~ '^[0-9]+$' AND d.class::int > :class_int
+        ORDER BY rank DESC LIMIT :limit
+    """
+    rows = db.execute(
+        text(sql), {"query": tsquery_str, "board": board, "class_int": class_int, "limit": limit},
+    ).fetchall()
     return [
         RetrievedChunk(content=row[0][:MAX_CHUNK_CHARS], class_=row[1], subject=row[2], chapter=row[3], board=row[4])
         for row in rows

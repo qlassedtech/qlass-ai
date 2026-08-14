@@ -96,6 +96,28 @@ _RELEVANCE_SYSTEM_PROMPT = (
     "[[RELEVANT excerpts=<comma-separated numbers|NONE>]]"
 )
 
+# Used only for app.services.retrieval.fetch_higher_class_chunks' fallback
+# (see that function's docstring) — these excerpts are from a class ABOVE
+# the student's own, offered only because nothing in their own class
+# matched at all. The normal bar ("actually about the same topic") is
+# still not enough here: a same-subject-different-topic excerpt is exactly
+# the kind of false positive a fallback with no same-class competition to
+# lose against is most likely to wave through.
+_RELEVANCE_SYSTEM_PROMPT_HIGHER_CLASS = (
+    "You are given a student's message and a numbered list of candidate textbook excerpts — "
+    "these excerpts are from a MORE ADVANCED class than the student's own, offered only "
+    "because nothing in the student's own class covered this. Decide which numbered excerpts "
+    "(if any) DIRECTLY and PRECISELY answer this specific message — being from the same "
+    "general subject is not enough, and neither is loosely related; only mark an excerpt "
+    "relevant if you are highly confident a student reading it would recognize it as "
+    "genuinely answering their exact question, not just adjacent to it. When in doubt, answer "
+    "NONE — most everyday replies (greetings, \"I don't know\", short answers, thanks) have no "
+    "relevant excerpt at all regardless.\n\n"
+    "Respond with ONLY one line in EXACTLY this format, nothing else — no explanation, no "
+    "markdown:\n"
+    "[[RELEVANT excerpts=<comma-separated numbers|NONE>]]"
+)
+
 
 def _field(block: str, name: str) -> str | None:
     """
@@ -246,6 +268,7 @@ async def classify_intent(
 
 async def classify_relevant_excerpts(
     message_text: str, candidate_chunks: list[RetrievedChunk], last_assistant_message: str | None = None,
+    higher_confidence: bool = False,
 ) -> tuple[list[int], LLMResult]:
     """
     Judges which candidate excerpts are actually relevant to message_text —
@@ -269,6 +292,14 @@ async def classify_relevant_excerpts(
     Physics explanation was even in progress) — this is a different
     combination than the one that caused the original misfire, and the
     prompt below still carries no intent taxonomy.
+
+    higher_confidence swaps in a stricter prompt (see
+    _RELEVANCE_SYSTEM_PROMPT_HIGHER_CLASS) — set only by
+    app.services.retrieval.fetch_higher_class_chunks' caller, when the
+    candidates being judged are from a class above the student's own
+    rather than their own syllabus, where the normal "actually about the
+    same topic" bar is looser than a fallback with no same-class match to
+    lose against should get.
     """
     excerpt_lines = [
         f"{i}. [{chunk.chapter or 'unknown chapter'}] {chunk.content[:_EXCERPT_PREVIEW_CHARS]}"
@@ -278,7 +309,7 @@ async def classify_relevant_excerpts(
     context_lines.append("[Candidate excerpts:\n" + "\n\n".join(excerpt_lines) + "]")
     context = "\n".join(context_lines) + "\n" + message_text
     result = await classify(
-        _RELEVANCE_SYSTEM_PROMPT,
+        _RELEVANCE_SYSTEM_PROMPT_HIGHER_CLASS if higher_confidence else _RELEVANCE_SYSTEM_PROMPT,
         [{"role": "user", "content": context}],
         fallback="[[RELEVANT excerpts=NONE]]",
         model="claude-haiku-4-5-20251001",
