@@ -508,6 +508,21 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         relevant_chunks = [
             candidate_chunks[i - 1] for i in classification.relevant_excerpts if 1 <= i <= len(candidate_chunks)
         ]
+        # Debug trail for the whole retrieval/citation funnel (see the log
+        # call at the bottom of this block) — confirmed live, Aug 2026: a
+        # citation appeared or didn't in ways that were hard to reconstruct
+        # after the fact, since re-running the same message minutes later
+        # sees a different last_assistant_message/last_discussed_topic
+        # (the conversation had already moved on) and an LLM judgment call
+        # isn't guaranteed bit-identical across separate calls even at
+        # temperature=0 — so a real occurrence needs its own real-time
+        # trail rather than being reconstructed later.
+        same_class_candidate_count = len(candidate_chunks)
+        same_class_relevant_count = len(relevant_chunks)
+        semantic_added_count = 0
+        higher_class_attempted = False
+        higher_class_candidate_count = 0
+        higher_class_relevant_count = 0
         # Semantic recall (a live Voyage call) is only worth paying for once
         # a turn has actually reached the LLM-answer branch — see the note
         # by the keyword-only fetch above. classify_intent already judged
@@ -525,6 +540,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                     continue
                 seen.add(chunk.content)
                 relevant_chunks.append(chunk)
+                semantic_added_count += 1
         # The normal same-class pipeline above (keyword, relevance-judged,
         # plus semantic) found nothing usable at all — rather than answer
         # completely ungrounded, try a class above the student's own (see
@@ -535,7 +551,9 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         # competition here to weed out a same-subject-different-topic
         # false positive.
         if not relevant_chunks and student.class_:
+            higher_class_attempted = True
             higher_class_candidates = fetch_higher_class_chunks(db, message_text, student.class_, student.board)
+            higher_class_candidate_count = len(higher_class_candidates)
             if higher_class_candidates:
                 higher_excerpts, higher_relevance_result = await classify_relevant_excerpts(
                     message_text, higher_class_candidates, last_assistant_message=last_assistant_message,
@@ -550,6 +568,23 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 relevant_chunks = [
                     higher_class_candidates[i - 1] for i in higher_excerpts if 1 <= i <= len(higher_class_candidates)
                 ]
+                higher_class_relevant_count = len(relevant_chunks)
+        # Logged for every LLM-answer turn where a class is known (not just
+        # the interesting cases) — cheap (one line, no LLM call) and the
+        # "nothing interesting happened, own-class match found normally"
+        # case is exactly the baseline a future odd case needs comparing
+        # against. student.class_ is None for Qlass Direct / brand-new
+        # profiles, where none of this funnel runs meaningfully anyway.
+        if student.class_:
+            logger.info(
+                "retrieval funnel student_id=%s class=%s text=%r same_class_candidates=%d "
+                "same_class_relevant=%d semantic_added=%d higher_class_attempted=%s "
+                "higher_class_candidates=%d higher_class_relevant=%d final_chunks=%s",
+                student.id, student.class_, message_text[:200], same_class_candidate_count,
+                same_class_relevant_count, semantic_added_count, higher_class_attempted,
+                higher_class_candidate_count, higher_class_relevant_count,
+                [(c.class_, c.chapter) for c in relevant_chunks],
+            )
         # Capped to MAX_CHUNKS (not MAX_CANDIDATES) for what actually goes
         # into the LLM's context — every chunk here costs real input tokens
         # on every single call since this part of the prompt can't be
