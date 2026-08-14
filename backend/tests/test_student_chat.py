@@ -51,6 +51,11 @@ async def test_quiz_request_starts_a_real_quiz_not_a_free_text_reply(db_session,
     def fake_fetch_candidate_chunks(*a, **kw):
         return []
     monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
+    # Same reason as fetch_candidate_chunks above — the higher-class
+    # fallback (see chat_core.process_message) also runs raw Postgres
+    # full-text-search SQL, and fires whenever candidate_chunks/semantic
+    # both come up empty, which several of this file's tests set up.
+    monkeypatch.setattr(chat_core, "fetch_higher_class_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core, "start_quiz", fake_start_quiz)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
@@ -83,6 +88,11 @@ async def test_answer_during_active_quiz_is_graded_not_treated_as_a_new_message(
     def fake_fetch_candidate_chunks(*a, **kw):
         return []
     monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
+    # Same reason as fetch_candidate_chunks above — the higher-class
+    # fallback (see chat_core.process_message) also runs raw Postgres
+    # full-text-search SQL, and fires whenever candidate_chunks/semantic
+    # both come up empty, which several of this file's tests set up.
+    monkeypatch.setattr(chat_core, "fetch_higher_class_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core, "handle_quiz_answer", fake_handle_quiz_answer)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
@@ -119,6 +129,11 @@ async def test_non_quiz_message_still_uses_the_tutor_agent(db_session, monkeypat
     def fake_fetch_candidate_chunks(*a, **kw):
         return []
     monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
+    # Same reason as fetch_candidate_chunks above — the higher-class
+    # fallback (see chat_core.process_message) also runs raw Postgres
+    # full-text-search SQL, and fires whenever candidate_chunks/semantic
+    # both come up empty, which several of this file's tests set up.
+    monkeypatch.setattr(chat_core, "fetch_higher_class_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core, "classify_intent", fake_classify_intent)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fake_respond)
 
@@ -146,6 +161,11 @@ async def test_progress_and_credit_usage_intents_now_work_on_the_web_channel(db_
     def fake_fetch_candidate_chunks(*a, **kw):
         return []
     monkeypatch.setattr(chat_core, "fetch_candidate_chunks", fake_fetch_candidate_chunks)
+    # Same reason as fetch_candidate_chunks above — the higher-class
+    # fallback (see chat_core.process_message) also runs raw Postgres
+    # full-text-search SQL, and fires whenever candidate_chunks/semantic
+    # both come up empty, which several of this file's tests set up.
+    monkeypatch.setattr(chat_core, "fetch_higher_class_chunks", fake_fetch_candidate_chunks)
     monkeypatch.setattr(chat_core.tutor_agent, "respond", fail_if_called)
 
     async def fake_classify_progress(message_text, **kwargs):

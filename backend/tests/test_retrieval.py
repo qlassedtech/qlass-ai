@@ -1,6 +1,8 @@
 from app.models.core import Document, DocumentChunk
 from app.services import retrieval
-from app.services.retrieval import RetrievedChunk, build_citation_footer, fetch_candidate_chunks, fetch_hybrid_candidates
+from app.services.retrieval import (
+    RetrievedChunk, build_citation_footer, fetch_candidate_chunks, fetch_higher_class_chunks, fetch_hybrid_candidates,
+)
 
 
 def _add_chunk(db, content, class_="9", subject="Science", board="CBSE", chapter="Cell Structure"):
@@ -48,6 +50,27 @@ def test_returns_empty_list_when_nothing_matches(pg_db_session):
 def test_empty_query_returns_empty_list_without_querying(pg_db_session):
     chunks = fetch_candidate_chunks(pg_db_session, "   ", class_="9", board="CBSE")
     assert chunks == []
+
+
+def test_higher_class_fallback_finds_a_more_advanced_class(pg_db_session):
+    _add_chunk(pg_db_session, "Newton's laws of motion govern how objects move.", class_="11", board="CBSE")
+    chunks = fetch_higher_class_chunks(pg_db_session, "newton's laws of motion", class_="9", board="CBSE")
+    assert len(chunks) == 1
+    assert chunks[0].class_ == "11"
+
+
+def test_higher_class_fallback_never_returns_a_lower_or_equal_class(pg_db_session):
+    _add_chunk(pg_db_session, "Newton's laws of motion govern how objects move.", class_="9", board="CBSE")
+    _add_chunk(pg_db_session, "A simpler version for younger students.", class_="6", board="CBSE", chapter="Motion Basics")
+    chunks = fetch_higher_class_chunks(pg_db_session, "newton's laws of motion", class_="9", board="CBSE")
+    assert chunks == []
+
+
+def test_higher_class_fallback_returns_nothing_for_a_non_numeric_class():
+    # "Other" (the catch-all option on the signup form) has no numeric
+    # ordering to compare against — must return [] rather than raise or
+    # search unscoped.
+    assert fetch_higher_class_chunks(None, "anything", class_="Other", board="CBSE") == []
 
 
 async def test_hybrid_candidates_falls_back_to_keyword_only_when_voyage_not_configured(pg_db_session, monkeypatch):
