@@ -120,6 +120,19 @@ LEVEL_OFFER_BUTTON_TO_COMMAND = {
 def _level_offer_buttons(offered_level: int) -> list[str]:
     return [f"⬇️ Try Level {offered_level}", "➡️ Stay As Is"]
 
+# For the manual "🎓 Change Level" flow (see ChatTurnResult.level_choice) —
+# distinct from LEVEL_OFFER_BUTTON_TO_COMMAND above, which only ever offers
+# ONE specific cheaper level plus "stay". Here the student picked "change
+# level" themselves with no target, so all levels other than their current
+# one are real candidates — always exactly 3 buttons (the one WhatsApp
+# interactive-button cap allows), since one of the 4 is always excluded.
+LEVEL_CHOICE_BUTTON_LABELS = {1: "🎯 Level 1", 2: "⚡ Level 2", 3: "📘 Level 3", 4: "🧠 Level 4"}
+LEVEL_CHOICE_BUTTON_TO_COMMAND = {label: f"level {n}" for n, label in LEVEL_CHOICE_BUTTON_LABELS.items()}
+
+
+def _level_choice_buttons(current_level: int) -> list[str]:
+    return [label for level, label in LEVEL_CHOICE_BUTTON_LABELS.items() if level != current_level]
+
 # Quick Reply buttons on the "school_onboarding_review_alert" WhatsApp
 # template (see app.routers.admin.register_school) — approved in Wati by
 # Qlass staff, not this codebase, so these labels must match exactly what
@@ -679,7 +692,8 @@ async def _handle_message(db: Session, payload: dict) -> None:
         command = (
             MENU_BUTTON_TO_COMMAND.get(button_text)
             or CREDIT_BUTTON_TO_COMMAND.get(button_text)
-            or LEVEL_OFFER_BUTTON_TO_COMMAND.get(button_text, button_text)
+            or LEVEL_OFFER_BUTTON_TO_COMMAND.get(button_text)
+            or LEVEL_CHOICE_BUTTON_TO_COMMAND.get(button_text, button_text)
         )
         parsed = (button_from_phone, command)
     else:
@@ -963,6 +977,14 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if result.level_offer:
         button_result = await send_whatsapp_buttons(
             from_phone, result.reply_text, _level_offer_buttons(result.level_offer)
+        )
+        if not button_result.get("sent"):
+            await send_whatsapp_message(from_phone, result.reply_text)
+        return
+
+    if result.level_choice:
+        button_result = await send_whatsapp_buttons(
+            from_phone, result.reply_text, _level_choice_buttons(result.level_choice)
         )
         if not button_result.get("sent"):
             await send_whatsapp_message(from_phone, result.reply_text)

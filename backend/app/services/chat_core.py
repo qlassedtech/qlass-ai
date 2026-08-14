@@ -86,10 +86,11 @@ USAGE_WARNING_FRACTIONS = [0.5, 0.9, 1.0]  # weekly voice/image/video soft-cap w
 # intent-classification path as if the student had typed it. Channels
 # without button UI (web/app) get the equivalent options spelled out in
 # plain text instead — see the "menu" branch below.
-MENU_BUTTONS_BASE = ["📊 My Progress", "💳 Credit Usage"]
+MENU_BUTTONS_BASE = ["📊 My Progress", "💳 Credit Usage", "🎓 Change Level"]
 MENU_BUTTON_TO_COMMAND = {
     "📊 My Progress": "my progress",
     "💳 Credit Usage": "credit usage",
+    "🎓 Change Level": "change level",
     "🎁 Refer a Friend": "refer a friend",
 }
 
@@ -195,6 +196,7 @@ class ChatTurnResult:
     menu_buttons: list[str] | None = None  # present only for the "menu" intent; channels without button UI can ignore
     video: dict | None = None  # {"title", "url"} — kept OUT of reply_text so voice-reply TTS never reads a raw URL aloud
     level_offer: int | None = None  # set only when a NEW 50%/75% downgrade nudge fired this turn — see _level_downgrade_offer
+    level_choice: int | None = None  # set to the student's current level when they asked to change level with no target given — see the change_level intent branch
 
 
 async def process_message(db: Session, student: Student, message_text: str) -> ChatTurnResult:
@@ -317,6 +319,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     citation = None
     wants_audio_reply = False
     menu_buttons = None
+    level_choice = None  # set to the student's current level when they ask to change level with no target given — see the change_level branch below
 
     if student.pending_profile_field == "class_confirm" and (quiz_topic_request or mock_test_request):
         # An explicit new request in the same message should win over
@@ -367,7 +370,12 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             activity = get_activity_stats(db, student.id)
             weekly_stats = get_student_stats(db, student.id, days=7)
             menu_buttons = list(MENU_BUTTONS_BASE)
-            if is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
+            # WhatsApp interactive messages cap out at 3 buttons (see
+            # send_whatsapp_buttons) — MENU_BUTTONS_BASE already fills all
+            # 3 slots, so Refer a Friend only gets a button when one of the
+            # base three isn't shown for some future reason. It stays
+            # reachable by typing "refer a friend" regardless.
+            if len(menu_buttons) < 3 and is_worth_asking_to_refer(activity, weekly_stats["messages_sent"]):
                 menu_buttons.append("🎁 Refer a Friend")
             fallback_commands = ", ".join(f"'{MENU_BUTTON_TO_COMMAND[b]}'" for b in menu_buttons)
             reply_text = (
@@ -427,6 +435,11 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 f"You're currently on Level {student.tutor_level}.\n\n{options}\n\n"
                 f"Reply \"level 1\", \"level 2\", \"level 3\", or \"level 4\" to switch."
             )
+            # Tells the WhatsApp caller which level to exclude when
+            # building the 3 choice buttons (see app.routers.whatsapp's
+            # _level_choice_buttons) — plain text on channels that ignore
+            # it (web/app), same convention as menu_buttons above.
+            level_choice = student.tutor_level
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "referral":
         # Generated lazily here too (not just at signup) so students
@@ -840,7 +853,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     return ChatTurnResult(
         reply_text=outgoing_text, detected_lang=detected_lang, did_answer_via_llm=did_answer_via_llm,
         image_prompt=image_prompt, wants_audio_reply=wants_audio_reply, menu_buttons=menu_buttons,
-        video=video_result, level_offer=level_offer,
+        video=video_result, level_offer=level_offer, level_choice=level_choice,
     )
 
 

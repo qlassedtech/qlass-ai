@@ -12,6 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.query import Query
 
+from app.business_rules import TUTOR_LEVEL_MODELS
 from app.config import settings
 from app.database import get_db
 from app.models.core import AuditLog, Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
@@ -1969,7 +1970,28 @@ def get_my_tutor_profile(db: Session = Depends(get_db), teacher: Teacher = Depen
         "subscription_plan": student.subscription_plan,
         "subscription_expires_at": student.subscription_expires_at,
         "auto_renewing": student.razorpay_subscription_id is not None,
+        "tutor_level": student.tutor_level,
     }
+
+
+class SetMyTutorLevelRequest(BaseModel):
+    level: int
+
+
+@router.post("/admin/my-tutor/tutor-level")
+def set_my_tutor_level(
+    body: SetMyTutorLevelRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """Teacher/admin equivalent of POST /student-app/tutor-level — same
+    direct switch, same pending_level_offer clear, just against the
+    teacher's own linked My AI Tutor profile instead of a real student."""
+    if body.level not in TUTOR_LEVEL_MODELS:
+        raise HTTPException(status_code=400, detail="level must be between 1 and 4")
+    student = _my_tutor_student(db, teacher)
+    student.tutor_level = body.level
+    student.pending_level_offer = None
+    db.commit()
+    return {"id": student.id, "tutor_level": student.tutor_level}
 
 
 @router.post("/admin/my-tutor/subscription/create")

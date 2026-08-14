@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.business_rules import TUTOR_LEVEL_MODELS
 from app.config import settings
 from app.database import get_db
 from app.models.core import ChatHistory, Parent, Student, Teacher
@@ -43,6 +44,7 @@ def student_summary(db: Session, student: Student) -> dict:
         "credit_balance": cost_tracker.get_balance(db, student.id),
         "referral_code": student.referral_code,
         "email": student.email,
+        "tutor_level": student.tutor_level,
     }
 
 
@@ -237,6 +239,32 @@ async def verify_student_otp(body: VerifyOtpRequest, db: Session = Depends(get_d
 
 @router.get("/student-app/me")
 def get_me(db: Session = Depends(get_db), student: Student = Depends(get_current_student)):
+    return student_summary(db, student)
+
+
+class SetTutorLevelRequest(BaseModel):
+    level: int
+
+
+@router.post("/student-app/tutor-level")
+def set_tutor_level(
+    body: SetTutorLevelRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    A direct, structured way to switch tutor level from the web/mobile
+    UI (a header control, no typing) — the WhatsApp equivalent is typing
+    "level N" or tapping a Change Level button, both of which resolve
+    through chat_core's own change_level intent instead, since there's no
+    separate UI to hit an endpoint from there. Mirrors that path's own
+    side effect: any outstanding 50%/75% auto-downgrade offer is cleared,
+    since the student has now made an explicit choice that supersedes it
+    — see chat_core.Student.pending_level_offer.
+    """
+    if body.level not in TUTOR_LEVEL_MODELS:
+        raise HTTPException(status_code=400, detail="level must be between 1 and 4")
+    student.tutor_level = body.level
+    student.pending_level_offer = None
+    db.commit()
     return student_summary(db, student)
 
 
