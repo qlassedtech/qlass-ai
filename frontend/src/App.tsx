@@ -19,6 +19,7 @@ import MyTutor from "./pages/MyTutor";
 import Chat from "./pages/Chat";
 import ParentDashboard from "./pages/ParentDashboard";
 import Pay from "./pages/Pay";
+import Flowchart from "./pages/Flowchart";
 import Layout from "./components/Layout";
 import StudentLayout from "./components/StudentLayout";
 
@@ -57,6 +58,11 @@ export default function App() {
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/pay" element={<Pay />} />
         <Route path="/join" element={<Join />} />
+        {/* Internal engineering reference, not a customer-facing feature —
+            public/unauthenticated like /join and /register (no secrets are
+            shown, just how the product's own flows are wired), but never
+            linked from anywhere a real school or student would see. */}
+        <Route path="/flowchart" element={<Flowchart />} />
         <Route
           element={
             <ProtectedRoute>
