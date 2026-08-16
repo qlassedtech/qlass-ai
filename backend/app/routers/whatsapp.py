@@ -44,7 +44,8 @@ from app.services.rate_limit import is_rate_limited, is_signup_rate_limited, stu
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
 from app.services.referral import (
-    generate_referral_code, extract_referral_code, grant_signup_referral_bonus, REFERRAL_SIGNUP_BONUS,
+    generate_referral_code, extract_referral_code, grant_signup_referral_bonus, try_claim_late_referral,
+    REFERRAL_SIGNUP_BONUS,
 )
 from app.services.active_profile import (
     classify_profile_routing,
@@ -725,6 +726,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
     student, early_reply = await _resolve_active_student(db, from_phone, probe_text)
     if early_reply:
         await send_whatsapp_message(from_phone, early_reply)
+        return
+
+    # Catches a referral code sent as its own message (e.g. student greets
+    # first, then pastes the code separately) rather than only in the very
+    # first message ever — see try_claim_late_referral's docstring.
+    if await try_claim_late_referral(db, student, probe_text):
+        await send_whatsapp_message(from_phone, "Got it — your friend's referral code is linked! 🎉")
         return
 
     # Tapping "💳 Top Up Credits" (see the credit-exhausted notice below)

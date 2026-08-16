@@ -10,6 +10,17 @@ from app.services.whatsapp_client import send_whatsapp_message
 REFERRAL_CODE_PREFIX = "QL"
 _CODE_PATTERN = re.compile(r"\bQL(\d{4,})\b")
 
+# How long after signup a student can still link a referral code sent in a
+# LATER message (not just their very first one). Confirmed live: a new
+# student who greets first ("Hello") and pastes their friend's code as a
+# separate second message never got credited, since the code was only ever
+# read from the single first inbound message at account-creation time (see
+# whatsapp.py's _create_new_student). Bounded to a short window, rather than
+# allowed at any time, so an already-engaged student can't retroactively
+# attach a referral days/weeks later just to hand a referrer a "signup"
+# bonus for an account that was never really driven by that referral.
+LATE_REFERRAL_CLAIM_WINDOW = timedelta(hours=24)
+
 # Paid the moment someone signs up mentioning a referral code — see
 # whatsapp.py's _create_new_student. Not gated on any activity.
 REFERRAL_SIGNUP_BONUS = 10.0
@@ -82,6 +93,46 @@ def grant_signup_referral_bonus(db: Session, referrer_id: int) -> bool:
     if recent_count >= MAX_SIGNUP_BONUSES_PER_REFERRER_PER_DAY:
         return False
     cost_tracker.grant_referral_credit(db, referrer_id, REFERRAL_SIGNUP_BONUS, note=_SIGNUP_BONUS_NOTE)
+    return True
+
+
+async def try_claim_late_referral(db: Session, student: Student, message_text: str) -> bool:
+    """
+    Catches a referral code sent in one of a new student's early messages
+    rather than their very first one (see LATE_REFERRAL_CLAIM_WINDOW above
+    for why this is time-bounded). Call on every inbound message from a
+    student who doesn't already have referred_by_id set — it's cheap to
+    no-op (no regex match on almost every real message, and the window
+    check short-circuits before any query once a student ages out).
+    Returns whether a referral was actually linked, so the caller can
+    reply distinctly instead of falling through to a normal tutoring turn.
+    """
+    if student.referred_by_id is not None:
+        return False
+    created_at = student.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - created_at > LATE_REFERRAL_CLAIM_WINDOW:
+        return False
+    referral_code = extract_referral_code(message_text)
+    if not referral_code:
+        return False
+    referrer = db.query(Student).filter(Student.referral_code == referral_code, Student.id != student.id).first()
+    if referrer is None:
+        return False
+
+    student.referred_by_id = referrer.id
+    db.commit()
+    paid = grant_signup_referral_bonus(db, referrer.id)
+    if paid:
+        try:
+            await send_whatsapp_message(
+                referrer.phone,
+                f"🎉 Your friend just joined using your referral code! You've earned "
+                f"₹{REFERRAL_SIGNUP_BONUS:.0f} in bonus AI credits.",
+            )
+        except Exception:
+            pass
     return True
 
 
