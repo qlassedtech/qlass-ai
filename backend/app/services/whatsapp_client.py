@@ -337,6 +337,14 @@ async def send_template_message(to_phone: str, template_name: str, params: list[
             data = resp.json()
             if not data.get("validWhatsAppNumber", True):
                 return {"sent": False, "reason": f"Wati reports this isn't a valid WhatsApp number: {to_phone}"}
+            # Confirmed live: Wati can return HTTP 200 with "result": false in
+            # the body (e.g. a blank/invalid template parameter) rather than
+            # an HTTP error status — raise_for_status() above only catches
+            # the latter. Checked here too so a genuine soft-failure isn't
+            # silently reported as sent (see this function's own callers,
+            # which log an error whenever sent is False).
+            if data.get("result") is False:
+                return {"sent": False, "reason": data.get("info") or "Wati reported result: false", "response": data}
             return {"sent": True, "response": data}
     except httpx.HTTPStatusError as exc:
         return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
