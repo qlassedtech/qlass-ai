@@ -6,10 +6,27 @@ import ThemeToggle from "./ThemeToggle";
 export default function Layout() {
   const navigate = useNavigate();
   const [teacher, setTeacher] = useState<Teacher | null>(null);
+  // Only set for a teacher/admin belonging to exactly one school (see
+  // belongsToOneSchool below) — org_admin/super_admin manage many schools
+  // at once, so there's no single school identity to show instead of
+  // Qlass's own. Matches the promise made on the public landing page
+  // (Join.tsx's "Your School's Own Branded Portal") — this portal is where
+  // that promise was never actually implemented.
+  const [schoolBranding, setSchoolBranding] = useState<{ name: string; logo_url: string | null } | null>(null);
 
   useEffect(() => {
     api.me().then(setTeacher).catch(() => {});
   }, []);
+
+  const belongsToOneSchool = teacher?.role === "admin" || teacher?.role === "teacher";
+
+  useEffect(() => {
+    if (!belongsToOneSchool) {
+      setSchoolBranding(null);
+      return;
+    }
+    api.getSchool().then((school) => setSchoolBranding({ name: school.name, logo_url: school.logo_url })).catch(() => {});
+  }, [belongsToOneSchool]);
 
   function logout() {
     setToken(null);
@@ -32,7 +49,21 @@ export default function Layout() {
     <div className="app-shell">
       <nav className="sidebar">
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-          <img src="/logo-tight.png" alt="Qlass Learning" className="sidebar-logo" />
+          {schoolBranding ? (
+            <div className="sidebar-school-brand">
+              {schoolBranding.logo_url ? (
+                <img src={absoluteUrl(schoolBranding.logo_url) || undefined} alt={schoolBranding.name} className="sidebar-school-logo" />
+              ) : (
+                <span className="sidebar-school-logo-placeholder" aria-hidden="true">🏫</span>
+              )}
+              <div>
+                <div className="sidebar-school-name">{schoolBranding.name}</div>
+                <div className="sidebar-school-powered-by">Powered by Qlass</div>
+              </div>
+            </div>
+          ) : (
+            <img src="/logo-tight.png" alt="Qlass Learning" className="sidebar-logo" />
+          )}
           <ThemeToggle />
         </div>
 

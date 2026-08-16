@@ -450,13 +450,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }) as Promise<{ pilot_status: string; pilot_expires_at: string; credits_per_student: number; teacher_tool_credits: number; enabled_features: string[]; granted_count: number; granted: string[] }>,
-  // Exactly one of password/google_id_token — see RegisterSchoolRequest's
-  // own docstring on the backend for why both exist.
+  // Step 1 of two — sends a WhatsApp OTP to admin_phone; does not create
+  // anything yet (see registerSchoolVerify below).
   registerSchool: (data: {
     school_name: string; city?: string; board?: string; admin_name: string; admin_phone: string;
     password?: string; google_id_token?: string;
   }) =>
-    request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{
+    request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{ otp_required: boolean }>,
+  // Step 2 — creates the school + admin account, only after the OTP above
+  // is confirmed. Exactly one of password/google_id_token — see
+  // RegisterSchoolRequest's own docstring on the backend for why both exist.
+  registerSchoolVerify: (data: {
+    school_name: string; city?: string; board?: string; admin_name: string; admin_phone: string;
+    password?: string; google_id_token?: string; otp: string;
+  }) =>
+    request("/auth/register-school/verify", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       access_token: string;
       teacher: Teacher;
     }>,

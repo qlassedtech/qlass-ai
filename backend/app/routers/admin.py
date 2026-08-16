@@ -340,24 +340,54 @@ class RegisterSchoolRequest(BaseModel):
 @router.post("/auth/register-school")
 async def register_school(body: RegisterSchoolRequest, request: Request, db: Session = Depends(get_db)):
     """
-    Self-serve entry point for a new school signing up — creates both the
-    school (Centre, the tenant boundary) and its first admin account in one
-    step, since a brand-new school has no existing admin to invite them.
-    Any additional teacher/admin accounts for this school are added
-    afterward from the portal (see POST /admin/teachers), not through this
-    endpoint again.
+    Step 1 of self-serve school registration — sends a WhatsApp OTP to the
+    admin's phone; does NOT create the school or admin account yet (see
+    /auth/register-school/verify for that).
 
-    Confirmed live this had NO rate limiting at all, unlike every other
-    account-creation endpoint (/public/register, WhatsApp cold-start) —
-    unlimited script-driven calls could mint unlimited fully-privileged
-    school-admin accounts, each carrying a real ₹-equivalent school trial
-    credit (see school_billing.add_trial_credits below), with zero human
-    review. Same per-IP budget as /public/register; X-Real-IP is set by
-    nginx itself, not client-controllable (see app.routers.public.register).
+    Confirmed live this had NO identity verification of any kind — every
+    other account-creation endpoint (/public/register, WhatsApp cold-start)
+    requires OTP-proven phone ownership before an account exists, but this
+    one created a fully-privileged school-admin account for ANY phone
+    number on the strength of the request body alone, with zero rate
+    limiting either. Someone could register a school admin account keyed to
+    a real person's phone number without them ever proving — or even
+    knowing — they control it.
     """
     client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
     if await is_signup_rate_limited(client_ip):
         raise HTTPException(status_code=429, detail="Too many school registrations from this network — please try again later")
+    admin_phone = normalize_phone(body.admin_phone)
+    if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
+        raise HTTPException(status_code=409, detail="An account with this phone number already exists")
+    if await is_otp_rate_limited("register_school_request", admin_phone):
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
+    otp = await generate_and_store_otp("register_school", admin_phone)
+    result = await send_template_message(admin_phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
+    if not result.get("sent"):
+        raise HTTPException(status_code=502, detail="Couldn't send the verification code — please try again shortly")
+    return {"otp_required": True}
+
+
+class VerifyRegisterSchoolRequest(RegisterSchoolRequest):
+    otp: str
+
+
+@router.post("/auth/register-school/verify")
+async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session = Depends(get_db)):
+    """
+    Step 2 — creates the school (Centre, the tenant boundary) and its first
+    admin account in one step, since a brand-new school has no existing
+    admin to invite them, only after the WhatsApp OTP from
+    /auth/register-school is confirmed. Any additional teacher/admin
+    accounts for this school are added afterward from the portal (see POST
+    /admin/teachers), not through this endpoint again.
+    """
+    admin_phone = normalize_phone(body.admin_phone)
+    if await is_otp_rate_limited("register_school_verify", admin_phone):
+        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+    if not await verify_otp("register_school", admin_phone, body.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
     if bool(body.password) == bool(body.google_id_token):
         raise HTTPException(status_code=400, detail="Provide exactly one of password or google_id_token")
     google_email = None
@@ -373,43 +403,49 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
             raise HTTPException(status_code=409, detail="An account with this Google email already exists")
     else:
         _require_valid_password(body.password)
-    admin_phone = normalize_phone(body.admin_phone)
-    if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
-        raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
-    # Confirmed live: this endpoint had zero identity verification — anyone
-    # could register a school under a name matching (or closely mimicking) a
-    # real partner school's, then have it silently resolved as that school by
-    # find_centre_by_slug (used by the public landing page and WhatsApp
-    # first-contact school-name matching), intercepting signups meant for
-    # the real school.
-    #
-    # Deliberately NOT a hard block, even on name+city together — both a
-    # school name (e.g. "Delhi Public School", "Saraswati Vidya Mandir")
-    # AND a city name can genuinely recur across unrelated parts of India
-    # with no relationship to each other, so any string-match rule here
-    # risks locking out a real school on a false positive, which is worse
-    # than the spoofing risk it's meant to catch. Instead this is surfaced
-    # as a flag on the review notification below — a human (who can ask
-    # "which district, which board, is this really the same school?")
-    # makes the call, not a string comparison.
-    name_matches = (
-        db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
-    )
+    # Locked so two near-simultaneous verify calls for the same phone can't
+    # both pass this check before either commits — same TOCTOU shape fixed
+    # elsewhere for student signup (see app.services.rate_limit.student_lock's
+    # other callers).
+    async with student_lock(admin_phone):
+        if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
+            raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
-    centre = Centre(name=body.school_name, city=body.city, board=body.board, sales_status="prospect")
-    db.add(centre)
-    db.commit()
-    db.refresh(centre)
-    school_billing.add_trial_credits(db, centre.id)
+        # Confirmed live: this endpoint had zero identity verification — anyone
+        # could register a school under a name matching (or closely mimicking) a
+        # real partner school's, then have it silently resolved as that school by
+        # find_centre_by_slug (used by the public landing page and WhatsApp
+        # first-contact school-name matching), intercepting signups meant for
+        # the real school.
+        #
+        # Deliberately NOT a hard block, even on name+city together — both a
+        # school name (e.g. "Delhi Public School", "Saraswati Vidya Mandir")
+        # AND a city name can genuinely recur across unrelated parts of India
+        # with no relationship to each other, so any string-match rule here
+        # risks locking out a real school on a false positive, which is worse
+        # than the spoofing risk it's meant to catch. Instead this is surfaced
+        # as a flag on the review notification below — a human (who can ask
+        # "which district, which board, is this really the same school?")
+        # makes the call, not a string comparison.
+        name_matches = (
+            db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
+        )
 
-    teacher = Teacher(
-        name=body.admin_name, phone=admin_phone, email=google_email,
-        password_hash=hash_password(body.password) if body.password else None,
-        role="admin", centre_id=centre.id,
-    )
-    db.add(teacher)
-    db.commit()
+        centre = Centre(name=body.school_name, city=body.city, board=body.board, sales_status="prospect")
+        db.add(centre)
+        db.commit()
+        db.refresh(centre)
+        school_billing.add_trial_credits(db, centre.id)
+
+        teacher = Teacher(
+            name=body.admin_name, phone=admin_phone, email=google_email,
+            password_hash=hash_password(body.password) if body.password else None,
+            role="admin", centre_id=centre.id,
+        )
+        db.add(teacher)
+        db.commit()
+
     # Self-registered schools start "prospect" (not the model's normal
     # "active" default) specifically so they're visibly distinct from a
     # Qlass-vetted school in every existing sales-pipeline view (see

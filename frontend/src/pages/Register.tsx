@@ -24,6 +24,13 @@ export default function Register() {
   // required — school_name/city/admin_name/admin_phone are still needed
   // either way (Google only supplies identity/email, not those details).
   const [googleIdToken, setGoogleIdToken] = useState<string | null>(null);
+  // Set once the initial form is submitted and a WhatsApp OTP has been
+  // sent — the form then switches to asking for that code instead of
+  // creating the school+admin account immediately (see api.ts's
+  // registerSchool vs registerSchoolVerify). Proves the admin actually
+  // controls admin_phone before a fully-privileged account is created for it.
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [otp, setOtp] = useState("");
   const navigate = useNavigate();
 
   async function handleSubmit(e: React.FormEvent) {
@@ -31,7 +38,7 @@ export default function Register() {
     setError(null);
     setLoading(true);
     try {
-      const { access_token } = await api.registerSchool({
+      await api.registerSchool({
         school_name: schoolName,
         city: city || undefined,
         board: board || undefined,
@@ -40,13 +47,75 @@ export default function Register() {
         password: googleIdToken ? undefined : password,
         google_id_token: googleIdToken || undefined,
       });
-      setToken(access_token);
-      navigate("/students");
+      setOtpRequired(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "We couldn't register your school — please try again");
+      setError(err instanceof Error ? err.message : "We couldn't send a verification code — please try again");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleVerifyOtp(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const { access_token } = await api.registerSchoolVerify({
+        school_name: schoolName,
+        city: city || undefined,
+        board: board || undefined,
+        admin_name: adminName,
+        admin_phone: adminPhone,
+        password: googleIdToken ? undefined : password,
+        google_id_token: googleIdToken || undefined,
+        otp,
+      });
+      setToken(access_token);
+      navigate("/students");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Incorrect code — please try again");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (otpRequired) {
+    return (
+      <div className="center-page">
+        <form className="card" onSubmit={handleVerifyOtp}>
+          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
+          <h1>Verify Your WhatsApp Number</h1>
+          <p className="login-subtitle">We sent a code to {adminPhone} on WhatsApp — enter it below to finish setting up your school.</p>
+          <label>
+            Verification code
+            <input
+              value={otp}
+              onChange={(e) => setOtp(e.target.value)}
+              placeholder="6-digit code"
+              inputMode="numeric"
+              maxLength={6}
+              required
+            />
+          </label>
+          {error && <p className="error">{error}</p>}
+          <button type="submit" disabled={loading}>
+            {loading ? "Please wait..." : "Verify & Create School Console"}
+          </button>
+          <p className="auth-links">
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                setOtpRequired(false);
+                setError(null);
+              }}
+            >
+              Wrong number? Go back
+            </a>
+          </p>
+        </form>
+      </div>
+    );
   }
 
   return (
@@ -109,7 +178,7 @@ export default function Register() {
         )}
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={loading}>
-          {loading ? "Creating account..." : "Create School Console"}
+          {loading ? "Sending code..." : "Create School Console"}
         </button>
         <p className="auth-links">
           <Link to="/login">Already have an account? Sign in</Link>
