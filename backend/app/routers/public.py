@@ -10,18 +10,28 @@ from app.services import cost_tracker, tenancy
 from app.services.otp import LOGIN_OTP_TEMPLATE_NAME, generate_and_store_otp, verify_otp
 from app.services.phone import normalize_phone
 from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited, student_lock
+from app.services.referral import apply_referral_at_signup
+from app.services.student_auth import create_student_access_token
 from app.services.whatsapp_client import send_template_message, send_whatsapp_message
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Approved in Wati (Utility category) specifically so a brand-new signup
-# who has never messaged the bot is actually guaranteed delivery —
-# WhatsApp's 24h session-window policy requires a pre-approved template to
-# *initiate* contact; a plain sendSessionMessage to a genuinely cold number
-# isn't reliable. Body: "Welcome to Qlass AI Tutor, {{1}}! [...] we've
-# added ₹{{2}} in free AI credits [...]" — {{1}}=name, {{2}}=credit amount.
-REGISTRATION_TEMPLATE_NAME = "student_signup_activation"
+# Approved in Wati (Utility category, replacing the original Marketing-
+# category version — Meta throttles/holds Marketing-category delivery to
+# not-yet-opted-in numbers far more aggressively, which is what made the
+# original version's delivery unreliable for brand-new signups) so a
+# brand-new signup who has never messaged the bot is actually guaranteed
+# delivery — WhatsApp's 24h session-window policy requires a pre-approved
+# template to *initiate* contact; a plain sendSessionMessage to a genuinely
+# cold number isn't reliable. Body: "Welcome to Qlass AI Tutor, {{1}}!
+# {{3}} has enabled your AI Tutor access, and we've added ₹{{2}} in free AI
+# credits [...]" — {{1}}=name, {{2}}=credit amount, {{3}}=school/centre name.
+REGISTRATION_TEMPLATE_NAME = "student_signup_activation_v2"
+
+# Shown as {{3}} in REGISTRATION_TEMPLATE_NAME for a student with no school
+# link (the generic Qlass Direct pool has no school to credit as "enabler").
+QLASS_DIRECT_TEMPLATE_LABEL = "Qlass"
 
 # Unlocked, matching app.routers.whatsapp._create_new_student's reasoning —
 # a prospective student landing on the public signup page is the same
@@ -55,6 +65,7 @@ class RegisterRequest(BaseModel):
     phone: str = Field(max_length=20)
     school: str | None = Field(default=None, max_length=200)
     student_class: str | None = Field(default=None, max_length=50)
+    referral_code: str | None = Field(default=None, max_length=20)
 
 
 class VerifyRegisterRequest(RegisterRequest):
@@ -155,9 +166,15 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
     async with student_lock(phone):
         existing = db.query(Student).filter(Student.phone == phone, Student.is_staff_profile.is_(False)).first()
         if existing:
-            return {"success": True, "already_registered": True}
+            # OTP for this phone was just verified above, so it's safe to
+            # log them straight in too — matches the new-signup path below,
+            # which lands the student in their portal rather than just a
+            # static "check WhatsApp" message.
+            token = create_student_access_token(existing.id)
+            return {"success": True, "already_registered": True, "access_token": token}
 
         centre_id = tenancy.get_qlass_direct_centre_id(db)
+        centre_name = QLASS_DIRECT_TEMPLATE_LABEL
         # A student who came through a SPECIFIC school's own link starts
         # "pending" UNLESS that school has opted into auto-approval (see
         # Centre.auto_approve_students, a school's own choice via
@@ -173,6 +190,7 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
             centre = tenancy.find_centre_by_slug(db, body.school)
             if centre:
                 centre_id = centre.id
+                centre_name = centre.name
                 if centre.auto_approve_students is False:
                     approval_status = "pending"
 
@@ -180,6 +198,7 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
             db, phone, name, centre_id, features=dict(SELF_SIGNUP_FEATURES),
             class_name=(body.student_class or "").strip() or None, approval_status=approval_status,
         )
+        await apply_referral_at_signup(db, student, body.referral_code)
 
     # send_template_message (Wati's singular /api/v1/sendTemplateMessage),
     # not send_broadcast_template — the bulk endpoint silently degrades on
@@ -194,6 +213,7 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
         [
             {"name": "1", "value": student.name},
             {"name": "2", "value": f"{cost_tracker.TRIAL_CREDITS:.0f}"},
+            {"name": "3", "value": centre_name},
         ],
     )
     if not welcome_result.get("sent"):
@@ -201,4 +221,5 @@ async def register_verify(body: VerifyRegisterRequest, db: Session = Depends(get
             "welcome-message send FAILED for new student_id=%s phone=%s: %s",
             student.id, phone, welcome_result.get("reason") or welcome_result.get("response"),
         )
-    return {"success": True, "already_registered": False}
+    token = create_student_access_token(student.id)
+    return {"success": True, "already_registered": False, "access_token": token}

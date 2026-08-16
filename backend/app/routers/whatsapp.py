@@ -43,10 +43,7 @@ from app.services.profile_builder import next_missing_field
 from app.services.rate_limit import is_rate_limited, is_signup_rate_limited, student_lock
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
-from app.services.referral import (
-    generate_referral_code, extract_referral_code, grant_signup_referral_bonus, try_claim_late_referral,
-    REFERRAL_SIGNUP_BONUS,
-)
+from app.services.referral import generate_referral_code, apply_referral_at_signup, try_claim_late_referral
 from app.services.active_profile import (
     classify_profile_routing,
     ProfileRouting,
@@ -280,19 +277,11 @@ async def _create_new_student(db: Session, from_phone: str, message_text: str = 
     # demo that undersells it and risks losing the sale before it starts.
     features = {"voice": True, "ocr": True, "image_generation": True, "documents": True, "youtube_videos": True}
 
-    referred_by_id = None
-    referral_code = extract_referral_code(message_text)
-    if referral_code:
-        referrer = db.query(Student).filter(Student.referral_code == referral_code).first()
-        if referrer:
-            referred_by_id = referrer.id
-
     school_centre = _extract_school_centre_from_greeting(db, message_text)
     centre_id = school_centre.id if school_centre else get_qlass_direct_centre_id(db)
     student = Student(
         name="New Student", phone=from_phone, features=features,
-        centre_id=centre_id, referred_by_id=referred_by_id,
-        board=tenancy.default_board_for_centre(db, centre_id),
+        centre_id=centre_id, board=tenancy.default_board_for_centre(db, centre_id),
     )
     db.add(student)
     db.commit()
@@ -300,27 +289,12 @@ async def _create_new_student(db: Session, from_phone: str, message_text: str = 
     student.referral_code = generate_referral_code(student.id)
     db.commit()
     cost_tracker.add_trial_credits(db, student.id)
-    if referred_by_id:
-        # Signup itself is the first referral milestone — paid immediately,
-        # not gated on any activity (see REFERRAL_MILESTONES for the rest,
-        # which DO require the referred student to actually engage) — capped
-        # per referrer per day (see referral.grant_signup_referral_bonus) so
-        # that lack of an activity gate isn't directly farmable.
-        paid = grant_signup_referral_bonus(db, referred_by_id)
-        # Same silent-credit gap as the day1/2/3/week2/3 milestones (see
-        # evaluate_referral_milestones) — a bonus the referrer never hears
-        # about isn't a good referral experience. Best-effort: shouldn't
-        # block the new student's own signup if this send fails.
-        referrer = db.query(Student).filter(Student.id == referred_by_id).first()
-        if paid and referrer is not None:
-            try:
-                await send_whatsapp_message(
-                    referrer.phone,
-                    f"🎉 Your friend just joined using your referral code! You've earned "
-                    f"₹{REFERRAL_SIGNUP_BONUS:.0f} in bonus AI credits.",
-                )
-            except Exception:
-                pass
+    # Signup itself is the first referral milestone — paid immediately, not
+    # gated on any activity (see REFERRAL_MILESTONES for the rest, which DO
+    # require the referred student to actually engage) — see
+    # referral.apply_referral_at_signup for the capping/notification logic
+    # shared with every other signup path.
+    await apply_referral_at_signup(db, student, message_text)
     return student
 
 
@@ -731,8 +705,9 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # Catches a referral code sent as its own message (e.g. student greets
     # first, then pastes the code separately) rather than only in the very
     # first message ever — see try_claim_late_referral's docstring.
-    if await try_claim_late_referral(db, student, probe_text):
-        await send_whatsapp_message(from_phone, "Got it — your friend's referral code is linked! 🎉")
+    referrer_name = await try_claim_late_referral(db, student, probe_text)
+    if referrer_name:
+        await send_whatsapp_message(from_phone, f"Got it — you're connected to {referrer_name}'s referral! 🎉")
         return
 
     # Tapping "💳 Top Up Credits" (see the credit-exhausted notice below)

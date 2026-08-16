@@ -17,7 +17,7 @@ from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPL
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
 from app.services.rate_limit import is_otp_rate_limited, student_lock
-from app.services.referral import REFERRAL_SIGNUP_BONUS
+from app.services.referral import apply_referral_at_signup
 from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.teacher_auth import verify_password
@@ -224,14 +224,7 @@ async def verify_student_otp(body: VerifyOtpRequest, db: Session = Depends(get_d
     )
     if not student:
         student = create_student_profile(db, phone, body.name or "New Student", get_qlass_direct_centre_id(db))
-        if body.referral_code:
-            referrer = db.query(Student).filter(Student.referral_code == body.referral_code).first()
-            if referrer:
-                student.referred_by_id = referrer.id
-                db.commit()
-                cost_tracker.grant_referral_credit(
-                    db, referrer.id, REFERRAL_SIGNUP_BONUS, note="Referral milestone: signup",
-                )
+        await apply_referral_at_signup(db, student, body.referral_code)
 
     token = create_student_access_token(student.id)
     return {"access_token": token, "student": student_summary(db, student)}

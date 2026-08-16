@@ -43,7 +43,7 @@ async def _register_and_verify(db_session, monkeypatch, request: RegisterRequest
         if sent is not None:
             sent.append((to_phone, template_name, params))
         for param in params:
-            if param["name"] == "1" and template_name != "student_signup_activation":
+            if param["name"] == "1" and template_name != "student_signup_activation_v2":
                 captured_otp["code"] = param["value"]
         return {"sent": True}
 
@@ -83,9 +83,10 @@ async def test_register_creates_student_with_trial_credits_and_full_features(db_
     # message with credits (step 2, after verification).
     assert len(sent) == 2
     welcome_to_phone, welcome_template, welcome_params = sent[1]
-    assert welcome_template == "student_signup_activation"
+    assert welcome_template == "student_signup_activation_v2"
     assert welcome_to_phone == "918888800001"
     assert {"name": "1", "value": "Nikhil"} in welcome_params
+    assert {"name": "3", "value": "Qlass"} in welcome_params
 
 
 async def test_register_links_to_school_via_slug(db_session, monkeypatch):

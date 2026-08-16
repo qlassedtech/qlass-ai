@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { absoluteUrl, publicApi } from "../api";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { absoluteUrl, publicApi, setStudentToken } from "../api";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import ThemeToggle from "../components/ThemeToggle";
 
@@ -352,8 +352,13 @@ function FeatureGrid({ features }: { features: typeof FEATURES }) {
 }
 
 export default function Join() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const schoolSlug = searchParams.get("school") || undefined;
+  // A friend's share link is "/join?ref=QL1008" (see referral.py's shared
+  // code format) — captured once from the URL and carried through both
+  // steps below so it survives the OTP round-trip.
+  const referralCode = searchParams.get("ref") || undefined;
   const [schoolName, setSchoolName] = useState<string | null>(null);
   const [schoolLogo, setSchoolLogo] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -384,7 +389,9 @@ export default function Join() {
     setError(null);
     setLoading(true);
     try {
-      const result = await publicApi.register({ name, phone, school: schoolSlug, student_class: studentClass || undefined });
+      const result = await publicApi.register({
+        name, phone, school: schoolSlug, student_class: studentClass || undefined, referral_code: referralCode,
+      });
       if (!result.success) {
         setError(result.error || "Something went wrong — please try again");
         return;
@@ -409,10 +416,19 @@ export default function Join() {
     setLoading(true);
     try {
       const result = await publicApi.registerVerify({
-        name, phone, school: schoolSlug, student_class: studentClass || undefined, otp,
+        name, phone, school: schoolSlug, student_class: studentClass || undefined, otp, referral_code: referralCode,
       });
       if (!result.success) {
         setError(result.error || "Incorrect code — please try again");
+        return;
+      }
+      // Phone ownership is already proven by the OTP above, so this logs
+      // the student straight into their portal instead of just telling
+      // them to go check WhatsApp — the account they just created/resumed
+      // is ready to use immediately, on the same device.
+      if (result.access_token) {
+        setStudentToken(result.access_token);
+        navigate("/chat");
         return;
       }
       setRegistered({ alreadyRegistered: !!result.already_registered });

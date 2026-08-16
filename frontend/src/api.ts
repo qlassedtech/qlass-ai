@@ -810,7 +810,7 @@ export const publicApi = {
       name: string | null;
       logo_url: string | null;
     }>,
-  register: (data: { name: string; phone: string; school?: string; student_class?: string }) =>
+  register: (data: { name: string; phone: string; school?: string; student_class?: string; referral_code?: string }) =>
     fetch(`${API_BASE}/public/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -821,10 +821,17 @@ export const publicApi = {
       otp_required?: boolean;
       error?: string;
     }>,
-  registerVerify: (data: { name: string; phone: string; school?: string; student_class?: string; otp: string }) =>
+  registerVerify: (
+    data: { name: string; phone: string; school?: string; student_class?: string; otp: string; referral_code?: string },
+  ) =>
     fetch(`${API_BASE}/public/register/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
-    }).then((res) => res.json()) as Promise<{ success: boolean; already_registered?: boolean; error?: string }>,
+    }).then((res) => res.json()) as Promise<{
+      success: boolean;
+      already_registered?: boolean;
+      access_token?: string;
+      error?: string;
+    }>,
 };
