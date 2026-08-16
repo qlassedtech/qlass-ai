@@ -17,17 +17,22 @@ from app.services.whatsapp_client import send_template_message, send_whatsapp_me
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Approved in Wati (Utility category, replacing the original Marketing-
-# category version — Meta throttles/holds Marketing-category delivery to
-# not-yet-opted-in numbers far more aggressively, which is what made the
-# original version's delivery unreliable for brand-new signups) so a
-# brand-new signup who has never messaged the bot is actually guaranteed
-# delivery — WhatsApp's 24h session-window policy requires a pre-approved
-# template to *initiate* contact; a plain sendSessionMessage to a genuinely
-# cold number isn't reliable. Body: "Welcome to Qlass AI Tutor, {{1}}!
-# {{3}} has enabled your AI Tutor access, and we've added ₹{{2}} in free AI
-# credits [...]" — {{1}}=name, {{2}}=credit amount, {{3}}=school/centre name.
-REGISTRATION_TEMPLATE_NAME = "student_signup_activation_v2"
+# v3 replaces v2 — v2 had a "Call Now" voice_call button that errored with
+# Meta's OAuthException #138000 (Calling API not enabled on this WABA); v3
+# drops the button entirely (buttonsType: none). Confirmed via Wati's
+# getMessageTemplates API (customParams sample values: param "2"→"50",
+# param "3"→a school name) rather than a live send — same param order as
+# before, {{1}}=name, {{2}}=credit amount, {{3}}=school/centre name.
+#
+# Still MARKETING category (not the UTILITY category v2 was switched to) —
+# Meta throttles/holds Marketing-category delivery to not-yet-opted-in
+# numbers far more aggressively, which is exactly what made the ORIGINAL
+# (pre-v2) template's delivery unreliable. If delivery problems resurface,
+# this category is the first thing to check for a resubmission. A
+# pre-approved template is required here regardless of category — WhatsApp's
+# 24h session-window policy means a plain sendSessionMessage can't reliably
+# reach a genuinely cold number that's never messaged the bot before.
+REGISTRATION_TEMPLATE_NAME = "student_signup_activation_v3"
 
 # Shown as {{3}} in REGISTRATION_TEMPLATE_NAME for a student with no school
 # link (the generic Qlass Direct pool has no school to credit as "enabler").
