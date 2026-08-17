@@ -507,6 +507,15 @@ async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session 
             )
             db.add(teacher)
             db.commit()
+            # A brand-new, fully-privileged admin account created straight
+            # from an unauthenticated public endpoint is exactly the kind
+            # of high-blast-radius action AuditLog exists for (see its own
+            # docstring) — this was missing even after the OTP requirement
+            # was added.
+            audit_log.record(
+                db, teacher.id, "register_school", "centre", centre.id,
+                detail=f"Self-registered via {'google' if google_email else 'password'}",
+            )
 
     # Self-registered schools start "prospect" (not the model's normal
     # "active" default) specifically so they're visibly distinct from a
@@ -682,6 +691,7 @@ async def approve_student(
         )
     except Exception:
         pass
+    audit_log.record(db, teacher.id, "approve_student", "student", student.id)
     return _student_to_dict(db, student)
 
 
