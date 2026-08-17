@@ -1,6 +1,7 @@
 import csv
 import io
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -64,6 +65,15 @@ MIN_PASSWORD_LENGTH = 6
 def _require_valid_password(password: str) -> None:
     if len(password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(status_code=400, detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+
+
+@asynccontextmanager
+async def _null_lock():
+    """No-op stand-in for student_lock's `async with` shape, for a caller
+    that only sometimes needs a second, conditional lock (see
+    register_school_verify's email lock, only taken when a Google email is
+    actually present)."""
+    yield
 
 
 # Bulk roster/teacher upload — see _rows_from_roster_upload and the
@@ -404,47 +414,60 @@ async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session 
     else:
         _require_valid_password(body.password)
 
-    # Locked so two near-simultaneous verify calls for the same phone can't
-    # both pass this check before either commits — same TOCTOU shape fixed
+    # Locked so two near-simultaneous verify calls for the same phone (or,
+    # for a Google-linked admin, the same email) can't both pass their
+    # uniqueness check before either commits — same TOCTOU shape fixed
     # elsewhere for student signup (see app.services.rate_limit.student_lock's
-    # other callers).
+    # other callers). The email lock is nested INSIDE the phone lock, always
+    # in that order, so two concurrent requests can never deadlock against
+    # each other trying to acquire the same pair in reverse order. Two
+    # different phone numbers registering with the SAME Google account was a
+    # real gap before this: the phone lock alone never serialized that pair,
+    # so the email check above (query-then-raise, no lock) could pass for
+    # both concurrent requests, creating two Teacher rows with the same email.
     async with student_lock(admin_phone):
         if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
             raise HTTPException(status_code=409, detail="An account with this phone number already exists")
 
-        # Confirmed live: this endpoint had zero identity verification — anyone
-        # could register a school under a name matching (or closely mimicking) a
-        # real partner school's, then have it silently resolved as that school by
-        # find_centre_by_slug (used by the public landing page and WhatsApp
-        # first-contact school-name matching), intercepting signups meant for
-        # the real school.
-        #
-        # Deliberately NOT a hard block, even on name+city together — both a
-        # school name (e.g. "Delhi Public School", "Saraswati Vidya Mandir")
-        # AND a city name can genuinely recur across unrelated parts of India
-        # with no relationship to each other, so any string-match rule here
-        # risks locking out a real school on a false positive, which is worse
-        # than the spoofing risk it's meant to catch. Instead this is surfaced
-        # as a flag on the review notification below — a human (who can ask
-        # "which district, which board, is this really the same school?")
-        # makes the call, not a string comparison.
-        name_matches = (
-            db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
-        )
+        async with student_lock(f"school_email:{google_email}") if google_email else _null_lock():
+            if google_email and db.query(Teacher).filter(Teacher.email == google_email).first():
+                raise HTTPException(status_code=409, detail="An account with this Google email already exists")
 
-        centre = Centre(name=body.school_name, city=body.city, board=body.board, sales_status="prospect")
-        db.add(centre)
-        db.commit()
-        db.refresh(centre)
-        school_billing.add_trial_credits(db, centre.id)
+            # Confirmed live: this endpoint had zero identity verification —
+            # anyone could register a school under a name matching (or
+            # closely mimicking) a real partner school's, then have it
+            # silently resolved as that school by find_centre_by_slug (used
+            # by the public landing page and WhatsApp first-contact
+            # school-name matching), intercepting signups meant for the real
+            # school.
+            #
+            # Deliberately NOT a hard block, even on name+city together —
+            # both a school name (e.g. "Delhi Public School", "Saraswati
+            # Vidya Mandir") AND a city name can genuinely recur across
+            # unrelated parts of India with no relationship to each other,
+            # so any string-match rule here risks locking out a real school
+            # on a false positive, which is worse than the spoofing risk
+            # it's meant to catch. Instead this is surfaced as a flag on the
+            # review notification below — a human (who can ask "which
+            # district, which board, is this really the same school?")
+            # makes the call, not a string comparison.
+            name_matches = (
+                db.query(Centre).filter(func.lower(Centre.name) == body.school_name.strip().lower()).all()
+            )
 
-        teacher = Teacher(
-            name=body.admin_name, phone=admin_phone, email=google_email,
-            password_hash=hash_password(body.password) if body.password else None,
-            role="admin", centre_id=centre.id,
-        )
-        db.add(teacher)
-        db.commit()
+            centre = Centre(name=body.school_name, city=body.city, board=body.board, sales_status="prospect")
+            db.add(centre)
+            db.commit()
+            db.refresh(centre)
+            school_billing.add_trial_credits(db, centre.id)
+
+            teacher = Teacher(
+                name=body.admin_name, phone=admin_phone, email=google_email,
+                password_hash=hash_password(body.password) if body.password else None,
+                role="admin", centre_id=centre.id,
+            )
+            db.add(teacher)
+            db.commit()
 
     # Self-registered schools start "prospect" (not the model's normal
     # "active" default) specifically so they're visibly distinct from a

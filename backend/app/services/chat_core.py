@@ -210,6 +210,25 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     message (voice/photo/document input must already be
     transcribed/OCR'd/extracted by the caller before this point).
     """
+    # A student who self-registered through a school that reviews signups
+    # manually (Centre.auto_approve_students=False) starts "pending" until
+    # a teacher confirms them (see app.routers.public.register_verify) —
+    # but that status previously gated nothing at all past the teacher's
+    # roster-review screen: the student could already chat, burn credits,
+    # and use every feature immediately, on WhatsApp or the web portal,
+    # identically to an approved student. Checked here — the one place
+    # every channel funnels through — so approval is actually required
+    # before "pending" means anything, rather than being purely cosmetic.
+    # No chat_history/billing side effects for a blocked turn.
+    if student.approval_status == "pending":
+        return ChatTurnResult(
+            reply_text=(
+                "Your registration is still awaiting confirmation from your school — a teacher needs to "
+                "approve you before you can start chatting. This is usually quick, so please check back "
+                "again soon!"
+            ),
+        )
+
     message_text = message_text[:MAX_MESSAGE_CHARS]
     # Computed BEFORE this message is saved, so "days since last message"
     # reflects the prior session, not this one — otherwise it would always
