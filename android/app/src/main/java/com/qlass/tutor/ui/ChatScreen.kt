@@ -1,5 +1,6 @@
 package com.qlass.tutor.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +19,8 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +28,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,22 +67,41 @@ private fun formatMessage(text: String) = buildAnnotatedString {
     append(text.substring(lastEnd))
 }
 
+// Mirrors backend TUTOR_LEVEL_LABELS (app/services/chat_core.py) — kept in
+// sync manually, same as the web app's LevelSwitcher component.
+private val LEVEL_LABELS = mapOf(
+    1 to "Level 1 — fastest, lightest on credits",
+    2 to "Level 2 — quick and well-formatted",
+    3 to "Level 3 — more detailed explanations",
+    4 to "Level 4 — most thorough, uses the most credits",
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     state: UiState,
     onSend: (String) -> Unit,
     onLogout: () -> Unit,
+    onChangeLevel: (Int) -> Unit,
     onPickImage: () -> Unit,
     onPickDocument: () -> Unit,
     onToggleRecording: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
+    var showLevelDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.messages.size, state.sending) {
         val lastIndex = state.messages.size - 1 + if (state.sending) 1 else 0
         if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+    }
+
+    if (showLevelDialog) {
+        LevelPickerDialog(
+            currentLevel = state.tutorLevel,
+            onSelect = { level -> onChangeLevel(level); showLevelDialog = false },
+            onDismiss = { showLevelDialog = false },
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -91,7 +114,16 @@ fun ChatScreen(
                     }
                 }
             },
-            actions = { TextButton(onClick = onLogout) { Text("Log out") } },
+            actions = {
+                // Persistent header control — the app equivalent of
+                // WhatsApp's "🎓 Change Level" menu button and typed
+                // "level N" command, both landing on the same
+                // student.tutor_level write server-side.
+                IconButton(onClick = { showLevelDialog = true }) {
+                    Icon(Icons.Filled.Tune, contentDescription = "Change tutor level")
+                }
+                TextButton(onClick = onLogout) { Text("Log out") }
+            },
             colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface,
             ),
@@ -175,6 +207,28 @@ fun ChatScreen(
             }
         }
     }
+}
+
+@Composable
+private fun LevelPickerDialog(currentLevel: Int?, onSelect: (Int) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Change tutor level") },
+        text = {
+            Column {
+                LEVEL_LABELS.forEach { (level, label) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onSelect(level) }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = level == currentLevel, onClick = { onSelect(level) })
+                        Text(label, modifier = Modifier.padding(start = 4.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 @Composable

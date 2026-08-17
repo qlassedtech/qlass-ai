@@ -12,6 +12,7 @@ data class StudentSummary(
     val focus_topic: String?,
     val credit_balance: Double,
     val referral_code: String?,
+    val tutor_level: Int = 4,
 )
 data class VerifyOtpResponse(val access_token: String, val student: StudentSummary)
 
@@ -37,3 +38,5 @@ data class ProgressResponse(
 data class CreditHistoryEntry(val amount: Double, val service: String?, val note: String?, val created_at: String)
 
 data class DeviceTokenRequest(val token: String)
+
+data class SetTutorLevelRequest(val level: Int)

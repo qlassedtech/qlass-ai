@@ -10,6 +10,7 @@ import com.qlass.tutor.network.CreditHistoryEntry
 import com.qlass.tutor.network.DeviceTokenRequest
 import com.qlass.tutor.network.ProgressResponse
 import com.qlass.tutor.network.SendMessageResponse
+import com.qlass.tutor.network.SetTutorLevelRequest
 import com.qlass.tutor.network.VerifyOtpRequest
 import com.qlass.tutor.network.detailMessage
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +39,7 @@ data class UiState(
     val loggedIn: Boolean = false,
     val studentName: String? = null,
     val creditBalance: Double? = null,
+    val tutorLevel: Int? = null,
     val messages: List<ChatMessage> = emptyList(),
     val sending: Boolean = false,
     val sendingLabel: String = "Thinking…",
@@ -106,6 +108,7 @@ class TutorViewModel(private val sessionStore: SessionStore) : ViewModel() {
                 _state.value = _state.value.copy(
                     loading = false, loggedIn = true,
                     studentName = result.student.name, creditBalance = result.student.credit_balance,
+                    tutorLevel = result.student.tutor_level,
                 )
                 loadHistory()
             } catch (e: HttpException) {
@@ -121,9 +124,25 @@ class TutorViewModel(private val sessionStore: SessionStore) : ViewModel() {
         viewModelScope.launch {
             try {
                 val me = ApiClient.service.me("Bearer $auth")
-                _state.value = _state.value.copy(studentName = me.name, creditBalance = me.credit_balance)
+                _state.value = _state.value.copy(
+                    studentName = me.name, creditBalance = me.credit_balance, tutorLevel = me.tutor_level,
+                )
             } catch (_: Exception) {
                 // Chat/progress still work from cache; balance just stays unknown until a message succeeds.
+            }
+        }
+    }
+
+    // Header-control equivalent of typing "level N" on WhatsApp — see
+    // ChatScreen's level picker dialog.
+    fun changeLevel(level: Int) {
+        val auth = token ?: return
+        viewModelScope.launch {
+            try {
+                val updated = ApiClient.service.setTutorLevel("Bearer $auth", SetTutorLevelRequest(level))
+                _state.value = _state.value.copy(tutorLevel = updated.tutor_level)
+            } catch (_: Exception) {
+                // Silent — the dialog just stays open on the old value; not worth a disruptive error for a settings tweak.
             }
         }
     }

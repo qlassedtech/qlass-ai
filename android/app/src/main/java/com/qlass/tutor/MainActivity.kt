@@ -135,6 +135,7 @@ class MainActivity : ComponentActivity() {
                                         state = state,
                                         onSend = viewModel::sendMessage,
                                         onLogout = viewModel::logout,
+                                        onChangeLevel = viewModel::changeLevel,
                                         onPickImage = {
                                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                                                 val file = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")

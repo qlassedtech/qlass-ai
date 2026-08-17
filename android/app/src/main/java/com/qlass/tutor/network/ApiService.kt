@@ -36,6 +36,12 @@ interface ApiService {
     @POST("/student-app/device-token")
     suspend fun registerDeviceToken(@Header("Authorization") auth: String, @Body body: DeviceTokenRequest)
 
+    // Structured level switch for the header control — the WhatsApp/typed-
+    // command equivalent is "level N", both resolve to the exact same
+    // student.tutor_level write server-side.
+    @POST("/student-app/tutor-level")
+    suspend fun setTutorLevel(@Header("Authorization") auth: String, @Body body: SetTutorLevelRequest): StudentSummary
+
     // Same OCR/STT/document pipeline WhatsApp uses server-side (see backend
     // app.routers.student_app) — response shape matches sendMessage exactly.
     @Multipart
