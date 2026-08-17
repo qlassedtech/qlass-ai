@@ -33,12 +33,27 @@ export default function Register() {
   const [otp, setOtp] = useState("");
   const navigate = useNavigate();
 
+  async function finishRegistration(enteredOtp?: string) {
+    const { access_token } = await api.registerSchoolVerify({
+      school_name: schoolName,
+      city: city || undefined,
+      board: board || undefined,
+      admin_name: adminName,
+      admin_phone: adminPhone,
+      password: googleIdToken ? undefined : password,
+      google_id_token: googleIdToken || undefined,
+      otp: enteredOtp,
+    });
+    setToken(access_token);
+    navigate("/students");
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      await api.registerSchool({
+      const { otp_required } = await api.registerSchool({
         school_name: schoolName,
         city: city || undefined,
         board: board || undefined,
@@ -47,9 +62,15 @@ export default function Register() {
         password: googleIdToken ? undefined : password,
         google_id_token: googleIdToken || undefined,
       });
-      setOtpRequired(true);
+      if (otp_required) {
+        setOtpRequired(true);
+        return;
+      }
+      // Google sign-in, or a number that isn't on WhatsApp — no code to
+      // enter, step 2 can run immediately.
+      await finishRegistration();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "We couldn't send a verification code — please try again");
+      setError(err instanceof Error ? err.message : "We couldn't register your school — please try again");
     } finally {
       setLoading(false);
     }
@@ -60,18 +81,7 @@ export default function Register() {
     setError(null);
     setLoading(true);
     try {
-      const { access_token } = await api.registerSchoolVerify({
-        school_name: schoolName,
-        city: city || undefined,
-        board: board || undefined,
-        admin_name: adminName,
-        admin_phone: adminPhone,
-        password: googleIdToken ? undefined : password,
-        google_id_token: googleIdToken || undefined,
-        otp,
-      });
-      setToken(access_token);
-      navigate("/students");
+      await finishRegistration(otp);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Incorrect code — please try again");
     } finally {

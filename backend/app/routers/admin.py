@@ -22,7 +22,7 @@ from app.services.escalation import QLASS_SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHO
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
-from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
+from app.services.otp import generate_and_store_otp, verify_otp, mark_otp_optional, consume_otp_optional, LOGIN_OTP_TEMPLATE_NAME
 from app.services.google_auth import GoogleAuthError, verify_google_id_token
 from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
@@ -350,18 +350,31 @@ class RegisterSchoolRequest(BaseModel):
 @router.post("/auth/register-school")
 async def register_school(body: RegisterSchoolRequest, request: Request, db: Session = Depends(get_db)):
     """
-    Step 1 of self-serve school registration — sends a WhatsApp OTP to the
-    admin's phone; does NOT create the school or admin account yet (see
-    /auth/register-school/verify for that).
-
-    Confirmed live this had NO identity verification of any kind — every
-    other account-creation endpoint (/public/register, WhatsApp cold-start)
-    requires OTP-proven phone ownership before an account exists, but this
-    one created a fully-privileged school-admin account for ANY phone
-    number on the strength of the request body alone, with zero rate
-    limiting either. Someone could register a school admin account keyed to
-    a real person's phone number without them ever proving — or even
+    Step 1 of self-serve school registration — proves identity before the
+    school/admin account is created (see /auth/register-school/verify for
+    that), the same way every other account-creation endpoint does
+    (/public/register, WhatsApp cold-start). Confirmed live this previously
+    had NO identity verification of any kind, on top of no rate limiting —
+    anyone could create a fully-privileged school-admin account keyed to a
+    real person's phone number without them ever proving — or even
     knowing — they control it.
+
+    Three registration methods, matched to three login methods
+    (/auth/login, /auth/google-login, /auth/request-teacher-otp — see each
+    for the login-time equivalent), all valid in parallel rather than one
+    being required:
+      - Google: email_verified from Google IS the proof — no WhatsApp OTP
+        needed at all.
+      - Password + a WhatsApp-reachable number: WhatsApp OTP proves it.
+      - Password + a number that ISN'T on WhatsApp: falls back to
+        password-only (see the invalid_number branch below) — WhatsApp OTP
+        genuinely isn't possible for that number, and password is real
+        proof on its own for that login method, matching how the SAME
+        `phone` field already doubles as both the password-login identity
+        and the OTP-login identity once a number *is* WhatsApp-reachable
+        (no separate whatsapp_phone column needed here, unlike Student's,
+        which solves a different problem — routing an inbound message from
+        an alternate number, not registration-time proof).
     """
     client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
     if await is_signup_rate_limited(client_ip):
@@ -369,17 +382,30 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
     admin_phone = normalize_phone(body.admin_phone)
     if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
         raise HTTPException(status_code=409, detail="An account with this phone number already exists")
+
+    if body.google_id_token:
+        # Google's own email_verified check (re-verified independently at
+        # /verify, not trusted from here) is the identity proof for this
+        # path — no WhatsApp OTP needed or sent.
+        return {"otp_required": False}
+
     if await is_otp_rate_limited("register_school_request", admin_phone):
         raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
     otp = await generate_and_store_otp("register_school", admin_phone)
     result = await send_template_message(admin_phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
-    if not result.get("sent"):
-        raise HTTPException(status_code=502, detail="Couldn't send the verification code — please try again shortly")
-    return {"otp_required": True}
+    if result.get("sent"):
+        return {"otp_required": True}
+    if result.get("invalid_number"):
+        # Genuinely not a WhatsApp number — record server-side that /verify
+        # may skip OTP for this exact phone, rather than trusting the
+        # client's own claim (see mark_otp_optional's docstring for why).
+        await mark_otp_optional("register_school", admin_phone)
+        return {"otp_required": False}
+    raise HTTPException(status_code=502, detail="Couldn't send the verification code — please try again shortly")
 
 
 class VerifyRegisterSchoolRequest(RegisterSchoolRequest):
-    otp: str
+    otp: str | None = None
 
 
 @router.post("/auth/register-school/verify")
@@ -393,15 +419,15 @@ async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session 
     /admin/teachers), not through this endpoint again.
     """
     admin_phone = normalize_phone(body.admin_phone)
-    if await is_otp_rate_limited("register_school_verify", admin_phone):
-        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
-    if not await verify_otp("register_school", admin_phone, body.otp):
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
-
     if bool(body.password) == bool(body.google_id_token):
         raise HTTPException(status_code=400, detail="Provide exactly one of password or google_id_token")
+
     google_email = None
     if body.google_id_token:
+        # Google's own signature IS the identity proof for this path — no
+        # WhatsApp OTP required or checked, regardless of what body.otp
+        # contains (matches /auth/register-school's step 1, which never
+        # sends an OTP at all when google_id_token is present).
         try:
             payload = verify_google_id_token(body.google_id_token)
         except GoogleAuthError as exc:
@@ -413,6 +439,19 @@ async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session 
             raise HTTPException(status_code=409, detail="An account with this Google email already exists")
     else:
         _require_valid_password(body.password)
+        if await is_otp_rate_limited("register_school_verify", admin_phone):
+            raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+        # A password registration either verifies the OTP that step 1 sent
+        # (WhatsApp-reachable number), or — only if step 1 itself already
+        # determined this exact phone isn't WhatsApp-reachable and recorded
+        # that server-side (see mark_otp_optional) — proceeds on password
+        # alone. An attacker can't just omit body.otp to skip verification
+        # for a real, WhatsApp-reachable number they don't control: that
+        # only works if this exact phone has a genuine, still-fresh
+        # invalid_number result on file from step 1.
+        otp_verified = bool(body.otp) and await verify_otp("register_school", admin_phone, body.otp)
+        if not otp_verified and not await consume_otp_optional("register_school", admin_phone):
+            raise HTTPException(status_code=400, detail="Invalid or expired code")
 
     # Locked so two near-simultaneous verify calls for the same phone (or,
     # for a Google-linked admin, the same email) can't both pass their

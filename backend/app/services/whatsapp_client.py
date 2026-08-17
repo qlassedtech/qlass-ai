@@ -336,7 +336,17 @@ async def send_template_message(to_phone: str, template_name: str, params: list[
             resp.raise_for_status()
             data = resp.json()
             if not data.get("validWhatsAppNumber", True):
-                return {"sent": False, "reason": f"Wati reports this isn't a valid WhatsApp number: {to_phone}"}
+                # invalid_number distinguishes this from every other failure
+                # reason below — a caller that has a non-WhatsApp fallback
+                # (e.g. app.routers.admin.register_school, which lets a
+                # school admin register with password alone when their
+                # number genuinely isn't on WhatsApp) checks this flag
+                # rather than string-matching `reason`, which is free to
+                # change wording without silently breaking that check.
+                return {
+                    "sent": False, "invalid_number": True,
+                    "reason": f"Wati reports this isn't a valid WhatsApp number: {to_phone}",
+                }
             # Confirmed live: Wati can return HTTP 200 with "result": false in
             # the body (e.g. a blank/invalid template parameter) rather than
             # an HTTP error status — raise_for_status() above only catches

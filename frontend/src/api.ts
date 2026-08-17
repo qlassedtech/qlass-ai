@@ -457,12 +457,15 @@ export const api = {
     password?: string; google_id_token?: string;
   }) =>
     request("/auth/register-school", { method: "POST", body: JSON.stringify(data) }) as Promise<{ otp_required: boolean }>,
-  // Step 2 — creates the school + admin account, only after the OTP above
-  // is confirmed. Exactly one of password/google_id_token — see
-  // RegisterSchoolRequest's own docstring on the backend for why both exist.
+  // Step 2 — creates the school + admin account. `otp` is omitted when
+  // step 1 returned otp_required: false (Google sign-in, or a number
+  // that's genuinely not on WhatsApp — see register_school's docstring on
+  // the backend for the three parallel registration methods). Exactly one
+  // of password/google_id_token — see RegisterSchoolRequest's own
+  // docstring on the backend for why both exist.
   registerSchoolVerify: (data: {
     school_name: string; city?: string; board?: string; admin_name: string; admin_phone: string;
-    password?: string; google_id_token?: string; otp: string;
+    password?: string; google_id_token?: string; otp?: string;
   }) =>
     request("/auth/register-school/verify", { method: "POST", body: JSON.stringify(data) }) as Promise<{
       access_token: string;

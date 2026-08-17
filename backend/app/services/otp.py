@@ -48,3 +48,42 @@ async def verify_otp(purpose: str, phone: str, otp: str) -> bool:
     else:
         await _redis.delete(key)
     return True
+
+
+def _optional_key(purpose: str, phone: str) -> str:
+    return f"otp-optional:{purpose}:{phone}"
+
+
+async def mark_otp_optional(purpose: str, phone: str) -> None:
+    """
+    Records, server-side, that this phone/purpose combo doesn't need OTP
+    verification — used when a registration flow tried to send a WhatsApp
+    OTP and Wati reported the number genuinely isn't on WhatsApp (see
+    app.services.whatsapp_client.send_template_message's invalid_number
+    flag), so a password-only registration should still be allowed to
+    proceed. Consumed by consume_otp_optional at the actual verify step,
+    rather than trusting the client's own claim that no OTP was sent — an
+    attacker submitting a real, WhatsApp-reachable number they don't
+    control could otherwise just omit the otp field and claim it wasn't
+    needed.
+    """
+    key = _optional_key(purpose, phone)
+    if _redis is None:
+        _fallback_store[key] = "1"
+    else:
+        await _redis.set(key, "1", ex=OTP_TTL_SECONDS)
+
+
+async def consume_otp_optional(purpose: str, phone: str) -> bool:
+    """Returns whether mark_otp_optional was called for this phone/purpose
+    (and hasn't expired), clearing it so it can't be reused for a second
+    registration attempt."""
+    key = _optional_key(purpose, phone)
+    stored = _fallback_store.get(key) if _redis is None else await _redis.get(key)
+    if not stored:
+        return False
+    if _redis is None:
+        _fallback_store.pop(key, None)
+    else:
+        await _redis.delete(key)
+    return True
