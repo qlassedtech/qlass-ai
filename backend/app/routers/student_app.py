@@ -21,6 +21,7 @@ from app.services.referral import apply_referral_at_signup
 from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.teacher_auth import verify_password
+from app.services.chat_core import PENDING_APPROVAL_REPLY
 from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
 from app.services.whatsapp_client import send_template_message
@@ -336,6 +337,20 @@ class SendMessageRequest(BaseModel):
     message: str
 
 
+def _pending_approval_response(db: Session, student: Student) -> dict | None:
+    """
+    Short-circuits BEFORE voice/photo/document transcription spends real
+    money (Sarvam STT / Azure OCR calls) — process_message has its own copy
+    of this same check (see chat_core.PENDING_APPROVAL_REPLY), but that
+    runs too late for these three upload endpoints, which already
+    transcribe/OCR/extract the file before ever calling it. Returns None
+    (proceed normally) once the student is approved.
+    """
+    if student.approval_status != "pending":
+        return None
+    return {"reply": PENDING_APPROVAL_REPLY, "credit_balance": cost_tracker.get_balance(db, student.id)}
+
+
 async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
     """
     Shared by every input channel this app supports (typed, photo, voice
@@ -426,6 +441,8 @@ async def send_image_message(
     """
     if not student.has_feature("ocr"):
         raise HTTPException(status_code=403, detail="Photo questions aren't available on your account yet")
+    if (pending := _pending_approval_response(db, student)) is not None:
+        return pending
     image_bytes = await file.read()
     message_text = await extract_text_from_image(image_bytes)
     if not message_text:
@@ -441,6 +458,8 @@ async def send_voice_message(
     """Same Sarvam STT call WhatsApp uses (app.services.sarvam_client) for a recorded voice note."""
     if not student.has_feature("voice"):
         raise HTTPException(status_code=403, detail="Voice questions aren't available on your account yet")
+    if (pending := _pending_approval_response(db, student)) is not None:
+        return pending
     audio_bytes = await file.read()
     message_text = await transcribe_audio(audio_bytes, filename=file.filename or "voice_note.m4a")
     if not message_text:
@@ -468,6 +487,8 @@ async def send_document_message(
     """
     if not student.has_feature("documents"):
         raise HTTPException(status_code=403, detail="PDF/Word file questions aren't available on your account yet")
+    if (pending := _pending_approval_response(db, student)) is not None:
+        return pending
     document_bytes = await file.read()
     message_text = extract_text_from_document(document_bytes, file.filename or "")
     if not message_text:

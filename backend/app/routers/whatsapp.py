@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal
 from app.models.core import Centre, Student, Teacher, ProcessedWebhookMessage
-from app.services.chat_core import process_message, MENU_BUTTON_TO_COMMAND
+from app.services.chat_core import process_message, MENU_BUTTON_TO_COMMAND, PENDING_APPROVAL_REPLY
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -793,6 +793,19 @@ async def _handle_message(db: Session, payload: dict) -> None:
         if know_more_reply:
             await send_whatsapp_message(from_phone, know_more_reply)
             return
+
+    # Checked here — after the always-allowed short-circuits above (top-up,
+    # talk-to-teacher, call-qlass, stop-nudges, know-more all still work
+    # while pending; talking to a teacher is genuinely useful for a student
+    # trying to get approved faster) but BEFORE any billing gate or the
+    # voice/image/document download+transcription below, which costs real
+    # money — process_message has its own copy of this same check, but that
+    # runs too late to stop a pending student's photo/voice note from
+    # already being transcribed (billed) for an answer that was always
+    # going to be blocked anyway. See chat_core.PENDING_APPROVAL_REPLY.
+    if student.approval_status == "pending":
+        await send_whatsapp_message(from_phone, PENDING_APPROVAL_REPLY)
+        return
 
     # A school marked "churned" in the sales pipeline (see
     # app.services.sales) is no longer a paying customer — its students

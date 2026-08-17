@@ -66,6 +66,20 @@ logger = logging.getLogger(__name__)
 
 tutor_agent = TutorAgent()
 
+# A student awaiting teacher approval (see the pending check in
+# process_message below) — also used by app.routers.whatsapp and
+# app.routers.student_app to short-circuit BEFORE spending real money on
+# voice/photo/document transcription, which happens in those router files
+# ahead of ever calling process_message (see this module's own docstring
+# on why that split exists). Checking only inside process_message left a
+# real gap: a pending student's photo/voice note would still get
+# transcribed (billed) even though the resulting text was always going to
+# hit this exact block anyway.
+PENDING_APPROVAL_REPLY = (
+    "Your registration is still awaiting confirmation from your school — a teacher needs to approve you "
+    "before you can start chatting. This is usually quick, so please check back again soon!"
+)
+
 HISTORY_TURNS = 12  # ~6 back-and-forth exchanges of prior context
 # No caller-side cap existed on a single turn's message_text before it hit
 # classify_intent + the main tutoring LLM call — a WhatsApp text message is
@@ -219,15 +233,13 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # identically to an approved student. Checked here — the one place
     # every channel funnels through — so approval is actually required
     # before "pending" means anything, rather than being purely cosmetic.
-    # No chat_history/billing side effects for a blocked turn.
+    # No chat_history/billing side effects for a blocked turn. Belt-and-
+    # suspenders with the router-level checks (see PENDING_APPROVAL_REPLY's
+    # own docstring) — those catch it earlier for voice/photo/document
+    # messages specifically to avoid wasted transcription spend, but every
+    # text message still funnels through here regardless.
     if student.approval_status == "pending":
-        return ChatTurnResult(
-            reply_text=(
-                "Your registration is still awaiting confirmation from your school — a teacher needs to "
-                "approve you before you can start chatting. This is usually quick, so please check back "
-                "again soon!"
-            ),
-        )
+        return ChatTurnResult(reply_text=PENDING_APPROVAL_REPLY)
 
     message_text = message_text[:MAX_MESSAGE_CHARS]
     # Computed BEFORE this message is saved, so "days since last message"

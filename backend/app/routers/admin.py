@@ -663,12 +663,25 @@ def list_pending_students(db: Session = Depends(get_db), teacher: Teacher = Depe
 
 
 @router.post("/admin/students/{student_id}/approve")
-def approve_student(
+async def approve_student(
     student_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
 ):
     student = _get_scoped_student_or_404(db, teacher, student_id)
     student.approval_status = "approved"
     db.commit()
+    # Chat is actually blocked while pending (see chat_core.process_message)
+    # — before that gate existed, this notification didn't matter since a
+    # pending student could already chat regardless of review status.
+    # Now, without this, an approved student has no way to know they've
+    # been cleared except by randomly retrying. Best-effort: a missed
+    # notification shouldn't fail the approval itself.
+    try:
+        await send_whatsapp_message(
+            student.phone,
+            f"🎉 Good news — you've been approved! Reply here anytime with a question to start learning.",
+        )
+    except Exception:
+        pass
     return _student_to_dict(db, student)
 
 
