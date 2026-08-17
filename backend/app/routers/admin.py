@@ -629,8 +629,110 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
 def me(teacher: Teacher = Depends(get_current_teacher)):
     return {
         "id": teacher.id, "name": teacher.name, "role": teacher.role, "phone": teacher.phone,
+        "email": teacher.email, "phone_verified": teacher.phone_verified,
         "photo_url": teacher.photo_url, "centre_id": teacher.centre_id, "organization_id": teacher.organization_id,
     }
+
+
+class ChangePhoneRequest(BaseModel):
+    new_phone: str = Field(max_length=20)
+
+
+@router.post("/admin/me/change-phone")
+async def request_change_phone(
+    body: ChangePhoneRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Step 1 of changing a teacher/admin's own login phone — sends a WhatsApp
+    OTP to the NEW number to prove they actually control it before it
+    replaces the old one (see /admin/me/change-phone/verify for that).
+    Same two-step shape and same non-WhatsApp fallback as
+    register_school_verify — a number Wati confirms genuinely isn't on
+    WhatsApp still gets changed, just without OTP proof, since nobody can
+    receive a code there anyway.
+
+    Being authenticated (a valid token for THIS teacher) is not, on its
+    own, proof of the NEW number — a stolen token could otherwise be used
+    to move the account onto an attacker-controlled phone, which then
+    unlocks WhatsApp-OTP login as a second, more durable way back in even
+    after the stolen token expires or is revoked.
+    """
+    new_phone = normalize_phone(body.new_phone)
+    if db.query(Teacher).filter(Teacher.phone == new_phone, Teacher.id != teacher.id).first():
+        raise HTTPException(status_code=409, detail="An account with this phone number already exists")
+    if await is_otp_rate_limited("change_teacher_phone_request", new_phone):
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
+    otp = await generate_and_store_otp("change_teacher_phone", new_phone)
+    result = await send_template_message(new_phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
+    if result.get("sent"):
+        return {"otp_required": True}
+    if result.get("invalid_number"):
+        await mark_otp_optional("change_teacher_phone", new_phone)
+        return {"otp_required": False}
+    raise HTTPException(status_code=502, detail="Couldn't send the verification code — please try again shortly")
+
+
+class VerifyChangePhoneRequest(BaseModel):
+    new_phone: str = Field(max_length=20)
+    otp: str | None = None
+
+
+@router.post("/admin/me/change-phone/verify")
+async def verify_change_phone(
+    body: VerifyChangePhoneRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    new_phone = normalize_phone(body.new_phone)
+    if await is_otp_rate_limited("change_teacher_phone_verify", new_phone):
+        raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
+    otp_verified = bool(body.otp) and await verify_otp("change_teacher_phone", new_phone, body.otp)
+    if not otp_verified and not await consume_otp_optional("change_teacher_phone", new_phone):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    async with student_lock(new_phone):
+        if db.query(Teacher).filter(Teacher.phone == new_phone, Teacher.id != teacher.id).first():
+            raise HTTPException(status_code=409, detail="An account with this phone number already exists")
+        teacher.phone = new_phone
+        # Always True here — unlike Google registration, there's no path
+        # into this endpoint that leaves the number unverified: either the
+        # OTP was genuinely checked, or Wati itself already confirmed the
+        # number isn't on WhatsApp (see mark_otp_optional), which poses no
+        # OTP-login hijack risk either way.
+        teacher.phone_verified = True
+        db.commit()
+    audit_log.record(db, teacher.id, "change_phone", "teacher", teacher.id)
+    return {"phone": teacher.phone}
+
+
+class ChangeEmailRequest(BaseModel):
+    google_id_token: str
+
+
+@router.post("/admin/me/change-email")
+async def change_email(
+    body: ChangeEmailRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Links (or re-links) a Google account as this teacher/admin's login
+    email — Google's own email_verified claim is the identity proof, same
+    as at registration, so this is a single step, not a send-then-verify
+    pair. Deliberately does NOT accept a freely-typed email string: this
+    `email` field is also what /auth/google-login matches on, so an
+    unverified value here would let whoever actually owns that real Gmail
+    address sign in with Google straight into this account.
+    """
+    try:
+        payload = verify_google_id_token(body.google_id_token)
+    except GoogleAuthError as exc:
+        raise HTTPException(status_code=401, detail=f"Google sign-in failed: {exc}")
+    if not payload.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google account's email isn't verified")
+    new_email = payload["email"]
+    if db.query(Teacher).filter(Teacher.email == new_email, Teacher.id != teacher.id).first():
+        raise HTTPException(status_code=409, detail="An account with this Google email already exists")
+    teacher.email = new_email
+    db.commit()
+    audit_log.record(db, teacher.id, "change_email", "teacher", teacher.id)
+    return {"email": teacher.email}
 
 
 @router.get("/admin/students")

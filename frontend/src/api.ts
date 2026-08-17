@@ -185,6 +185,8 @@ export interface Teacher {
   name: string;
   role: string;
   phone: string;
+  email: string | null;
+  phone_verified: boolean;
   photo_url: string | null;
   centre_id: number | null;
   organization_id: number | null;
@@ -476,6 +478,21 @@ export const api = {
   resetPassword: (phone: string, otp: string, new_password: string) =>
     request("/auth/reset-password", { method: "POST", body: JSON.stringify({ phone, otp, new_password }) }) as Promise<{
       reset: boolean;
+    }>,
+  // Step 1 of two — sends a WhatsApp OTP to new_phone; the change only
+  // takes effect once requestChangePhoneVerify confirms it.
+  requestChangePhone: (new_phone: string) =>
+    request("/admin/me/change-phone", { method: "POST", body: JSON.stringify({ new_phone }) }) as Promise<{
+      otp_required: boolean;
+    }>,
+  requestChangePhoneVerify: (new_phone: string, otp?: string) =>
+    request("/admin/me/change-phone/verify", { method: "POST", body: JSON.stringify({ new_phone, otp }) }) as Promise<{
+      phone: string;
+    }>,
+  // Single step — Google's own token is the proof, no OTP dance needed.
+  changeEmail: (google_id_token: string) =>
+    request("/admin/me/change-email", { method: "POST", body: JSON.stringify({ google_id_token }) }) as Promise<{
+      email: string;
     }>,
   listTeachers: () => request("/admin/teachers") as Promise<TeacherAccount[]>,
   createTeacher: (data: { name: string; phone: string; password: string; role: string; centre_id?: number }) =>

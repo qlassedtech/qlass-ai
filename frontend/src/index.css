@@ -185,6 +185,12 @@ label {
   font-weight: 500;
 }
 
+.success {
+  color: var(--success);
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .status {
   color: var(--success);
   font-size: 13px;

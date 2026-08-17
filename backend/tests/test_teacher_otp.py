@@ -11,11 +11,11 @@ from app.routers.admin import TeacherPhoneRequest, VerifyTeacherOtpRequest, requ
 from app.services.teacher_auth import JWT_ALGORITHM
 
 
-def _make_teacher(db_session, phone="919000000050"):
+def _make_teacher(db_session, phone="919000000050", phone_verified=True):
     centre = Centre(name="OTP Test School")
     db_session.add(centre)
     db_session.commit()
-    teacher = Teacher(name="OTP Teacher", phone=phone, centre_id=centre.id, role="admin")
+    teacher = Teacher(name="OTP Teacher", phone=phone, centre_id=centre.id, role="admin", phone_verified=phone_verified)
     db_session.add(teacher)
     db_session.commit()
     return teacher
@@ -110,3 +110,26 @@ async def test_verify_teacher_otp_rejects_wrong_code(db_session, monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await verify_teacher_otp(VerifyTeacherOtpRequest(phone=teacher.phone, otp="000000"), db_session)
     assert exc_info.value.status_code == 400
+
+
+async def test_request_teacher_otp_rejects_unverified_phone(db_session, monkeypatch):
+    """
+    Teacher.phone_verified is False only for the Google-registration path
+    (see app.routers.admin.register_school_verify) — Google proves the
+    email, never the phone typed alongside it. Without this check,
+    whoever actually controls that unverified number could OTP their way
+    into an account that isn't theirs.
+    """
+    teacher = _make_teacher(db_session, phone="919000000054", phone_verified=False)
+
+    async def fail_if_called(to_phone, template_name, params):
+        raise AssertionError("should never send a code for an unverified phone")
+
+    monkeypatch.setattr("app.routers.admin.send_template_message", fail_if_called)
+
+    import pytest
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_teacher_otp(TeacherPhoneRequest(phone=teacher.phone), db_session)
+    assert exc_info.value.status_code == 403

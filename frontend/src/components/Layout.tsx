@@ -110,6 +110,9 @@ export default function Layout() {
           <NavLink to="/credits" className={({ isActive }) => (isActive ? "active" : "")}>
             Billing & Credits
           </NavLink>
+          <NavLink to="/my-account" className={({ isActive }) => (isActive ? "active" : "")}>
+            My Account
+          </NavLink>
         </div>
 
         {canManageSchool && (
