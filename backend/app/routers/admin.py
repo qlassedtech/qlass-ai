@@ -282,6 +282,16 @@ async def request_teacher_otp(body: TeacherPhoneRequest, db: Session = Depends(g
     teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="No teacher/admin account found for this number")
+    if not teacher.phone_verified:
+        # See Teacher.phone_verified's docstring — this number was never
+        # proven to belong to this account (currently only reachable via
+        # Google registration, where the phone typed into the form is
+        # unverified). Without this, whoever actually controls that number
+        # could OTP their way into the account.
+        raise HTTPException(
+            status_code=403,
+            detail="WhatsApp OTP login isn't available for this account — please sign in with your password or Google instead",
+        )
     otp = await generate_and_store_otp("teacher_login", phone)
     # A teacher logging into the web portal cold has no guaranteed active
     # 24h WhatsApp session with the bot — a plain send_whatsapp_message
@@ -504,6 +514,14 @@ async def register_school_verify(body: VerifyRegisterSchoolRequest, db: Session 
                 name=body.admin_name, phone=admin_phone, email=google_email,
                 password_hash=hash_password(body.password) if body.password else None,
                 role="admin", centre_id=centre.id,
+                # See Teacher.phone_verified's docstring — Google proves
+                # the email, never the phone typed alongside it. Both
+                # password paths DO leave this True: the WhatsApp-OTP-
+                # verified one obviously proves it, and the non-WhatsApp
+                # fallback poses no real hijack risk either (nobody can
+                # receive a WhatsApp OTP on a number Wati confirmed isn't
+                # on WhatsApp in the first place).
+                phone_verified=google_email is None,
             )
             db.add(teacher)
             db.commit()

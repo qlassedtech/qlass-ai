@@ -307,6 +307,24 @@ class Teacher(Base):
     # resetting a password (the standard response to a stolen token) didn't
     # actually revoke any token already issued.
     token_version = Column(Integer, default=0)
+    # False only for an account whose phone was never independently proven
+    # to belong to them — currently just the Google-registration path (see
+    # app.routers.admin.register_school_verify), where Google's
+    # email_verified is real proof of the EMAIL but `phone` is just
+    # whatever string was typed into the form, unverified. Everyone else
+    # (password + WhatsApp-OTP-verified number, password + a number Wati
+    # confirmed genuinely isn't on WhatsApp, admin-added teachers, bulk
+    # roster upload, every account that existed before this column did)
+    # defaults True — a database-level ALTER TABLE ADD COLUMN with
+    # DEFAULT true is what backfills every pre-existing row, not this
+    # Python default (which only applies to new INSERTs the ORM builds
+    # without an explicit value). Checked by /auth/request-teacher-otp
+    # before allowing WhatsApp-OTP login: without this, someone who
+    # actually controls a phone number a Google-registered admin typed in
+    # (by typo, or on purpose) could OTP their way into that admin's
+    # account, since phone alone was otherwise enough to log in via that
+    # path regardless of how the account was created.
+    phone_verified = Column(Boolean, default=True)
 
     centre = relationship("Centre", back_populates="teachers")
     organization = relationship("Organization")
