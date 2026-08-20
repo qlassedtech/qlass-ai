@@ -1,5 +1,7 @@
 import hmac
 import logging
+from pathlib import PurePosixPath
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -10,7 +12,9 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import Lead
 from app.services.phone import normalize_phone
-from app.services.whatsapp_client import send_template_message, send_whatsapp_message
+from app.services.whatsapp_client import (
+    send_template_message, send_whatsapp_message, send_whatsapp_file, fetch_external_media,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -103,10 +107,25 @@ class SendLeadMessageRequest(BaseModel):
     # nurture touch (the common case for outbound-first outreach) needs an
     # approved template instead, same constraint every other outbound send
     # in this codebase already works within (see send_template_message's
-    # own docstring).
+    # own docstring). media_url sends a photo/video/PDF instead — fetched
+    # server-side from wherever the portal hosts it, then forwarded to Wati
+    # (see fetch_external_media/send_whatsapp_file). Like `message`, this is
+    # a session send: WhatsApp will silently drop it (Wati still returns
+    # sent:true — the API call itself succeeds) if this lead hasn't
+    # messaged in the last 24h. Confirmed live: a lead whose last inbound
+    # message was over two weeks old never received a plain session text
+    # despite a 200 OK from Wati — reaching a genuinely cold/lapsed lead
+    # needs an approved template (see template_name), which is the only
+    # way to *initiate* contact outside an open session; that constraint
+    # applies to media too, and a WATI template's media component (not
+    # this field) is the only way to send media on a cold, template-only
+    # send — media_url only works once a real session is open, e.g. after
+    # the lead has replied at least once.
     message: str | None = None
     template_name: str | None = None
     template_params: list[dict] | None = None
+    media_url: str | None = None
+    caption: str | None = None
 
 
 @router.post("/leads/{phone}/send", dependencies=[Depends(require_leads_api_key)])
@@ -114,11 +133,19 @@ async def send_lead_message(phone: str, body: SendLeadMessageRequest, db: Sessio
     normalized = normalize_phone(phone)
     if db.query(Lead).filter(Lead.phone == normalized).first() is None:
         raise HTTPException(status_code=404, detail="No lead registered for this number — register it first via POST /leads")
-    if bool(body.message) == bool(body.template_name):
-        raise HTTPException(status_code=400, detail="Provide exactly one of message or template_name")
+    provided = [bool(body.message), bool(body.template_name), bool(body.media_url)]
+    if sum(provided) != 1:
+        raise HTTPException(status_code=400, detail="Provide exactly one of message, template_name, or media_url")
 
     if body.template_name:
         result = await send_template_message(normalized, body.template_name, body.template_params or [])
+    elif body.media_url:
+        fetched = await fetch_external_media(body.media_url)
+        if fetched is None:
+            raise HTTPException(status_code=422, detail="Couldn't fetch media_url — check it's a reachable http(s) URL")
+        file_bytes, content_type = fetched
+        filename = PurePosixPath(urlparse(body.media_url).path).name or "file"
+        result = await send_whatsapp_file(normalized, file_bytes, content_type, filename, caption=body.caption)
     else:
         result = await send_whatsapp_message(normalized, body.message)
 

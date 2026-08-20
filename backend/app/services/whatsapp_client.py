@@ -206,6 +206,73 @@ async def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str, f
         return {"sent": False, "reason": f"Wati request failed: {exc}"}
 
 
+async def send_whatsapp_file(to_phone: str, file_bytes: bytes, content_type: str, filename: str, caption: str | None = None) -> dict:
+    """
+    Generic version of send_whatsapp_audio/send_whatsapp_image above —
+    Wati's sendSessionFile endpoint isn't actually media-type-specific
+    (both of those just hardcode their own content_type), it renders as an
+    image/video/document bubble based on the content_type given here. Used
+    by app.routers.leads to let an external portal send a photo, video, or
+    PDF to a lead, not just plain text/template messages.
+    """
+    if not settings.whatsapp_token or not settings.wati_api_endpoint:
+        return {"sent": False, "reason": "Wati credentials not configured in .env"}
+
+    url = f"{settings.wati_api_endpoint.rstrip('/')}/api/v1/sendSessionFile/{to_phone}"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_token}"}
+    files = {"file": (filename, file_bytes, content_type)}
+    params = {"caption": caption} if caption else {}
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, params=params, files=files)
+            resp.raise_for_status()
+            return {"sent": True, "response": resp.json()}
+    except httpx.HTTPStatusError as exc:
+        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+    except httpx.HTTPError as exc:
+        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
+# Generous but bounded — WhatsApp itself caps media size well below this
+# (100MB for video/documents, 5MB for a plain image), so this exists to
+# stop an obviously-wrong or malicious URL (e.g. a multi-GB file) from
+# tying up a request indefinitely, not to match WhatsApp's own limits
+# exactly; Wati's own upload call will reject anything it doesn't accept.
+MAX_EXTERNAL_MEDIA_BYTES = 64 * 1024 * 1024
+
+
+async def fetch_external_media(url: str) -> tuple[bytes, str] | None:
+    """
+    Fetches a file from an arbitrary URL a caller supplied (see
+    app.routers.leads' media_url) — deliberately a SEPARATE function from
+    download_media above, which is hard-restricted to Wati's own media
+    host specifically because it attaches our Wati bearer token; that
+    token must never be sent to a portal-supplied URL. Only http/https,
+    streamed with a byte cap rather than loaded via a Content-Length
+    header alone (a malicious/misconfigured server could lie about it).
+    Returns (bytes, content_type) or None if the fetch failed, wasn't
+    http(s), or exceeded the size cap.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_EXTERNAL_MEDIA_BYTES:
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks), content_type
+    except httpx.HTTPError:
+        return None
+
+
 async def send_whatsapp_message(to_phone: str, body: str) -> dict:
     if not settings.whatsapp_token or not settings.wati_api_endpoint:
         return {"sent": False, "reason": "Wati credentials not configured in .env"}
