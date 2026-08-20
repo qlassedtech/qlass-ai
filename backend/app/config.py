@@ -114,6 +114,17 @@ class Settings(BaseSettings):
     database_pool_size: int = 20
     database_max_overflow: int = 40
 
+    # Lead-nurture portal integration — a separate external system that
+    # sends/receives WhatsApp messages for prospective-student leads
+    # through this same WhatsApp number, entirely outside the AI tutor
+    # (see app.routers.leads). leads_api_key authenticates THAT portal's
+    # calls to us (register a lead, send a message); leads_webhook_url/
+    # secret are where WE forward an inbound message from a registered
+    # lead, so their portal can drive its own nurture/nudge logic.
+    leads_api_key: str | None = None
+    leads_webhook_url: str | None = None
+    leads_webhook_secret: str | None = None
+
     def cors_origins(self) -> list[str]:
         return [origin.strip().rstrip("/") for origin in self.allowed_origins.split(",") if origin.strip()]
 

@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models.core import Centre, Student, Teacher, ProcessedWebhookMessage
+from app.models.core import Centre, Lead, Student, Teacher, ProcessedWebhookMessage
 from app.services.chat_core import process_message, MENU_BUTTON_TO_COMMAND, PENDING_APPROVAL_REPLY
+from app.routers.leads import forward_lead_message_to_portal
 from app.services.whatsapp_client import (
     parse_incoming_message,
     parse_incoming_audio,
@@ -677,6 +678,26 @@ async def _handle_message(db: Session, payload: dict) -> None:
     else:
         parsed = parse_incoming_message(payload)
     probe_text = parsed[1] if parsed else ""
+
+    # A number an external lead-nurture portal is driving directly (see
+    # app.routers.leads) — forwarded to that portal's webhook and handled
+    # ENTIRELY outside the AI tutor: no student is created, no credits are
+    # spent, chat_core never sees it. Checked before the cold-start signup
+    # logic below on purpose — registering a lead is exactly what tells us
+    # NOT to auto-enroll this number the way any other new phone would be.
+    # Deliberately skipped for an already-known Student/Teacher phone (see
+    # Lead's own docstring) — a real, active account is never silently cut
+    # off from the tutor just because it also appears in the leads table.
+    lead = db.query(Lead).filter(Lead.phone == from_phone).first()
+    if lead is not None:
+        is_known_account = (
+            db.query(Student.id).filter(or_(Student.phone == from_phone, Student.whatsapp_phone == from_phone)).first()
+            is not None
+            or db.query(Teacher.id).filter(Teacher.phone == from_phone).first() is not None
+        )
+        if not is_known_account:
+            await forward_lead_message_to_portal(lead, probe_text, payload)
+            return
 
     # Confirmed live (code review, Aug 2026): a cold WhatsApp message from
     # any never-seen-before number silently creates a fresh account with a

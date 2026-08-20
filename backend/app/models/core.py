@@ -665,3 +665,28 @@ class AuditLog(Base):
     target_id = Column(Integer, nullable=False)
     detail = Column(Text)  # free-text: amount, duration, note — whatever's relevant for that action
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class Lead(Base):
+    """
+    A prospective-student phone number an external lead-nurture portal is
+    driving directly — outreach, nudges, replies — entirely OUTSIDE the AI
+    tutor (see app.routers.leads). Registering a number here is what tells
+    app.routers.whatsapp NOT to auto-enroll it as a new tutor student the
+    way any other cold-start message would (see _create_new_student) —
+    inbound messages from a registered lead are forwarded to
+    settings.leads_webhook_url instead of ever reaching chat_core. Deleting
+    this row (see DELETE /leads/{phone}) releases the number back to normal
+    behavior — their next message creates a real student account as usual.
+    """
+    __tablename__ = "leads"
+
+    id = Column(Integer, primary_key=True)
+    phone = Column(Text, unique=True, nullable=False, index=True)
+    name = Column(Text)
+    # The portal's own identifier for this lead, if it has one — round-
+    # tripped back on every inbound-message webhook delivery and on
+    # GET /leads so the portal can match without keeping its own phone
+    # index in sync.
+    external_ref = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

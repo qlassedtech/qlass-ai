@@ -7,7 +7,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from app.routers import whatsapp, health, broadcast, admin, payments, student_app, parent_app, razorpay_webhook, public
+from app.routers import (
+    whatsapp, health, broadcast, admin, payments, student_app, parent_app, razorpay_webhook, public, leads,
+)
 from app.database import Base, engine
 from app.config import settings, REPO_ROOT
 from app.logging_config import setup_logging
@@ -50,6 +52,7 @@ app.include_router(student_app.router, tags=["student-app"])
 app.include_router(parent_app.router, tags=["parent-app"])
 app.include_router(razorpay_webhook.router, tags=["razorpay-webhook"])
 app.include_router(public.router, tags=["public"])
+app.include_router(leads.router, tags=["leads"])
 
 
 def _sanitize_non_finite(value):
