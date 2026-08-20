@@ -688,7 +688,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # Deliberately skipped for an already-known Student/Teacher phone (see
     # Lead's own docstring) — a real, active account is never silently cut
     # off from the tutor just because it also appears in the leads table.
-    lead = db.query(Lead).filter(Lead.phone == from_phone).first()
+    #
+    # Gated on leads_api_key being set at all — this query otherwise runs
+    # on EVERY inbound WhatsApp message platform-wide (Lead.phone is
+    # indexed/unique so each lookup itself is cheap, but it's still one
+    # extra DB round-trip on the hottest path in the app for a feature
+    # that may be fully turned off, as it currently is).
+    lead = db.query(Lead).filter(Lead.phone == from_phone).first() if settings.leads_api_key else None
     if lead is not None:
         is_known_account = (
             db.query(Student.id).filter(or_(Student.phone == from_phone, Student.whatsapp_phone == from_phone)).first()

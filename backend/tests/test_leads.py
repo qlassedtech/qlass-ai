@@ -126,6 +126,7 @@ async def test_whatsapp_message_from_registered_lead_never_reaches_the_tutor(db_
     """
     from app.routers.whatsapp import _handle_message
 
+    monkeypatch.setattr(settings, "leads_api_key", "test-key")  # else the routing check no-ops entirely
     register_lead(RegisterLeadRequest(phone="919876543099"), db_session)
 
     forwarded = []
@@ -161,6 +162,7 @@ async def test_whatsapp_message_from_already_enrolled_student_ignores_lead_regis
     db_session.add(student)
     db_session.commit()
     cost_tracker.add_trial_credits(db_session, student.id)  # else the credit-exhaustion gate fires first
+    monkeypatch.setattr(settings, "leads_api_key", "test-key")  # else the routing check no-ops entirely
     register_lead(RegisterLeadRequest(phone="919876543098"), db_session)
 
     async def fail_if_called(*args, **kwargs):
