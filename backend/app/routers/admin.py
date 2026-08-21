@@ -922,7 +922,8 @@ async def preview_student_bulk_upload(
     """
     centre = _resolve_centre_for_write(db, teacher, centre_id)
     rows = await _rows_from_roster_upload(
-        file, extract_student_rows, db, centre.id, {"name", "phone", "class", "board", "school"},
+        file, extract_student_rows, db, centre.id,
+        {"name", "phone", "class", "board", "school", "email", "gender", "parent_name", "parent_phone"},
     )
     return {"rows": rows}
 
@@ -971,6 +972,54 @@ def confirm_student_bulk_upload(
         for s in db.query(Student).filter(Student.phone.in_(batch_phones), Student.centre_id == centre.id).all()
     }
 
+    # email is globally unique on Student, and Parent.phone is globally
+    # unique across the whole platform (one parent phone <-> one student —
+    # see PATCH /admin/students/{id}'s own parent-linking logic, which this
+    # mirrors). A batch upload must never fail an entire row over one
+    # conflicting field — email_owner_id/parent_owner_id below are checked
+    # per-row so a collision just leaves THAT field unset rather than
+    # blocking the student's own name/phone/class from being created.
+    batch_emails = [str(row.get("email") or "").strip() for row in body.rows if row.get("email")]
+    email_owner_id = {
+        e: sid for sid, e in db.query(Student.id, Student.email).filter(Student.email.in_(batch_emails)).all()
+    }
+    batch_parent_phones = [str(row.get("parent_phone") or "").strip() for row in body.rows if row.get("parent_phone")]
+    existing_parents_by_phone = {
+        p.phone: p for p in db.query(Parent).filter(Parent.phone.in_(batch_parent_phones)).all()
+    }
+    # Tracks phones/emails claimed by an EARLIER row in this same batch, so
+    # two rows both listing the same parent's phone (siblings) don't both
+    # "win" — first one in the file gets it, the rest silently skip it.
+    claimed_emails: set[str] = set()
+    claimed_parent_phones: set[str] = set()
+
+    def _pick_email(row: dict, owner_id: int | None) -> str | None:
+        email = str(row.get("email") or "").strip() or None
+        if not email or email in claimed_emails:
+            return None
+        existing_owner = email_owner_id.get(email)
+        if existing_owner is not None and existing_owner != owner_id:
+            return None  # belongs to a different student already
+        claimed_emails.add(email)
+        return email
+
+    def _link_parent(db: Session, student: Student, row: dict) -> None:
+        parent_phone = str(row.get("parent_phone") or "").strip() or None
+        if not parent_phone or parent_phone in claimed_parent_phones:
+            return
+        existing_parent = existing_parents_by_phone.get(parent_phone)
+        if existing_parent is not None and existing_parent.student_id != student.id:
+            return  # already linked to a different student
+        claimed_parent_phones.add(parent_phone)
+        parent_name = str(row.get("parent_name") or "").strip() or None
+        if existing_parent is not None:
+            if parent_name:
+                existing_parent.name = parent_name
+        else:
+            new_parent = Parent(student_id=student.id, phone=parent_phone, name=parent_name)
+            db.add(new_parent)
+            existing_parents_by_phone[parent_phone] = new_parent
+
     created, updated, skipped = [], [], []
     new_students = []
     for row in body.rows:
@@ -992,6 +1041,12 @@ def confirm_student_bulk_upload(
                 existing.board = str(row["board"]).strip()
             if row.get("school"):
                 existing.school = str(row["school"]).strip()
+            if row.get("gender") in ("male", "female"):
+                existing.gender = row["gender"]
+            picked_email = _pick_email(row, existing.id)
+            if picked_email:
+                existing.email = picked_email
+            _link_parent(db, existing, row)
             updated.append(phone)
         else:
             new_student = Student(
@@ -999,11 +1054,13 @@ def confirm_student_bulk_upload(
                 class_=str(row.get("class") or "").strip() or None,
                 board=str(row.get("board") or "").strip() or centre_default_board,
                 school=str(row.get("school") or "").strip() or centre_default_school,
+                gender=row.get("gender") if row.get("gender") in ("male", "female") else None,
+                email=_pick_email(row, None),
                 features=selected_features,
                 centre_id=centre.id,
             )
             db.add(new_student)
-            new_students.append(new_student)
+            new_students.append((new_student, row))
             # So the SAME phone appearing again later in this batch updates
             # this just-created row instead of creating a second duplicate
             # profile for it.
@@ -1018,8 +1075,9 @@ def confirm_student_bulk_upload(
     # grant) — not worth changing that shared behavior just for this one
     # caller, so this part of the batch still isn't fully single-commit.
     db.flush()
-    for new_student in new_students:
+    for new_student, row in new_students:
         cost_tracker.add_trial_credits(db, new_student.id)
+        _link_parent(db, new_student, row)  # needs new_student.id, only real after flush
     db.commit()
     return {"created": created, "updated": updated, "skipped": skipped}
 

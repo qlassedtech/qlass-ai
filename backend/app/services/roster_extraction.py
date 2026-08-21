@@ -7,11 +7,17 @@ _STUDENT_EXTRACTION_PROMPT = (
     "photo, OR raw CSV/spreadsheet text exported from a school's own system with its own column names "
     "and order (e.g. \"Student Name\", \"Mobile No\", \"Grade\") rather than ours. "
     "The text may be messy, have OCR errors, or be a table that got flattened into plain text. "
-    "Extract every student row you can confidently identify. For each, output these exact keys: "
-    'name, phone, class, board, school. Use null for any field not present — never invent a value. '
-    "phone should be digits only. Respond with ONLY a JSON array of objects, nothing else — no prose, "
-    "no explanation, no markdown code fences, just the raw JSON array, e.g. "
-    '[{"name": "Aman Kumar", "phone": "9199...", "class": "10", "board": "BSEB", "school": null}]. '
+    "Extract every student row you can confidently identify. Capture EVERY field below that's actually "
+    "present in the source, even if it's not in every row or the column header doesn't match these "
+    "names exactly (e.g. \"Guardian Contact\" or \"Father's Number\" is parent_phone; \"Sex\" is gender) "
+    "— never drop real data the source contains just because a field isn't in this list's exact wording. "
+    "For each row, output these exact keys: name, phone, class, board, school, email, gender, "
+    "parent_name, parent_phone. gender must be \"male\" or \"female\" if determinable, else null. Use "
+    "null for any field not present — never invent a value. phone and parent_phone should be digits "
+    "only. Respond with ONLY a JSON array of objects, nothing else — no prose, no explanation, no "
+    "markdown code fences, just the raw JSON array, e.g. "
+    '[{"name": "Aman Kumar", "phone": "9199...", "class": "10", "board": "BSEB", "school": null, '
+    '"email": null, "gender": "male", "parent_name": "Ramesh Kumar", "parent_phone": "9188..."}]. '
     "Skip any row where you can't even confidently determine a name."
 )
 
