@@ -1659,8 +1659,18 @@ def confirm_teacher_bulk_upload(
     )
 
     # One query for every phone this batch might touch, instead of one
-    # query per row.
-    batch_phones = [str(row.get("phone") or "").strip() for row in body.rows]
+    # query per row. Confirmed live: this never called normalize_phone,
+    # unlike every other account-creation path (register_school, /public/
+    # register, student-app login, ...) — a bulk-uploaded teacher's phone
+    # was stored exactly as typed in the source file (e.g. "9199911040"
+    # instead of "919199911040"), which every login/lookup path elsewhere
+    # normalizes BEFORE querying — meaning that teacher could never
+    # actually log in via password or WhatsApp OTP, or receive a WhatsApp
+    # message at all, since nothing would ever match their raw stored
+    # value again. Also silently broke the duplicate-phone dedup check
+    # right below, comparing a raw batch value against normalized
+    # existing rows.
+    batch_phones = [normalize_phone(str(row.get("phone") or "").strip()) for row in body.rows]
     existing_phones = {
         t.phone for t in db.query(Teacher.phone).filter(Teacher.phone.in_(batch_phones)).all()
     }
@@ -1668,7 +1678,7 @@ def confirm_teacher_bulk_upload(
     created, skipped, generated_passwords = [], [], {}
     for row in body.rows:
         name = str(row.get("name") or "").strip()
-        phone = str(row.get("phone") or "").strip()
+        phone = normalize_phone(str(row.get("phone") or "").strip())
         role = str(row.get("role") or "teacher").strip().lower()
         if not name or not phone or role not in ("teacher", "admin"):
             skipped.append(row)
