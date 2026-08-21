@@ -81,6 +81,11 @@ export default function SchoolProfile() {
     try {
       await api.uploadSchoolLogo(file);
       load();
+      // Layout's sidebar branding is a separate fetch done once on mount
+      // (see its own comment) — it has no way to know the logo just
+      // changed, and stays mounted across route navigation, so without
+      // this it never updates until a hard page reload.
+      window.dispatchEvent(new Event("school-branding-updated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to upload logo");
     } finally {

@@ -25,7 +25,17 @@ export default function Layout() {
       setSchoolBranding(null);
       return;
     }
-    api.getSchool().then((school) => setSchoolBranding({ name: school.name, logo_url: school.logo_url })).catch(() => {});
+    function refetch() {
+      api.getSchool().then((school) => setSchoolBranding({ name: school.name, logo_url: school.logo_url })).catch(() => {});
+    }
+    refetch();
+    // Layout stays mounted across route navigation (it wraps every admin
+    // route via <Outlet/>), so without this, uploading a new logo from
+    // SchoolProfile — which only updates ITS OWN local state — never
+    // reaches the sidebar until a hard page reload. See the matching
+    // dispatch in SchoolProfile.tsx's upload handler.
+    window.addEventListener("school-branding-updated", refetch);
+    return () => window.removeEventListener("school-branding-updated", refetch);
   }, [belongsToOneSchool]);
 
   function logout() {
