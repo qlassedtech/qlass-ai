@@ -832,18 +832,30 @@ def create_student(
     return _student_to_dict(db, student)
 
 
-async def _rows_from_roster_upload(file: UploadFile, extract_rows_fn, db: Session, bill_centre_id: int | None) -> list[dict]:
+async def _rows_from_roster_upload(
+    file: UploadFile, extract_rows_fn, db: Session, bill_centre_id: int | None, expected_fields: set[str],
+) -> list[dict]:
     """
     Turns an uploaded file into row dicts (string keys like name/phone/...)
-    regardless of source format — a clean CSV parses directly; a roster
-    photo or PDF/Word file goes through OCR/document-text extraction and
-    then an LLM extraction pass (see app.services.roster_extraction).
+    regardless of source format — a CSV whose header row already uses our
+    own field names (any subset/order of `expected_fields`, e.g. our own
+    downloadable template) parses directly, for free; a roster photo,
+    PDF/Word file, or a CSV exported from a SCHOOL'S OWN system with
+    different column names ("Student Name", "Mobile No", ...) goes through
+    OCR/document-text extraction and then an LLM extraction pass (see
+    app.services.roster_extraction) instead.
+
+    Confirmed live: a school's own exported CSV with non-matching headers
+    used to parse "successfully" but produce empty name/phone on every
+    row (dict.get() on a header that was never there just returns None),
+    silently skipping the entire batch rather than erroring loudly or
+    actually extracting anything — a school had to reformat their own
+    file to match our exact template before bulk upload worked at all.
 
     Always returns a PREVIEW only, never writes anything — OCR/LLM
-    extraction from a photo or scanned document is not reliable enough to
-    create real accounts unattended; a human must review (and can correct)
-    these rows before the separate .../confirm endpoint actually acts on
-    them.
+    extraction is not reliable enough to create real accounts unattended;
+    a human must review (and can correct) these rows before the separate
+    .../confirm endpoint actually acts on them.
     """
     content_type = (file.content_type or "").lower()
     filename = (file.filename or "").lower()
@@ -855,12 +867,25 @@ async def _rows_from_roster_upload(file: UploadFile, extract_rows_fn, db: Sessio
     if len(raw_bytes) > MAX_ROSTER_UPLOAD_BYTES:
         raise HTTPException(status_code=400, detail=f"File too large — max {MAX_ROSTER_UPLOAD_BYTES // (1024 * 1024)}MB")
 
-    if filename.endswith(".csv") or content_type in ("text/csv", "application/vnd.ms-excel"):
+    is_csv = filename.endswith(".csv") or content_type in ("text/csv", "application/vnd.ms-excel")
+    if is_csv:
         reader = csv.DictReader(io.StringIO(raw_bytes.decode("utf-8-sig")))
-        reader.fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
-        rows = [dict(row) for row in reader]
-        if len(rows) > MAX_ROSTER_UPLOAD_ROWS:
-            raise HTTPException(status_code=400, detail=f"Too many rows in one upload (max {MAX_ROSTER_UPLOAD_ROWS}) — split into batches")
+        headers = {f.strip().lower() for f in (reader.fieldnames or [])}
+        if headers and headers.issubset(expected_fields):
+            reader.fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
+            rows = [dict(row) for row in reader]
+            if len(rows) > MAX_ROSTER_UPLOAD_ROWS:
+                raise HTTPException(status_code=400, detail=f"Too many rows in one upload (max {MAX_ROSTER_UPLOAD_ROWS}) — split into batches")
+            return rows
+        # Headers don't match our vocabulary — treat the raw CSV text the
+        # same way a photo's OCR'd text is treated below, letting the LLM
+        # figure out which column is which regardless of naming/order.
+        source_text = raw_bytes.decode("utf-8-sig")
+        rows, llm_result = await extract_rows_fn(source_text)
+        if bill_centre_id is not None:
+            school_billing.record_claude_usage(
+                db, bill_centre_id, "roster_extraction", llm_result.input_tokens, llm_result.output_tokens,
+            )
         return rows
 
     if content_type.startswith("image/"):
@@ -896,7 +921,9 @@ async def preview_student_bulk_upload(
     admin, who always uploads into their own school.
     """
     centre = _resolve_centre_for_write(db, teacher, centre_id)
-    rows = await _rows_from_roster_upload(file, extract_student_rows, db, centre.id)
+    rows = await _rows_from_roster_upload(
+        file, extract_student_rows, db, centre.id, {"name", "phone", "class", "board", "school"},
+    )
     return {"rows": rows}
 
 
@@ -1545,7 +1572,7 @@ async def preview_teacher_bulk_upload(
     """
     if teacher.role not in ("admin", "org_admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can bulk-upload teacher accounts")
-    rows = await _rows_from_roster_upload(file, extract_teacher_rows, db, teacher.centre_id)
+    rows = await _rows_from_roster_upload(file, extract_teacher_rows, db, teacher.centre_id, {"name", "phone", "role"})
     return {"rows": rows}
 
 

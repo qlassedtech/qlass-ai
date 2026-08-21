@@ -3,7 +3,9 @@ import json
 from app.services.llm_client import LLMResult, call_llm
 
 _STUDENT_EXTRACTION_PROMPT = (
-    "You are extracting a student roster from OCR'd text of a school register/list photo. "
+    "You are extracting a student roster from text that could be OCR'd from a school register/list "
+    "photo, OR raw CSV/spreadsheet text exported from a school's own system with its own column names "
+    "and order (e.g. \"Student Name\", \"Mobile No\", \"Grade\") rather than ours. "
     "The text may be messy, have OCR errors, or be a table that got flattened into plain text. "
     "Extract every student row you can confidently identify. For each, output these exact keys: "
     'name, phone, class, board, school. Use null for any field not present — never invent a value. '
@@ -14,8 +16,9 @@ _STUDENT_EXTRACTION_PROMPT = (
 )
 
 _TEACHER_EXTRACTION_PROMPT = (
-    "You are extracting a staff roster from OCR'd text of a school staff list photo. The text may be "
-    "messy or have OCR errors. Extract every staff member row you can confidently identify. For each, "
+    "You are extracting a staff roster from text that could be OCR'd from a school staff list photo, OR "
+    "raw CSV/spreadsheet text exported from a school's own system with its own column names and order. "
+    "The text may be messy or have OCR errors. Extract every staff member row you can confidently identify. For each, "
     'output these exact keys: name, phone, role. role must be "admin" for a headmaster/principal/'
     'vice-principal/vice principal, or "teacher" for everyone else. Use null for phone if not present — '
     "never invent one. Respond with ONLY a JSON array of objects, nothing else — no prose, no "
