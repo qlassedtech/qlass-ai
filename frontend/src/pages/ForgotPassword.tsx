@@ -44,7 +44,7 @@ export default function ForgotPassword() {
   return (
     <div className="center-page">
       <form className="card" onSubmit={otpSent ? handleReset : handleSendOtp}>
-        <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
+        <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="login-logo" />
         <h1>Reset Password</h1>
         <p className="login-subtitle">
           {otpSent ? "Enter the code we sent over WhatsApp" : "We'll send a reset code to your WhatsApp number"}

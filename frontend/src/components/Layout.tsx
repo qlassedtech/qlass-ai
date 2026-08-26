@@ -72,7 +72,7 @@ export default function Layout() {
               </div>
             </div>
           ) : (
-            <img src="/logo-tight.png" alt="Skoolgpt" className="sidebar-logo" />
+            <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="sidebar-logo" />
           )}
           <ThemeToggle />
         </div>

@@ -129,7 +129,7 @@ export default function Pay() {
   return (
     <div className="center-page">
       <div className="card">
-        <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
+        <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="login-logo" />
         <h1>Top Up AI Credits</h1>
         <p className="login-subtitle">Add credits to your child's Skoolgpt AI Tutor account on WhatsApp.</p>
 

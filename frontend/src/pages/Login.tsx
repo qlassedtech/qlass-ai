@@ -216,7 +216,7 @@ export default function Login() {
             )}
           </div>
         ) : (
-          <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
+          <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="login-logo" />
         )}
         <h1>{schoolName ? `Welcome back, ${schoolName}` : "Welcome to Skoolgpt"}</h1>
         {step !== "phone" && (
@@ -301,7 +301,7 @@ export default function Login() {
       {schoolName && (
         <div className="landing-powered-by">
           <span>Powered by</span>
-          <img src="/logo-tight.png" alt="Skoolgpt" />
+          <img src="/logo-tight.png?v=3" alt="Skoolgpt" />
         </div>
       )}
       </div>

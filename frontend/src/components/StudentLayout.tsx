@@ -33,7 +33,7 @@ export default function StudentLayout() {
     <div className="app-shell">
       <nav className="sidebar">
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-          <img src="/logo-tight.png" alt="Skoolgpt" className="sidebar-logo" />
+          <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="sidebar-logo" />
           <ThemeToggle />
         </div>
         {student && (

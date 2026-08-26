@@ -300,7 +300,7 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
       <div className="landing-chat-preview">
         <div className="landing-chat-header">
           <span className="landing-chat-avatar" aria-hidden="true">
-            <img src="/q-icon.png" alt="" />
+            <img src="/q-icon.png?v=3" alt="" />
           </span>
           Skoolgpt AI Tutor
           <span className="landing-chat-demo-label">
@@ -570,11 +570,11 @@ export default function Join() {
             </div>
             <div className="landing-powered-by-chip">
               <span>Powered by</span>
-              <img src="/logo-tight.png" alt="Skoolgpt" />
+              <img src="/logo-tight.png?v=3" alt="Skoolgpt" />
             </div>
           </div>
         ) : (
-          <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
+          <img src="/logo-tight.png?v=3" alt="Skoolgpt" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
         )}
 
         <div className="landing-hero-split">
