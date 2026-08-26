@@ -60,7 +60,7 @@ function SchoolBenefits({ benefits }: { benefits: typeof SCHOOL_BENEFITS }) {
     <div className="landing-school-band" id="for-schools">
       <div className="landing-school-band-inner">
         <span className="landing-eyebrow landing-eyebrow-on-dark">For Schools</span>
-        <h2>Bring Qlass to Your Whole School</h2>
+        <h2>Bring Skoolgpt to Your Whole School</h2>
         <p>
           The same AI tutor your students already love, wrapped in the tools your teachers and
           administrators actually need to run it.
@@ -302,7 +302,7 @@ function AnimatedChatDemo({ scenarios }: { scenarios: typeof CHAT_SCENARIOS }) {
           <span className="landing-chat-avatar" aria-hidden="true">
             <img src="/q-icon.png" alt="" />
           </span>
-          Qlass AI Tutor
+          Skoolgpt AI Tutor
           <span className="landing-chat-demo-label">
             {scenario.icon} {scenario.label}
           </span>
@@ -570,11 +570,11 @@ export default function Join() {
             </div>
             <div className="landing-powered-by-chip">
               <span>Powered by</span>
-              <img src="/logo-tight.png" alt="Qlass Learning" />
+              <img src="/logo-tight.png" alt="Skoolgpt" />
             </div>
           </div>
         ) : (
-          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
+          <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo landing-logo-large" style={{ margin: "0 0 16px" }} />
         )}
 
         <div className="landing-hero-split">

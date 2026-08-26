@@ -231,7 +231,7 @@ export default function Analytics() {
             </tbody>
           </table>
           <p className="muted" style={{ marginTop: 8 }}>
-            Contact Qlass support to fulfill a pending deletion request — it's an irreversible action handled by Qlass staff.
+            Contact Skoolgpt support to fulfill a pending deletion request — it's an irreversible action handled by our staff.
           </p>
         </div>
       )}

@@ -48,7 +48,7 @@ export default function Pay() {
       const razorpay = new window.Razorpay({
         key: subscription.key_id,
         subscription_id: subscription.subscription_id,
-        name: "Qlass Learning",
+        name: "Skoolgpt",
         description: "Unlimited AI Tutor plan — ₹2499/year, auto-renews",
         handler: async (response: {
           razorpay_subscription_id: string;
@@ -67,7 +67,7 @@ export default function Pay() {
           } catch (err) {
             setStatus({
               kind: "error",
-              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Qlass support",
+              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Skoolgpt support",
             });
           }
         },
@@ -94,7 +94,7 @@ export default function Pay() {
         key: order.key_id,
         amount: order.amount,
         currency: order.currency,
-        name: "Qlass Learning",
+        name: "Skoolgpt",
         description: "AI Tutor credit top-up",
         order_id: order.order_id,
         handler: async (response: {
@@ -111,7 +111,7 @@ export default function Pay() {
           } catch (err) {
             setStatus({
               kind: "error",
-              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Qlass support",
+              message: err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Skoolgpt support",
             });
           }
         },
@@ -129,9 +129,9 @@ export default function Pay() {
   return (
     <div className="center-page">
       <div className="card">
-        <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
+        <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
         <h1>Top Up AI Credits</h1>
-        <p className="login-subtitle">Add credits to your child's Qlass AI Tutor account on WhatsApp.</p>
+        <p className="login-subtitle">Add credits to your child's Skoolgpt AI Tutor account on WhatsApp.</p>
 
         <form onSubmit={handlePay}>
           <label>

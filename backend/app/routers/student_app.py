@@ -375,7 +375,7 @@ async def _reply_to_locked(db: Session, student: Student, message_text: str) -> 
     if school_billing.is_centre_churned(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
         raise HTTPException(
             status_code=402,
-            detail="Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
+            detail="Your school's Skoolgpt account is currently on hold — ask your school to contact Skoolgpt, "
                    "or top up your own AI credits directly",
         )
     # Mirrors the same gate whatsapp.py enforces — without it, a student
@@ -384,7 +384,7 @@ async def _reply_to_locked(db: Session, student: Student, message_text: str) -> 
     if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
         raise HTTPException(
             status_code=402,
-            detail="Your school's Qlass pilot has ended. Ask your school to continue the programme, "
+            detail="Your school's Skoolgpt pilot has ended. Ask your school to continue the programme, "
                    "or top up your own AI credits to keep learning!",
         )
     if not cost_tracker.has_credits(db, student.id):

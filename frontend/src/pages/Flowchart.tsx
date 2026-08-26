@@ -413,7 +413,7 @@ export default function Flowchart() {
     <div className="app-shell">
       <nav className="sidebar">
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-          <img src="/logo-tight.png" alt="Qlass Learning" className="sidebar-logo" />
+          <img src="/logo-tight.png" alt="Skoolgpt" className="sidebar-logo" />
           <ThemeToggle />
         </div>
         {GROUPS.map((group) => (
@@ -435,7 +435,7 @@ export default function Flowchart() {
           </div>
         ))}
         <Link to="/" className="logout" style={{ textAlign: "center", textDecoration: "none", display: "block" }}>
-          Back to Qlass
+          Back to Skoolgpt
         </Link>
       </nav>
       <main className="content">

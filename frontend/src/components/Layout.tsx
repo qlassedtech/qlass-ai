@@ -68,11 +68,11 @@ export default function Layout() {
               )}
               <div>
                 <div className="sidebar-school-name">{schoolBranding.name}</div>
-                <div className="sidebar-school-powered-by">Powered by Qlass</div>
+                <div className="sidebar-school-powered-by">Powered by Skoolgpt</div>
               </div>
             </div>
           ) : (
-            <img src="/logo-tight.png" alt="Qlass Learning" className="sidebar-logo" />
+            <img src="/logo-tight.png" alt="Skoolgpt" className="sidebar-logo" />
           )}
           <ThemeToggle />
         </div>

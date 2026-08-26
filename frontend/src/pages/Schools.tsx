@@ -116,7 +116,7 @@ export default function Schools() {
       <div className="page-header">
         <div>
           <h1>Schools & Sales Pipeline</h1>
-          <p>Every school on Qlass, with churn risk flagged from real usage</p>
+          <p>Every school on Skoolgpt, with churn risk flagged from real usage</p>
         </div>
       </div>
 

@@ -594,7 +594,7 @@ async def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get
     if teacher:
         otp = await generate_and_store_otp("password_reset", body.phone)
         await send_whatsapp_message(
-            body.phone, f"Your Qlass Learning password reset code is *{otp}*. It expires in 10 minutes."
+            body.phone, f"Your Skoolgpt password reset code is *{otp}*. It expires in 10 minutes."
         )
     return {"sent": True}
 
@@ -1225,7 +1225,7 @@ async def send_payment_link(
     # child enrolled on it — without it, a payment could silently land in
     # a sibling's wallet instead of this specific student's.
     link = f"{settings.portal_base_url}/pay?phone={student.phone}&student_id={student.id}"
-    message = f"Top up *{student.name}*'s Qlass AI Tutor credits here: {link}"
+    message = f"Top up *{student.name}*'s Skoolgpt AI Tutor credits here: {link}"
     result = await send_whatsapp_message(to_phone, message)
     if not result.get("sent"):
         raise HTTPException(status_code=502, detail=f"Failed to send: {result}")
@@ -1605,7 +1605,7 @@ async def create_teacher(
     try:
         await send_whatsapp_message(
             phone,
-            f"Welcome to Qlass, {body.name}! 🎉 An account has been set up for you on the Qlass "
+            f"Welcome to Skoolgpt, {body.name}! 🎉 An account has been set up for you on the Skoolgpt "
             f"Partner Console.\n\nLog in with:\nPhone: {phone}\nPassword: {body.password}\n\n"
             f"You can change your password any time from the login page's \"Forgot password?\" link.",
         )
@@ -2119,7 +2119,7 @@ def create_school_order(
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to top up credits")
     if _razorpay_client is None:
-        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Skoolgpt support")
     if body.amount < MIN_TOPUP_AMOUNT:
         raise HTTPException(status_code=400, detail=f"Minimum top-up is ₹{MIN_TOPUP_AMOUNT:.0f}")
 
@@ -2142,7 +2142,7 @@ def verify_school_payment(
     body: SchoolVerifyPaymentRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     if _razorpay_client is None:
-        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Skoolgpt support")
 
     try:
         _razorpay_client.utility.verify_payment_signature({
@@ -2201,7 +2201,7 @@ async def generate_presentation(
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to generate a presentation")
     if not settings.gamma_api_key:
-        raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Skoolgpt support")
     if not school_billing.has_credits(db, teacher.centre_id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for presentation generation")
 
@@ -2231,7 +2231,7 @@ async def presentation_status(
     generation_id: str, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
     if not settings.gamma_api_key:
-        raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Skoolgpt support")
     try:
         result = await get_generation_status(generation_id)
     except httpx.HTTPError:
@@ -2341,7 +2341,7 @@ def create_my_tutor_subscription(db: Session = Depends(get_db), teacher: Teacher
     for Qlass staff to activate on a teacher's behalf).
     """
     if _razorpay_client is None or not settings.razorpay_teacher_plan_id:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     student = _my_tutor_student(db, teacher)
     if cost_tracker.is_unlimited_active(student):
         raise HTTPException(status_code=400, detail="You're already on the unlimited plan")
@@ -2364,7 +2364,7 @@ def verify_my_tutor_subscription(
 ):
     """Confirms the FIRST payment on a new subscription mandate — see create_my_tutor_subscription."""
     if _razorpay_client is None:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     try:
         _razorpay_client.utility.verify_subscription_payment_signature({
             "razorpay_subscription_id": body.razorpay_subscription_id,
@@ -2408,7 +2408,7 @@ def verify_my_tutor_subscription(
 def cancel_my_tutor_subscription(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
     """Self-serve cancellation — see payments.cancel_student_subscription for the same behavior/reasoning."""
     if _razorpay_client is None:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     student = _my_tutor_student(db, teacher)
     if not student.razorpay_subscription_id:
         raise HTTPException(status_code=400, detail="No active auto-renewing subscription found")
@@ -2708,12 +2708,12 @@ async def update_school_sales_info(
         recipients = get_escalation_recipients(db, centre.id)
         if now_churned:
             notice = (
-                f"⚠️ {centre.name}'s Qlass account has been marked churned — students here will no "
+                f"⚠️ {centre.name}'s Skoolgpt account has been marked churned — students here will no "
                 f"longer get AI tutor replies on WhatsApp starting now (any student with their own "
-                f"paid credits keeps working). Contact Qlass to reactivate."
+                f"paid credits keeps working). Contact Skoolgpt to reactivate."
             )
         else:
-            notice = f"✅ {centre.name}'s Qlass account is active again — students here can resume chatting on WhatsApp."
+            notice = f"✅ {centre.name}'s Skoolgpt account is active again — students here can resume chatting on WhatsApp."
         for recipient in recipients:
             try:
                 await send_whatsapp_message(recipient.phone, notice)

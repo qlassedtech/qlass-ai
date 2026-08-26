@@ -89,12 +89,12 @@ export default function ParentDashboard() {
         <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>Privacy & Data</p>
         {deletionRequested ? (
           <p className="muted" style={{ fontSize: 13 }}>
-            Deletion request submitted — Qlass will review and confirm once processed.
+            Deletion request submitted — Skoolgpt will review and confirm once processed.
           </p>
         ) : showDeletionConfirm ? (
           <div>
             <p style={{ fontSize: 13, marginBottom: 8 }}>
-              This permanently erases your child's name, phone, and chat history from Qlass. Are you sure?
+              This permanently erases your child's name, phone, and chat history from Skoolgpt. Are you sure?
             </p>
             <button type="button" onClick={handleRequestDeletion} style={{ marginRight: 8 }}>
               Yes, Request Deletion

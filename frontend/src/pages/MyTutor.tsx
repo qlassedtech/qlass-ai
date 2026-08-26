@@ -51,7 +51,7 @@ export default function MyTutor() {
       const razorpay = new window.Razorpay({
         key: subscription.key_id,
         subscription_id: subscription.subscription_id,
-        name: "Qlass Learning",
+        name: "Skoolgpt",
         description: "My AI Tutor — ₹3500/month, auto-renews",
         handler: async (response: {
           razorpay_subscription_id: string;
@@ -63,7 +63,7 @@ export default function MyTutor() {
             setSubStatus("Subscribed! Auto-renews every month.");
             loadProfile();
           } catch (err) {
-            setSubStatus(err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Qlass support");
+            setSubStatus(err instanceof Error ? err.message : "Payment went through but we couldn't confirm it — contact Skoolgpt support");
           }
         },
         modal: { ondismiss: () => setSubLoading(false) },

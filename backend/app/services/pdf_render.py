@@ -84,7 +84,7 @@ def _draw_footer(canvas, page_num: int):
     canvas.drawString(MARGIN, FOOTER_H - 6 * mm, f"Page {page_num}")
 
     label_font, brand_font, size = "Helvetica", "Helvetica-Bold", 8
-    label, brand = "Powered by ", "Qlass Learning"
+    label, brand = "Powered by ", "Skoolgpt"
     total_w = canvas.stringWidth(label, label_font, size) + canvas.stringWidth(brand, brand_font, size)
     start_x = (PAGE_W - total_w) / 2
     canvas.setFont(label_font, size)

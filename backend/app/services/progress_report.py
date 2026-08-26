@@ -223,10 +223,10 @@ def format_parent_digest(student_name: str, stats: dict, activity: dict) -> str:
     """
     if stats["messages_sent"] == 0:
         return (
-            f"Hi! This week, {student_name} didn't chat with their Qlass AI tutor at all. "
+            f"Hi! This week, {student_name} didn't chat with their Skoolgpt AI tutor at all. "
             f"A gentle nudge to check in with them might help. 📚"
         )
-    lines = [f"📊 {student_name}'s week with the Qlass AI Tutor:", f"- {stats['messages_sent']} messages exchanged"]
+    lines = [f"📊 {student_name}'s week with the Skoolgpt AI Tutor:", f"- {stats['messages_sent']} messages exchanged"]
     if stats["total_evaluated"] > 0:
         lines.append(f"- {stats['correct']}/{stats['total_evaluated']} check questions correct ({stats['accuracy_pct']}%)")
     if stats["weak_topics"]:

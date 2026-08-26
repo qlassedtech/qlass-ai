@@ -93,7 +93,7 @@ export default function Register() {
     return (
       <div className="center-page">
         <form className="card" onSubmit={handleVerifyOtp}>
-          <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
+          <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
           <h1>Verify Your WhatsApp Number</h1>
           <p className="login-subtitle">We sent a code to {adminPhone} on WhatsApp — enter it below to finish setting up your school.</p>
           <label>
@@ -131,7 +131,7 @@ export default function Register() {
   return (
     <div className="center-page">
       <form className="card" onSubmit={handleSubmit}>
-        <img src="/logo-tight.png" alt="Qlass Learning" className="login-logo" />
+        <img src="/logo-tight.png" alt="Skoolgpt" className="login-logo" />
         <h1>Register Your School</h1>
         <p className="login-subtitle">Create your school's console and admin account</p>
         <label>

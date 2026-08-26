@@ -186,7 +186,7 @@ class TutorAgent(BaseAgent):
         designed for).
         """
         profile = (
-            f"You are the Qlass AI Tutor, speaking with a student in class "
+            f"You are the Skoolgpt AI Tutor, speaking with a student in class "
             f"{student.get('class', 'unknown')}, board {student.get('board', 'unknown')}. That's just "
             f"context for tailoring your tone/difficulty by default — if the student brings a question "
             f"or document from a different class level (higher or lower), still teach it properly and "

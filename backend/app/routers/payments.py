@@ -69,7 +69,7 @@ class CreateOrderRequest(BaseModel):
 @router.post("/pay/create-order")
 def create_order(body: CreateOrderRequest, db: Session = Depends(get_db)):
     if _client is None:
-        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Skoolgpt support")
     if body.amount < MIN_TOPUP_AMOUNT:
         raise HTTPException(status_code=400, detail=f"Minimum top-up is ₹{MIN_TOPUP_AMOUNT:.0f}")
     student = _find_real_student(db, body.phone, body.student_id)
@@ -96,7 +96,7 @@ class VerifyPaymentRequest(BaseModel):
 @router.post("/pay/verify")
 def verify_payment(body: VerifyPaymentRequest, db: Session = Depends(get_db)):
     if _client is None:
-        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Skoolgpt support")
 
     try:
         _client.utility.verify_payment_signature({
@@ -153,7 +153,7 @@ def create_student_subscription(body: CreateSubscriptionRequest, db: Session = D
     (app.routers.razorpay_webhook), with no user action needed.
     """
     if _client is None or not settings.razorpay_student_plan_id:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     student = _find_real_student(db, body.phone, body.student_id)
     if cost_tracker.is_unlimited_active(student):
         raise HTTPException(status_code=400, detail="This student is already on the unlimited plan")
@@ -177,7 +177,7 @@ class VerifySubscriptionRequest(BaseModel):
 def verify_student_subscription(body: VerifySubscriptionRequest, db: Session = Depends(get_db)):
     """Confirms the FIRST payment on a new subscription mandate — see create_student_subscription."""
     if _client is None:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
 
     try:
         _client.utility.verify_subscription_payment_signature({
@@ -240,7 +240,7 @@ async def request_cancel_subscription_otp(body: CreateSubscriptionRequest, db: S
         raise HTTPException(status_code=400, detail="No active auto-renewing subscription found for this student")
     otp = await generate_and_store_otp("subscription_cancel", body.phone)
     await send_whatsapp_message(
-        body.phone, f"Your code to cancel your Qlass AI Tutor subscription is *{otp}*. It expires in 10 minutes."
+        body.phone, f"Your code to cancel your Skoolgpt AI Tutor subscription is *{otp}*. It expires in 10 minutes."
     )
     return {"sent": True}
 
@@ -261,7 +261,7 @@ async def cancel_student_subscription(body: CancelSubscriptionRequest, db: Sessi
     check once it passes.
     """
     if _client is None:
-        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Qlass support")
+        raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     if await is_otp_rate_limited("subscription_cancel_verify", body.phone):
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
     if not await verify_otp("subscription_cancel", body.phone, body.otp):

@@ -78,4 +78,4 @@ def format_student_requested_help_message(student_name: str) -> str:
     trigger, so it shouldn't imply they've been struggling on any specific
     question.
     """
-    return f"🙋 {student_name} just asked to talk to their teacher on Qlass AI Tutor — might be worth reaching out."
+    return f"🙋 {student_name} just asked to talk to their teacher on Skoolgpt AI Tutor — might be worth reaching out."

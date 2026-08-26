@@ -192,7 +192,7 @@ export default function SchoolProfile() {
         <h3 style={{ marginTop: 0 }}>Sign-In Link</h3>
         <p className="muted" style={{ marginTop: -8, marginBottom: 16, fontSize: 13 }}>
           For someone who already has an account (a teacher, or a student you've already enrolled) — shows{" "}
-          {school.name}'s own logo and name instead of the generic Qlass login page. Bookmark-friendly; share this
+          {school.name}'s own logo and name instead of the generic Skoolgpt login page. Bookmark-friendly; share this
           instead of the plain site link.
         </p>
         <div style={{ display: "flex", gap: 8 }}>

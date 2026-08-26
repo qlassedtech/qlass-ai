@@ -132,7 +132,7 @@ async def register(body: RegisterRequest, request: Request, db: Session = Depend
         # (they still complete login via the normal OTP flow).
         result = await send_whatsapp_message(
             phone,
-            f"Hi {existing.name}! You're already set up with Qlass AI Tutor — just message me here "
+            f"Hi {existing.name}! You're already set up with Skoolgpt AI Tutor — just message me here "
             f"anytime to keep learning. 🎓",
         )
         if not result.get("sent"):

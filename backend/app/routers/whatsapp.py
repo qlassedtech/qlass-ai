@@ -845,7 +845,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             and not cost_tracker.has_independent_payment(db, student.id):
         await _send_localized_notice(
             db, from_phone, student,
-            "Your school's Qlass account is currently on hold — ask your school to contact Qlass, "
+            "Your school's Skoolgpt account is currently on hold — ask your school to contact Skoolgpt, "
             "or top up your own AI credits directly to keep chatting with me!",
         )
         return
@@ -853,7 +853,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
         await _send_localized_notice(
             db, from_phone, student,
-            "Your school's Qlass pilot has ended. Ask your school to continue the programme, "
+            "Your school's Skoolgpt pilot has ended. Ask your school to continue the programme, "
             "or top up your own AI credits to keep learning!",
         )
         return

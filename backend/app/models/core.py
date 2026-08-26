@@ -41,7 +41,7 @@ class Centre(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id"))
     # Shown on the school's own portal header and stamped onto anything
     # generated on their behalf (e.g. practice-set PDFs) alongside the
-    # "Powered by Qlass Learning" mark.
+    # "Powered by Skoolgpt" mark.
     logo_url = Column(Text)
     # The school's own board (e.g. "CBSE", "BSEB") — a school already knows
     # which board it follows, so new students under it default to this

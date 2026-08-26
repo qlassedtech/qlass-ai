@@ -884,7 +884,7 @@ label {
 }
 
 /* A persistent institutional header for school-branded pages — the school's
-   logo and name lead, with a small "Powered by Qlass Learning" chip, rather
+   logo and name lead, with a small "Powered by Skoolgpt" chip, rather
    than a logo floating inside the hero column with no visual frame. */
 .landing-brandbar {
   display: flex;
