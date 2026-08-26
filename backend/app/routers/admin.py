@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query as QueryParam
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.query import Query
 
@@ -730,7 +731,19 @@ async def change_email(
     if db.query(Teacher).filter(Teacher.email == new_email, Teacher.id != teacher.id).first():
         raise HTTPException(status_code=409, detail="An account with this Google email already exists")
     teacher.email = new_email
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Same narrow check-then-write race as
+        # app.routers.student_app.link_google_account — two concurrent
+        # change-email calls for the same Google account can both pass the
+        # `existing` check above before either commits. The DB's own
+        # unique constraint on Teacher.email is what actually prevents the
+        # double-link; this just turns the resulting crash into the same
+        # 409 the sequential case already returns, instead of an
+        # unhandled 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="An account with this Google email already exists")
     audit_log.record(db, teacher.id, "change_email", "teacher", teacher.id)
     return {"email": teacher.email}
 
