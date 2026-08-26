@@ -385,9 +385,9 @@ label {
 /* The generic (non-school) /join hero sits beside a large 44px headline —
    the shared 152px login-page logo size reads as tiny next to it. */
 .landing-logo-large {
-  width: 180px;
-  padding: 10px 18px;
-  margin: 0 auto 16px;
+  width: 128px;
+  padding: 8px 14px;
+  margin: 0 auto 14px;
 }
 
 .sidebar-logo {
