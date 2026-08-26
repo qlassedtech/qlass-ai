@@ -1054,6 +1054,13 @@ label {
 
   .landing-hero-form {
     order: 2;
+    /* .landing-form-card's own max-width (420px) constrains its size fine,
+       but a block element doesn't center itself just because its text
+       does — confirmed live: the card sat flush against the left edge
+       with a large empty gap on the right, the one thing on this
+       otherwise-centered layout that wasn't. */
+    display: flex;
+    justify-content: center;
   }
 
   .landing-hero-demo {
