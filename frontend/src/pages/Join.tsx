@@ -622,8 +622,8 @@ export default function Join() {
           <a href="tel:+919031003985">+91 9031003985</a>
           <span> / </span>
           <a href="tel:+919031003982">+91 9031003982</a>
-          <span> | ✉️ </span>
-          <a href="mailto:mailus@qlass.in">mailus@qlass.in</a>
+          <span> / </span>
+          <a href="tel:+917827740390">+91 78277 40390</a>
         </p>
       </div>
     </div>
