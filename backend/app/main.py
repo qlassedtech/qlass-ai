@@ -24,7 +24,17 @@ importlib.import_module("app.models.core")
 
 setup_logging()
 
-app = FastAPI(title="Qlass AI OS", version="0.1.0")
+if settings.sentry_dsn:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        environment=settings.environment,
+        traces_sample_rate=0.05,
+        send_default_pii=False,
+    )
+
+app = FastAPI(title="Skoolgpt API", version="0.1.0")
 
 # Uploaded school logos / student & teacher photos (see app.services.uploads)
 _static_dir = REPO_ROOT / "backend" / "static"

@@ -84,7 +84,7 @@ export default function MyTutor() {
     try {
       const result = await api.cancelMyTutorSubscription();
       const until = result.access_until ? new Date(result.access_until).toLocaleDateString() : "";
-      setSubStatus(`Auto-renewal cancelled — you'll keep unlimited access until ${until}.`);
+      setSubStatus(`Auto-renewal cancelled — you'll keep Plus access until ${until}.`);
       loadProfile();
     } catch (err) {
       setSubStatus(err instanceof Error ? err.message : "Failed to cancel");
@@ -118,7 +118,7 @@ export default function MyTutor() {
         {subscriptionPlan === "unlimited" ? (
           <>
             <p style={{ marginBottom: 8 }}>
-              🎓 <strong>Unlimited plan active</strong>
+              🎓 <strong>Plus plan active</strong>
               {subscriptionExpiresAt && <> — until {new Date(subscriptionExpiresAt).toLocaleDateString()}</>}
               {autoRenewing && <span className="muted"> (auto-renews)</span>}
             </p>
@@ -131,10 +131,10 @@ export default function MyTutor() {
         ) : (
           <>
             <p className="muted" style={{ marginBottom: 10 }}>
-              Go unlimited for ₹3500/month, auto-renews — no more topping up your personal tutor wallet.
+              Get Skoolgpt Plus for ₹3500/month, auto-renews — no more topping up your personal tutor wallet.
             </p>
             <button type="button" onClick={handleSubscribe} disabled={subLoading}>
-              {subLoading ? "Please wait…" : "Subscribe for ₹3500/month"}
+              {subLoading ? "Please wait…" : "Get Plus for ₹3500/month"}
             </button>
           </>
         )}

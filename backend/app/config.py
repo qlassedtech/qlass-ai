@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str = "changeme"
     brand_name: str = "Skoolgpt"
+    sentry_dsn: str | None = None
 
     database_url: str
     redis_url: str = "redis://localhost:6379/0"
@@ -131,6 +132,15 @@ class Settings(BaseSettings):
     # from WhatsApp (see app.services.escalation). Comma-separated.
     support_phone: str = "9031003985"
     school_review_staff_phones: str = "919031003985,918460184666"
+
+    # Wati utility-template names for cold-contact notifications — blank
+    # until each template is approved, at which point the send switches
+    # from a session message (silently undelivered outside a 24h window)
+    # to the template. See whatsapp_client.send_notification.
+    parent_digest_template: str | None = None
+    teacher_escalation_template: str | None = None
+    student_approved_template: str | None = None
+    habit_bonus_template: str | None = None
 
     # Platform-wide hard ceiling on raw LLM/provider spend per IST day —
     # see cost_tracker.platform_spend_today and the WhatsApp message gate.

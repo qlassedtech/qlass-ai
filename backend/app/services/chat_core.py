@@ -42,7 +42,7 @@ from app.config import settings
 from app.models.core import ChatHistory, Student, TopicProgress
 from app.services import cost_tracker
 from app.services.document_client import apply_active_document_pin
-from app.services.escalation import get_escalation_recipients, format_escalation_message
+from app.services.escalation import get_escalation_recipients, format_escalation_message, format_escalation_reason
 from app.services.habit import evaluate_habit_milestones
 from app.services.intent_classifier import classify_intent, classify_relevant_excerpts
 from app.services.llm_client import translate_with_claude
@@ -440,7 +440,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 f"\n\nYou also have ₹{wallet_balance:.2f} in usage credits available if you go past "
                 f"your plan's included usage." if wallet_balance > 0 else ""
             )
-            reply_text = f"You're on the unlimited plan ✨\n\n{usage_lines}{overage_note}"
+            reply_text = f"You're on the Plus plan ✨\n\n{usage_lines}{overage_note}"
         else:
             balance = cost_tracker.get_balance(db, student.id)
             reply_text = (
@@ -493,7 +493,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         # struggle pattern.
         teacher_recipients = get_escalation_recipients(db, student.centre_id)
         for recipient in teacher_recipients:
-            await _notify_recipient(recipient.phone, _requested_help_message(student.name))
+            await _notify_recipient(recipient, student.name, "asked to talk to their teacher", _requested_help_message(student.name))
         reply_text = (
             "I've let your teacher know you'd like some help! 🙋 They'll reach out soon. "
             "What else can I help you with in the meantime?"
@@ -723,8 +723,9 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             student.consecutive_unresolved_hints = 0
             db.commit()
             escalation_message = format_escalation_message(student.name, result["topic"])
+            escalation_reason = format_escalation_reason(result["topic"])
             for recipient in get_escalation_recipients(db, student.centre_id):
-                await _notify_recipient(recipient.phone, escalation_message)
+                await _notify_recipient(recipient, student.name, escalation_reason, escalation_message)
             if not result["closing"]:
                 reply_text = f"{reply_text}\n\nBy the way, I've let your teacher know you might want a hand with this — they'll reach out soon. 🙋"
 
@@ -888,9 +889,9 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     )
 
 
-async def _notify_recipient(phone: str, message: str) -> None:
-    from app.services.whatsapp_client import send_whatsapp_message
-    await send_whatsapp_message(phone, message)
+async def _notify_recipient(teacher, student_name: str, reason: str, message: str) -> None:
+    from app.services.escalation import notify_teacher
+    await notify_teacher(teacher, student_name, reason, message)
 
 
 def _requested_help_message(student_name: str) -> str:

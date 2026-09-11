@@ -50,7 +50,7 @@ export default function Terms() {
           <Link to="/refunds">Refund Policy</Link>, and are consumed at the rates displayed at the time of use.
         </li>
         <li>
-          <strong>Annual plans.</strong> The Unlimited plan gives access for the period shown at purchase and
+          <strong>Annual plans.</strong> The Plus plan gives access for the period shown at purchase and
           renews automatically unless cancelled. It is subject to a fair-use limit displayed at the time of
           purchase and on your account page; usage well beyond what a single student would reasonably need may be
           slowed or paused for the rest of the billing period. Plans are for one student and may not be shared.

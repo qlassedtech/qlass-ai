@@ -42,7 +42,7 @@ def _format_reminder(name: str, expires_at: datetime, price_label: str) -> str:
     days_left = (expires_at.date() - datetime.now(timezone.utc).date()).days
     when = "today" if days_left <= 0 else f"in {days_left} day{'s' if days_left != 1 else ''}"
     return (
-        f"⏰ Hi! {name}'s {settings.brand_name} unlimited AI tutor plan ({price_label}) expires {when} "
+        f"⏰ Hi! {name}'s {settings.brand_name} Plus plan ({price_label}) expires {when} "
         f"({expires_at.strftime('%d %b %Y')}). Renew soon to avoid any interruption!"
     )
 

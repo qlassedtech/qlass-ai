@@ -60,6 +60,22 @@ def get_escalation_recipients(db: Session, centre_id: int | None) -> list[Teache
     return db.query(Teacher).filter(Teacher.centre_id == centre_id, Teacher.role.in_(("teacher", "admin"))).all()
 
 
+async def notify_teacher(teacher: Teacher, student_name: str, reason: str, fallback_text: str) -> dict:
+    """Cold-contact send to a teacher — template when configured, else session message."""
+    from app.config import settings
+    from app.services.whatsapp_client import send_notification
+
+    first_name = (teacher.name or "").split()[0] if getattr(teacher, "name", None) else "there"
+    return await send_notification(
+        teacher.phone, settings.teacher_escalation_template, [first_name, student_name, reason], fallback_text
+    )
+
+
+def format_escalation_reason(topic: str | None) -> str:
+    topic_note = f" on {topic}" if topic else ""
+    return f"{ESCALATION_THRESHOLD} check questions wrong in a row{topic_note} despite multiple attempts"
+
+
 def format_escalation_message(student_name: str, topic: str | None) -> str:
     topic_note = f" with *{topic}*" if topic else ""
     return (

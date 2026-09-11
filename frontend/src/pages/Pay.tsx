@@ -50,7 +50,7 @@ export default function Pay() {
         key: subscription.key_id,
         subscription_id: subscription.subscription_id,
         name: "Skoolgpt",
-        description: "Unlimited plan — ₹2499/year, auto-renews. Fair-use limit applies.",
+        description: "Skoolgpt Plus — ₹2499/year, auto-renews. Fair-use limit applies.",
         handler: async (response: {
           razorpay_subscription_id: string;
           razorpay_payment_id: string;
@@ -63,7 +63,7 @@ export default function Pay() {
               : "";
             setStatus({
               kind: "success",
-              message: `Unlimited plan activated! Auto-renews — active until ${expires}.`,
+              message: `Skoolgpt Plus activated! Auto-renews — active until ${expires}.`,
             });
           } catch (err) {
             setStatus({
@@ -165,10 +165,10 @@ export default function Pay() {
 
         <div style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--border)", textAlign: "center" }}>
           <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
-            Unlimited plan — ₹2499/year. Fair-use limit applies (see <Link to="/terms">Terms</Link>). Auto-renews yearly.
+            Skoolgpt Plus — ₹2499/year. Fair-use limit applies (see <Link to="/terms">Terms</Link>). Auto-renews yearly.
           </p>
           <button type="button" onClick={handleSubscribe} disabled={loading} style={{ width: "100%" }}>
-            Subscribe for ₹2499/year
+            Get Plus for ₹2499/year
           </button>
         </div>
 

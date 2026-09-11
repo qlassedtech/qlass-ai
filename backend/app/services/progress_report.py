@@ -237,6 +237,20 @@ def format_parent_digest(student_name: str, stats: dict, activity: dict) -> str:
     return "\n".join(lines)
 
 
+def format_parent_digest_summary(stats: dict, activity: dict) -> str:
+    """One-line version of format_parent_digest, for a template parameter."""
+    if stats["messages_sent"] == 0:
+        return "no tutor sessions this week — a gentle nudge to check in might help"
+    parts = [f"{stats['messages_sent']} messages exchanged"]
+    if stats["total_evaluated"] > 0:
+        parts.append(f"{stats['correct']}/{stats['total_evaluated']} check questions correct ({stats['accuracy_pct']}%)")
+    if stats["weak_topics"]:
+        parts.append(f"needs practice: {', '.join(stats['weak_topics'])}")
+    if activity["streak_days"] >= 2:
+        parts.append(f"{activity['streak_days']}-day streak")
+    return " · ".join(parts)
+
+
 def format_teacher_digest(student_name: str, stats: dict, hints_given: int = 0, direct_solutions: int = 0) -> str:
     if stats["messages_sent"] == 0:
         return f"*{student_name}* — no activity this week."

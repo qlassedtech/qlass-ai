@@ -21,10 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Parent, Student  # noqa: E402
-from app.services.progress_report import format_parent_digest, get_activity_stats, get_student_stats  # noqa: E402
-from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
+from app.services.progress_report import (  # noqa: E402
+    format_parent_digest, format_parent_digest_summary, get_activity_stats, get_student_stats,
+)
+from app.services.whatsapp_client import send_notification  # noqa: E402
 
 DIGEST_WINDOW_DAYS = 7
 
@@ -42,11 +45,16 @@ async def send_digests(dry_run: bool) -> None:
             stats = get_student_stats(db, student.id, days=DIGEST_WINDOW_DAYS)
             activity = get_activity_stats(db, student.id)
             message = format_parent_digest(student.name, stats, activity)
+            summary = format_parent_digest_summary(stats, activity)
+            parent_first_name = (parent.name or "").split()[0] if getattr(parent, "name", None) else "there"
 
             if dry_run:
                 print(f"[DRY RUN] Would send to {parent.phone} (parent of {student.name}):\n{message}\n")
             else:
-                result = await send_whatsapp_message(parent.phone, message)
+                result = await send_notification(
+                    parent.phone, settings.parent_digest_template,
+                    [parent_first_name, student.name, summary], message,
+                )
                 print(f"{'Sent' if result.get('sent') else 'FAILED'} parent digest to {parent.phone} ({student.name})")
             sent += 1
         print(f"\n{sent} parent digest(s) {'would be ' if dry_run else ''}sent.")

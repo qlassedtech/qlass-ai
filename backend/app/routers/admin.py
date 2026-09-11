@@ -41,7 +41,7 @@ from app.services.teacher_auth import get_current_teacher, hash_password, verify
 from app.services import tenancy
 from app.services.tenancy import get_or_create_linked_student
 from app.services.uploads import save_image_upload
-from app.services.whatsapp_client import send_whatsapp_message, send_template_message
+from app.services.whatsapp_client import send_whatsapp_message, send_template_message, send_notification
 from app.services.workbook_service import generate_workbook_questions
 from app.services.ocr_client import extract_text_from_image
 from app.services.document_client import extract_text_from_document
@@ -818,9 +818,11 @@ async def approve_student(
     # been cleared except by randomly retrying. Best-effort: a missed
     # notification shouldn't fail the approval itself.
     try:
-        await send_whatsapp_message(
-            student.phone,
-            f"🎉 Good news — you've been approved! Reply here anytime with a question to start learning.",
+        centre = db.query(Centre).filter(Centre.id == student.centre_id).first()
+        await send_notification(
+            student.phone, settings.student_approved_template,
+            [(student.name or "").split()[0] if student.name else "there", centre.name if centre else settings.brand_name],
+            "🎉 Good news — you've been approved! Reply here anytime with a question to start learning.",
         )
     except Exception:
         pass
@@ -1360,13 +1362,13 @@ def _activate_unlimited(
     student.subscription_expires_at = datetime.now(timezone.utc) + timedelta(days=duration_days)
     if is_trial:
         cost_tracker.add_credits(
-            db, student.id, 0.0, note=note or f"Unlimited plan TRIAL ({duration_days} days)",
+            db, student.id, 0.0, note=note or f"Plus plan TRIAL ({duration_days} days)",
             external_ref=None, service=TRIAL_UNLIMITED_SERVICE,
         )
     else:
         price = round(full_term_price * duration_days / full_term_days, 2)
         cost_tracker.add_credits(
-            db, student.id, price, note=note or f"Unlimited plan activation ({duration_days} days)",
+            db, student.id, price, note=note or f"Plus plan activation ({duration_days} days)",
             external_ref=payment_reference, service=PAID_UNLIMITED_SERVICE,
         )
     audit_log.record(
@@ -1418,12 +1420,12 @@ def set_student_subscription(
     (their existing wallet balance, if any, is untouched).
     """
     if body.plan == "unlimited" and teacher.role != "super_admin":
-        raise HTTPException(status_code=403, detail="Only Qlass staff can grant the unlimited plan")
+        raise HTTPException(status_code=403, detail="Only Qlass staff can grant the Plus plan")
     if body.plan not in ("credits", "unlimited"):
         raise HTTPException(status_code=400, detail="plan must be 'credits' or 'unlimited'")
     if body.plan == "unlimited":
         if not body.duration_days:
-            raise HTTPException(status_code=400, detail="duration_days is required to activate the unlimited plan")
+            raise HTTPException(status_code=400, detail="duration_days is required to activate the Plus plan")
         if not body.is_trial:
             if not body.payment_reference:
                 raise HTTPException(status_code=400, detail="payment_reference is required for a paid activation")
@@ -2405,7 +2407,7 @@ def create_my_tutor_subscription(db: Session = Depends(get_db), teacher: Teacher
         raise HTTPException(status_code=503, detail="Subscriptions aren't configured yet — contact Skoolgpt support")
     student = _my_tutor_student(db, teacher)
     if cost_tracker.is_unlimited_active(student):
-        raise HTTPException(status_code=400, detail="You're already on the unlimited plan")
+        raise HTTPException(status_code=400, detail="You're already on the Plus plan")
     subscription = razorpay_client.create_subscription(
         settings.razorpay_teacher_plan_id, razorpay_client.TEACHER_SUBSCRIPTION_TOTAL_CYCLES,
         notes={"student_id": str(student.id), "teacher_id": str(teacher.id), "kind": "teacher_monthly"},

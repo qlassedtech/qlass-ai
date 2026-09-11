@@ -28,7 +28,7 @@ from app.database import SessionLocal  # noqa: E402
 from app.models.core import ChatHistory, Student  # noqa: E402
 from app.services.habit import HABIT_MILESTONES  # noqa: E402
 from app.services.push_client import send_push  # noqa: E402
-from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
+from app.services.whatsapp_client import send_notification  # noqa: E402
 
 
 def _has_engaged_in_window(db, student_id: int, window_start: datetime, window_end: datetime) -> bool:
@@ -75,7 +75,11 @@ async def send_nudges(dry_run: bool) -> None:
                 if dry_run:
                     print(f"[DRY RUN] Would nudge {student.phone} ({student.name}) — {name}: {message}")
                 else:
-                    result = await send_whatsapp_message(student.phone, message)
+                    first_name = (student.name or "").split()[0] if student.name else "there"
+                    result = await send_notification(
+                        student.phone, settings.habit_bonus_template,
+                        [first_name, f"{bonus:.0f}", str(elapsed_days)], message,
+                    )
                     print(f"{'Sent' if result.get('sent') else 'FAILED'} WhatsApp nudge to {student.phone} ({name})")
                     # Additive, not a replacement — a student using the native
                     # app may not have WhatsApp notifications enabled, so this

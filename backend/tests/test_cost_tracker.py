@@ -138,7 +138,7 @@ def test_unlimited_plan_blocks_once_period_cap_hit_with_empty_wallet(db_session)
 
     weekly_cap = cost_tracker.UNLIMITED_PERIOD_SPEND_CAPS["student"]["week"]
     # Burn through the weekly allotment with real (billed-equivalent) cost.
-    raw_cost_needed = weekly_cap / cost_tracker.MARKUP_MULTIPLIER
+    raw_cost_needed = weekly_cap / cost_tracker.MARKUP_MULTIPLIER + 0.001  # just past the cap (float-safe)
     cost_tracker._deduct(db_session, "claude_sonnet", raw_cost_needed, student.id)
 
     assert cost_tracker.is_unlimited_over_period_cap(db_session, student) is True
@@ -159,7 +159,7 @@ def test_unlimited_plan_over_cap_draws_from_topped_up_wallet(db_session):
     db_session.commit()
 
     weekly_cap = cost_tracker.UNLIMITED_PERIOD_SPEND_CAPS["student"]["week"]
-    raw_cost_needed = weekly_cap / cost_tracker.MARKUP_MULTIPLIER
+    raw_cost_needed = weekly_cap / cost_tracker.MARKUP_MULTIPLIER + 0.001  # just past the cap (float-safe)
     cost_tracker._deduct(db_session, "claude_sonnet", raw_cost_needed, student.id)
     assert cost_tracker.has_credits(db_session, student.id) is False
 

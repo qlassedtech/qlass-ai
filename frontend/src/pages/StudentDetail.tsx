@@ -95,7 +95,7 @@ export default function StudentDetail() {
         is_trial: subIsTrial,
         payment_reference: subIsTrial ? undefined : subPaymentRef.trim(),
       });
-      setSubStatus(subIsTrial ? "Trial activated!" : "Unlimited plan activated!");
+      setSubStatus(subIsTrial ? "Trial activated!" : "Plus plan activated!");
       setSubPaymentRef("");
       load();
     } catch (err) {
@@ -318,7 +318,7 @@ export default function StudentDetail() {
         <div className="card" style={{ marginBottom: 24 }}>
           <h3>Subscription Plan</h3>
           <p style={{ marginBottom: 12 }}>
-            Current plan: <strong>{student.subscription_plan === "unlimited" ? "Unlimited" : "Credits (pay-as-you-go)"}</strong>
+            Current plan: <strong>{student.subscription_plan === "unlimited" ? "Plus" : "Credits (pay-as-you-go)"}</strong>
             {student.subscription_plan === "unlimited" && student.subscription_expires_at && (
               <> — expires {new Date(student.subscription_expires_at).toLocaleDateString()}</>
             )}
@@ -352,7 +352,7 @@ export default function StudentDetail() {
                 </label>
               )}
               <button type="button" onClick={handleActivateUnlimited} disabled={subLoading}>
-                Activate Unlimited (₹2499/yr)
+                Activate Plus (₹2499/yr)
               </button>
             </div>
           )}

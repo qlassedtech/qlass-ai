@@ -110,7 +110,7 @@ async def _handle_charged(db: Session, payload: dict) -> None:
     db.commit()
     await send_whatsapp_message(
         student.phone,
-        f"✅ Your {settings.brand_name} unlimited plan renewed successfully! Active until "
+        f"✅ Your {settings.brand_name} Plus plan renewed successfully! Active until "
         f"{student.subscription_expires_at.strftime('%d %b %Y')}.",
     )
 

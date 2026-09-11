@@ -40,6 +40,7 @@ from app.services.escalation import (
     SCHOOL_REVIEW_STAFF_PHONES,
     get_escalation_recipients,
     format_student_requested_help_message,
+    notify_teacher,
 )
 from app.services.profile_builder import next_missing_field
 from app.services import rate_limit
@@ -828,7 +829,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if probe_text == "talk to teacher":
         recipients = get_escalation_recipients(db, student.centre_id)
         for recipient in recipients:
-            await send_whatsapp_message(recipient.phone, format_student_requested_help_message(student.name))
+            await notify_teacher(
+                recipient, student.name, "asked to talk to their teacher",
+                format_student_requested_help_message(student.name),
+            )
         # A self-signup student (default "Qlass Direct" centre) has no
         # real school/teacher on file at all — confirmed live, this sent
         # "I've let your teacher know" to a student whose centre had zero

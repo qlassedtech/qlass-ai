@@ -167,7 +167,7 @@ async def create_student_subscription(body: CreateSubscriptionRequest, request: 
         raise HTTPException(status_code=429, detail="Too many payment attempts — please wait a few minutes and try again")
     student = _find_real_student(db, body.phone, body.student_id)
     if cost_tracker.is_unlimited_active(student):
-        raise HTTPException(status_code=400, detail="This student is already on the unlimited plan")
+        raise HTTPException(status_code=400, detail="This student is already on the Plus plan")
 
     subscription = razorpay_client.create_subscription(
         settings.razorpay_student_plan_id, razorpay_client.STUDENT_SUBSCRIPTION_TOTAL_CYCLES,

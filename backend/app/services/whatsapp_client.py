@@ -1,4 +1,5 @@
 import hmac
+import re
 import uuid
 from urllib.parse import urlparse, parse_qs
 
@@ -424,6 +425,27 @@ async def send_template_message(to_phone: str, template_name: str, params: list[
         return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
     except httpx.HTTPError as exc:
         return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
+TEMPLATE_PARAM_MAX_CHARS = 900
+
+
+def _tpl(value: object) -> str:
+    """Sanitise a value for a WhatsApp template parameter (no newlines, bounded length)."""
+    return re.sub(r"\s+", " ", str(value)).strip()[:TEMPLATE_PARAM_MAX_CHARS]
+
+
+async def send_notification(to_phone: str, template_name: str | None, params: list[str], fallback_text: str) -> dict:
+    """
+    Cold-contact notification: an approved utility template when its name
+    is configured, otherwise the plain session message (which WhatsApp only
+    delivers if the recipient messaged us within the last 24h).
+    """
+    if template_name:
+        return await send_template_message(
+            to_phone, template_name, [{"name": str(i + 1), "value": _tpl(v)} for i, v in enumerate(params)]
+        )
+    return await send_whatsapp_message(to_phone, fallback_text)
 
 
 async def send_broadcast_template(
