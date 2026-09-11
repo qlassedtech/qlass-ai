@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import LegalLayout, { Placeholder, SUPPORT_WHATSAPP, SUPPORT_WHATSAPP_LINK } from "../components/LegalLayout";
+import LegalLayout, { SUPPORT_WHATSAPP, SUPPORT_WHATSAPP_LINK } from "../components/LegalLayout";
 
 export default function Terms() {
   return (
@@ -7,8 +7,9 @@ export default function Terms() {
       <h2>1. Who we are</h2>
       <p>
         Skoolgpt is an AI tutoring service operated by Qlass Edtech ("Qlass", "we", "us"), a company registered in
-        India. Registered address: <Placeholder>[Registered address]</Placeholder>. GSTIN:{" "}
-        <Placeholder>[GSTIN]</Placeholder>. These Terms govern your use of Skoolgpt on WhatsApp and at skoolgpt.in.
+        India. Registered address: SkoolGPT, 1st and 2nd Floor, Near RPS Engineering College, Kothwan, Khagaul,
+        Danapur, Patna, Bihar, India – 801503. GSTIN: 10AAACQ9006D1Z3. These Terms govern your use of Skoolgpt on
+        WhatsApp and at skoolgpt.in.
         By using Skoolgpt you agree to them.
       </p>
 

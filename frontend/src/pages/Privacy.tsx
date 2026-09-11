@@ -1,4 +1,4 @@
-import LegalLayout, { Placeholder, SUPPORT_WHATSAPP, SUPPORT_WHATSAPP_LINK } from "../components/LegalLayout";
+import LegalLayout, { SUPPORT_WHATSAPP, SUPPORT_WHATSAPP_LINK } from "../components/LegalLayout";
 
 export default function Privacy() {
   return (
@@ -83,11 +83,14 @@ export default function Privacy() {
 
       <h2>9. Grievance Officer</h2>
       <p>
-        <Placeholder>[Grievance officer name]</Placeholder>, Qlass Edtech
+        Swati Jha, Grievance Officer, Qlass Edtech
         <br />
-        WhatsApp: <a href={SUPPORT_WHATSAPP_LINK}>{SUPPORT_WHATSAPP}</a>
+        Phone: <a href="tel:+919229261314">+91 92292 61314</a>
         <br />
-        Email: <Placeholder>[grievance email]</Placeholder>
+        WhatsApp support: <a href={SUPPORT_WHATSAPP_LINK}>{SUPPORT_WHATSAPP}</a>
+        <br />
+        Address: SkoolGPT, 1st and 2nd Floor, Near RPS Engineering College, Kothwan, Khagaul, Danapur, Patna, Bihar,
+        India – 801503
       </p>
       <p>We acknowledge every request or complaint and respond within 30 days.</p>
 
