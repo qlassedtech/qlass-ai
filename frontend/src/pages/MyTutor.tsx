@@ -131,7 +131,7 @@ export default function MyTutor() {
         ) : (
           <>
             <p className="muted" style={{ marginBottom: 10 }}>
-              Get Skoolgpt Plus for ₹3500/month, auto-renews — no more topping up your personal tutor wallet.
+              Get Skoolgpt Plus for ₹3500/month. Fair-use limit applies (see Terms). Auto-renews monthly.
             </p>
             <button type="button" onClick={handleSubscribe} disabled={subLoading}>
               {subLoading ? "Please wait…" : "Get Plus for ₹3500/month"}
