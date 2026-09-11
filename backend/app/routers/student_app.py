@@ -10,7 +10,7 @@ from app.models.core import ChatHistory, Parent, Student, Teacher
 from app.services import cost_tracker, school_billing
 from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.document_client import extract_text_from_document
-from app.services.escalation import QLASS_SUPPORT_PHONE, get_escalation_recipients
+from app.services.escalation import SUPPORT_PHONE, get_escalation_recipients
 from app.services.google_auth import GoogleAuthError, verify_google_id_token
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
@@ -103,7 +103,7 @@ def student_login(body: StudentLoginRequest, db: Session = Depends(get_db)):
     )
     if not student or not student.password_hash or not verify_password(body.password, student.password_hash):
         raise HTTPException(status_code=401, detail="Invalid phone or password")
-    token = create_student_access_token(student.id)
+    token = create_student_access_token(student.id, student.token_version or 0)
     return {"access_token": token, "student": student_summary(db, student)}
 
 
@@ -140,7 +140,7 @@ def student_google_login(body: StudentGoogleLoginRequest, db: Session = Depends(
             detail="No account found for this Google email — sign in with your WhatsApp number first, "
                    "then link Google from your account settings",
         )
-    token = create_student_access_token(student.id)
+    token = create_student_access_token(student.id, student.token_version or 0)
     return {"access_token": token, "student": student_summary(db, student)}
 
 
@@ -227,7 +227,7 @@ async def verify_student_otp(body: VerifyOtpRequest, db: Session = Depends(get_d
         student = create_student_profile(db, phone, body.name or "New Student", get_qlass_direct_centre_id(db))
         await apply_referral_at_signup(db, student, body.referral_code)
 
-    token = create_student_access_token(student.id)
+    token = create_student_access_token(student.id, student.token_version or 0)
     return {"access_token": token, "student": student_summary(db, student)}
 
 
@@ -410,12 +410,12 @@ async def _reply_to_locked(db: Session, student: Student, message_text: str) -> 
         if cost_tracker.is_unlimited_active(student):
             detail = (
                 f"You've used up your plan's included AI usage for this period — top up usage credits to "
-                f"keep going until it resets: {pay_link} (or call Qlass support at {QLASS_SUPPORT_PHONE})"
+                f"keep going until it resets: {pay_link} (or call {settings.brand_name} support at {SUPPORT_PHONE})"
             )
         else:
             detail = (
                 f"You're out of AI credits — {school_note}top up directly: {pay_link} "
-                f"(or call Qlass support at {QLASS_SUPPORT_PHONE})"
+                f"(or call {settings.brand_name} support at {SUPPORT_PHONE})"
             )
         raise HTTPException(status_code=402, detail=detail)
     reply = await process_web_message(db, student, message_text)

@@ -1987,3 +1987,83 @@ label {
   background: var(--accent-lighter);
   box-shadow: none;
 }
+
+/* Public legal pages (/terms, /privacy, /refunds) — plain readable prose on
+   the same tokens as the auth cards. */
+.legal-page {
+  min-height: 100vh;
+  padding: 40px 20px 64px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.legal-inner {
+  max-width: 70ch;
+  margin: 0 auto;
+}
+
+.legal-inner .login-logo {
+  margin: 0 0 24px;
+}
+
+.legal-inner h1 {
+  font-size: 28px;
+  margin-bottom: 4px;
+}
+
+.legal-updated {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 28px;
+}
+
+.legal-inner h2 {
+  font-size: 18px;
+  margin: 28px 0 8px;
+}
+
+.legal-inner p,
+.legal-inner li {
+  font-size: 15px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+
+.legal-inner ul {
+  padding-left: 22px;
+  margin-bottom: 10px;
+}
+
+.legal-inner a {
+  color: var(--accent);
+}
+
+.legal-placeholder {
+  background: rgba(217, 119, 6, 0.15);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.legal-footer {
+  margin-top: 20px;
+  font-size: 12px;
+}
+
+.consent-line {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 4px 0 10px;
+}
+
+.consent-line a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.consent-line a:hover {
+  text-decoration: underline;
+}

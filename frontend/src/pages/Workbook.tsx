@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type School } from "../api";
+import { api, errorMessage, type School } from "../api";
 
 interface Chapter {
   id: number;
@@ -39,7 +39,7 @@ export default function Workbook() {
       // curriculum depth/terminology choice. A teacher can still override
       // for a mixed-board school.
       if (s.board) setBoard(s.board);
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load school")));
   }, []);
 
   useEffect(() => {
@@ -53,7 +53,9 @@ export default function Workbook() {
       setChapters([]);
       return;
     }
-    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase()).then(setChapters);
+    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase())
+      .then(setChapters)
+      .catch((err) => setError(errorMessage(err, "Failed to load chapters")));
   }, [classNum, board]);
 
   const subjects = [...new Set(chapters.map((c) => c.subject))].sort();
@@ -96,7 +98,7 @@ export default function Workbook() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      api.getSchool().then(setSchool);
+      api.getSchool().then(setSchool).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate worksheet");
     } finally {

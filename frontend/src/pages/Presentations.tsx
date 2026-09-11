@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type School } from "../api";
+import { api, errorMessage, type School } from "../api";
 
 type Status = "idle" | "generating" | "polling" | "completed" | "failed";
 
@@ -42,7 +42,7 @@ export default function Presentations() {
       // curriculum depth/terminology choice. A teacher can still override
       // for a mixed-board school.
       if (s.board) setBoard(s.board);
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load school")));
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
@@ -59,7 +59,9 @@ export default function Presentations() {
       setChapters([]);
       return;
     }
-    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase()).then(setChapters);
+    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase())
+      .then(setChapters)
+      .catch((err) => setError(errorMessage(err, "Failed to load chapters")));
   }, [classNum, board]);
 
   const subjects = [...new Set(chapters.map((c) => c.subject))].sort();
@@ -108,7 +110,7 @@ export default function Presentations() {
           if (result.status === "completed") {
             setStatus("completed");
             setPresentationUrl(result.url);
-            api.getSchool().then(setSchool);
+            api.getSchool().then(setSchool).catch(() => {});
             if (pollRef.current) clearInterval(pollRef.current);
           } else if (result.status === "failed") {
             setStatus("failed");

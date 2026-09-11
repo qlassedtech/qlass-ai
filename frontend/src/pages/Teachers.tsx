@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, absoluteUrl, type SchoolOverview, type Teacher, type TeacherAccount } from "../api";
+import { api, errorMessage, absoluteUrl, type SchoolOverview, type Teacher, type TeacherAccount } from "../api";
 
 const TEACHER_COLUMNS = ["name", "phone", "role", "centre_id"] as const;
 const SAMPLE_TEACHER_CSV = "name,phone,role,centre_id\nRam Prasad,919000000101,admin,\nSunita Devi,919000000102,teacher,\n";
@@ -37,16 +37,16 @@ export default function Teachers() {
   const fileInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
 
   function load() {
-    api.listTeachers().then(setTeachers);
+    api.listTeachers().then(setTeachers).catch((err) => setError(errorMessage(err, "Failed to load teachers")));
     api.me().then((teacher) => {
       setMe(teacher);
       // A single-school admin's own centre_id is inferred by the backend —
       // only org_admin/super_admin (who span multiple schools) need to pick
       // which one a new teacher/admin account belongs to.
       if (teacher.role === "org_admin" || teacher.role === "super_admin") {
-        api.getSchoolsOverview().then(setSchools);
+        api.getSchoolsOverview().then(setSchools).catch((err) => setError(errorMessage(err, "Failed to load schools")));
       }
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load your account")));
   }
 
   useEffect(load, []);

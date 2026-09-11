@@ -9,8 +9,16 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
-_gemini_client = google_genai.Client(api_key=settings.google_api_key) if settings.google_api_key else None
+_client = (
+    anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=45.0, max_retries=1)
+    if settings.anthropic_api_key
+    else None
+)
+_gemini_client = (
+    google_genai.Client(api_key=settings.google_api_key, http_options={"timeout": 45_000})
+    if settings.google_api_key
+    else None
+)
 
 # Which provider a given tutor-level model name belongs to (see
 # app.business_rules.TUTOR_LEVEL_MODELS) — everything not listed here falls

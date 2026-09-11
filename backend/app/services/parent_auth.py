@@ -13,9 +13,10 @@ from app.services.teacher_auth import JWT_ALGORITHM, JWT_EXPIRY_HOURS
 _bearer = HTTPBearer()
 
 
-def create_parent_access_token(parent_id: int) -> str:
+def create_parent_access_token(parent_id: int, token_version: int = 0) -> str:
     payload = {
         "sub": str(parent_id),
+        "tv": token_version,  # see Parent.token_version
         "type": "parent",  # its own type, distinct from "teacher"/"student" — see the audit fix in those modules
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -30,10 +31,13 @@ async def get_current_parent(
         if payload.get("type") != "parent":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
         parent_id = int(payload["sub"])
+        token_version = payload.get("tv", 0)
     except (jwt.PyJWTError, KeyError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     parent = db.query(Parent).filter(Parent.id == parent_id).first()
     if not parent:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Parent account not found")
+    if token_version != (parent.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return parent

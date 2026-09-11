@@ -268,8 +268,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     db.refresh(incoming_row)
 
     logger.info(
-        "turn start student_id=%s pending_field=%s active_quiz_id=%s text=%r",
-        student.id, student.pending_profile_field, student.active_quiz_id, message_text[:200],
+        "turn start student_id=%s pending_field=%s active_quiz_id=%s text_len=%s",
+        student.id, student.pending_profile_field, student.active_quiz_id, len(message_text),
     )
 
     # Resolves "quiz on the same"/"quiz on this" — prefers last_discussed_

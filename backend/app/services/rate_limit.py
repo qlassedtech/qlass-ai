@@ -1,9 +1,11 @@
 import asyncio
+import ipaddress
 import time
 import uuid
 from collections import defaultdict
 
 import redis.asyncio as redis
+from fastapi import Request
 
 from app.config import settings
 
@@ -41,6 +43,19 @@ OTP_RATE_LIMIT_WINDOW_SECONDS = 600
 # farming outright).
 SIGNUP_RATE_LIMIT_MAX_ATTEMPTS = 300
 SIGNUP_RATE_LIMIT_WINDOW_SECONDS = 600
+
+# Password login: failed attempts only. Tight per (phone, IP) so a
+# legitimate user isn't locked out by a stranger, with a looser pure
+# per-phone ceiling so an attacker rotating IPs is still bounded.
+LOGIN_FAIL_MAX_PER_IP = 5
+LOGIN_FAIL_MAX_PER_PHONE = 30
+LOGIN_FAIL_WINDOW_SECONDS = 600
+
+# Razorpay order/subscription creation — each call hits Razorpay's API and
+# leaves an unpaid order behind, so bound it per phone and per IP.
+PAYMENT_RATE_LIMIT_MAX_PER_PHONE = 10
+PAYMENT_RATE_LIMIT_MAX_PER_IP = 30
+PAYMENT_RATE_LIMIT_WINDOW_SECONDS = 600
 
 _redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if settings.redis_url else None
 
@@ -129,6 +144,61 @@ async def is_signup_rate_limited(key: str) -> bool:
     pipe.expire(redis_key, SIGNUP_RATE_LIMIT_WINDOW_SECONDS)
     _, _, count, _ = await pipe.execute()
     return count > SIGNUP_RATE_LIMIT_MAX_ATTEMPTS
+
+
+def client_ip(request: Request) -> str:
+    """
+    request.client.host is authoritative once uvicorn runs with
+    --proxy-headers; only trust X-Real-IP when the direct peer is loopback
+    (i.e. the local reverse proxy), so a remote client can't spoof it.
+    """
+    host = request.client.host if request.client else None
+    if host:
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return host
+        except ValueError:
+            return host
+    return request.headers.get("x-real-ip") or host or "unknown"
+
+
+async def _sliding_window_count(key: str, window_seconds: int, record: bool = True) -> int:
+    """Shared sliding-window counter (Redis, with the same in-process fallback as above)."""
+    if _redis is None:
+        now = time.monotonic()
+        window = _fallback_timestamps[key]
+        window[:] = [t for t in window if now - t <= window_seconds]
+        if record:
+            window.append(now)
+        return len(window)
+
+    now = time.time()
+    pipe = _redis.pipeline()
+    pipe.zremrangebyscore(key, 0, now - window_seconds)
+    if record:
+        pipe.zadd(key, {f"{now}:{uuid.uuid4()}": now})
+    pipe.zcard(key)
+    pipe.expire(key, window_seconds)
+    results = await pipe.execute()
+    return results[2] if record else results[1]
+
+
+async def is_login_blocked(phone: str, ip: str) -> bool:
+    """Read-only check — call before verifying the password; see record_login_failure."""
+    per_ip = await _sliding_window_count(f"loginfail:ip:{phone}:{ip}", LOGIN_FAIL_WINDOW_SECONDS, record=False)
+    per_phone = await _sliding_window_count(f"loginfail:phone:{phone}", LOGIN_FAIL_WINDOW_SECONDS, record=False)
+    return per_ip >= LOGIN_FAIL_MAX_PER_IP or per_phone >= LOGIN_FAIL_MAX_PER_PHONE
+
+
+async def record_login_failure(phone: str, ip: str) -> None:
+    await _sliding_window_count(f"loginfail:ip:{phone}:{ip}", LOGIN_FAIL_WINDOW_SECONDS)
+    await _sliding_window_count(f"loginfail:phone:{phone}", LOGIN_FAIL_WINDOW_SECONDS)
+
+
+async def is_payment_rate_limited(phone: str, ip: str) -> bool:
+    per_phone = await _sliding_window_count(f"payrate:phone:{phone}", PAYMENT_RATE_LIMIT_WINDOW_SECONDS)
+    per_ip = await _sliding_window_count(f"payrate:ip:{ip}", PAYMENT_RATE_LIMIT_WINDOW_SECONDS)
+    return per_phone > PAYMENT_RATE_LIMIT_MAX_PER_PHONE or per_ip > PAYMENT_RATE_LIMIT_MAX_PER_IP
 
 
 def student_lock(phone: str):

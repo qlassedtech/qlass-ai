@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, errorMessage } from "../api";
 
 interface Chapter {
   id: number;
@@ -38,7 +38,7 @@ export default function AssignQuiz() {
     // for a mixed-board school.
     api.getSchool().then((school) => {
       if (school.board) setBoard(school.board);
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load school")));
   }, []);
 
   useEffect(() => {
@@ -52,7 +52,9 @@ export default function AssignQuiz() {
       setChapters([]);
       return;
     }
-    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase()).then(setChapters);
+    api.getCurriculumChapters(classNum, (board || "CBSE").toUpperCase())
+      .then(setChapters)
+      .catch((err) => setError(errorMessage(err, "Failed to load chapters")));
   }, [classNum, board]);
 
   const subjects = [...new Set(chapters.map((c) => c.subject))].sort();

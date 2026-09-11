@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type Analytics as AnalyticsData, type DeletionRequest, type SchoolOverview, type Teacher } from "../api";
+import { api, errorMessage, type Analytics as AnalyticsData, type DeletionRequest, type SchoolOverview, type Teacher } from "../api";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -26,11 +26,11 @@ export default function Analytics() {
     api.me().then((teacher) => {
       setMe(teacher);
       if (teacher.role === "org_admin" || teacher.role === "super_admin") {
-        api.getSchoolsOverview().then(setSchools);
+        api.getSchoolsOverview().then(setSchools).catch((err) => setError(errorMessage(err, "Failed to load schools")));
       } else {
-        api.getAnalytics().then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+        api.getAnalytics().then(setData).catch((err) => setError(errorMessage(err, "Failed to load")));
       }
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load your account")));
     api.getDeletionRequests().then(setDeletionRequests).catch(() => {});
   }, []);
 
@@ -42,7 +42,7 @@ export default function Analytics() {
       api
         .getAnalytics(Number(centreId))
         .then(setData)
-        .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+        .catch((err) => setError(errorMessage(err, "Failed to load")));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [centreId]);

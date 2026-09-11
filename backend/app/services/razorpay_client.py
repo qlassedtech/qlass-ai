@@ -1,6 +1,10 @@
+import logging
+
 import razorpay
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 MIN_TOPUP_AMOUNT = 10.0  # INR — small enough to be accessible, large enough that Razorpay's own fee doesn't dominate it
 
@@ -37,8 +41,20 @@ def cancel_subscription(subscription_id: str) -> dict:
     return client.subscription.cancel(subscription_id)
 
 
+def cancel_subscription_quietly(subscription_id: str) -> bool:
+    """Best-effort cancel of a superseded mandate — never raises."""
+    if client is None:
+        return False
+    try:
+        client.subscription.cancel(subscription_id, {"cancel_at_cycle_end": 0})
+        return True
+    except Exception as exc:
+        logger.warning("could not cancel superseded Razorpay subscription %s: %s", subscription_id, exc)
+        return False
+
+
 def verify_webhook_signature(payload_body: str, signature: str) -> bool:
-    if not settings.razorpay_webhook_secret:
+    if not settings.razorpay_webhook_secret or client is None:
         return False
     try:
         client.utility.verify_webhook_signature(payload_body, signature, settings.razorpay_webhook_secret)

@@ -78,18 +78,11 @@ FEATURE_HIGHLIGHTS: list[tuple[str, str]] = [
     ("image_generation", "🎨 Ask me to *draw a diagram* next time you're studying something visual — I can sketch it out for you."),
 ]
 
-# Qlass's own real, already-published marketing claims and case-study
-# details (qlasslearning.com) — reused verbatim/near-verbatim rather than
-# invented, so nothing claimed here is a number Qlass hasn't actually
-# stood behind publicly.
+# No numeric outcome/scale claims here — only things the product itself
+# verifiably does.
 SOCIAL_PROOF_MESSAGES: list[str] = [
-    "🌟 Students using Skoolgpt AI have gone from 40% to 88% in just 45 days. Keep showing up — that could be you!",
-    "🚀 You're one of 10,000+ students learning with Skoolgpt AI across India. Let's keep your streak going!",
-    "🧠 Students who practice regularly with Skoolgpt AI show 2× faster retention and 3× longer recall. Consistency is the real secret.",
-    "⏱️ Your Skoolgpt AI tutor is here 24×7 with under 30-second replies — no doubt has to wait until tomorrow.",
-    "📈 One Skoolgpt AI student went 45% → 92% in 45 days: Day 14 was \"concepts click, doubts cleared,\" Day 28 hit a 75% mock score. Small consistent days add up.",
-    "🗣️ You can talk to your Skoolgpt AI tutor in Hindi, Bhojpuri, and 10+ other languages — voice-enabled, so language is never the thing standing between you and understanding.",
-    "✅ 92% of consistent Skoolgpt AI students hit their target scores. Today's question could be part of getting you there.",
+    "⏱️ Your Skoolgpt AI tutor is here 24×7 — no doubt has to wait until tomorrow.",
+    "🗣️ You can talk to your Skoolgpt AI tutor in Hindi, Bhojpuri, and many other languages — voice-enabled, so language is never the thing standing between you and understanding.",
 ]
 
 def _cooldown_cutoff() -> datetime:

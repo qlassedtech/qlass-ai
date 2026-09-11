@@ -93,6 +93,9 @@ class Student(Base):
     # POST /admin/students/{id}/set-password and the student-app
     # /auth/login endpoint). Never set by a student themselves.
     password_hash = Column(Text)
+    # Same purpose as Teacher.token_version — bumped when the password is
+    # (re)set so previously issued JWTs stop working.
+    token_version = Column(Integer, nullable=False, server_default="0", default=0)
     # An alternate real WhatsApp number for this student, when their
     # primary/login `phone` above isn't itself on WhatsApp (e.g. a parent's
     # or a different personal number is what they actually message from).
@@ -264,6 +267,7 @@ class Parent(Base):
     student_id = Column(Integer, ForeignKey("students.id"))
     name = Column(Text)
     phone = Column(Text, unique=True)
+    token_version = Column(Integer, nullable=False, server_default="0", default=0)
 
     student = relationship("Student", back_populates="parent")
 

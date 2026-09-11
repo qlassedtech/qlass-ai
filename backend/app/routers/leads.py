@@ -163,7 +163,7 @@ async def forward_lead_message_to_portal(lead: Lead, message_text: str, raw_payl
     own ack response, so this only logs, never raises.
     """
     if not settings.leads_webhook_url:
-        logger.warning("lead message from %s could not be forwarded — LEADS_WEBHOOK_URL isn't configured", lead.phone)
+        logger.warning("lead message from ****%s could not be forwarded — LEADS_WEBHOOK_URL isn't configured", lead.phone[-4:])
         return
     headers = {}
     if settings.leads_webhook_secret:
@@ -177,4 +177,4 @@ async def forward_lead_message_to_portal(lead: Lead, message_text: str, raw_payl
             resp = await client.post(settings.leads_webhook_url, json=payload, headers=headers)
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        logger.error("failed to forward lead message from %s to portal webhook: %s", lead.phone, exc)
+        logger.error("failed to forward lead message from ****%s to portal webhook: %s", lead.phone[-4:], exc)

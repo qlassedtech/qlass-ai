@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { absoluteUrl, api, normalizePhone, parentApi, publicApi, setParentToken, setStudentToken, setToken } from "../api";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import ThemeToggle from "../components/ThemeToggle";
+import LegalFooter from "../components/LegalFooter";
 
 type Step = "phone" | "password" | "otp" | "parent_otp" | "teacher_otp" | "student_password";
 
@@ -24,7 +25,7 @@ export default function Login() {
       publicApi.schoolInfo(schoolSlug).then((res) => {
         setSchoolName(res.name);
         setSchoolLogo(res.logo_url);
-      });
+      }).catch(() => {});
     }
   }, [schoolSlug]);
 
@@ -298,6 +299,7 @@ export default function Login() {
           </div>
         )}
       </form>
+      <LegalFooter />
       {schoolName && (
         <div className="landing-powered-by">
           <span>Powered by</span>

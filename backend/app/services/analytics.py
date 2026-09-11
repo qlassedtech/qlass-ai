@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.business_rules import UNLIMITED_PERIOD_SPEND_CAPS
 from app.models.core import ChatHistory, CreditEvent, SchoolCreditEvent, Student, TopicProgress
 from app.services.escalation import ESCALATION_THRESHOLD
 
@@ -18,10 +19,7 @@ STRUGGLING_ACCURACY_THRESHOLD_PCT = 50
 MIN_EVALUATED_FOR_RISK = 3
 AT_RISK_STUDENT_LIMIT = 10
 
-# Mirrors whatsapp.MONTHLY_STUDENT_CREDIT_LIMIT — duplicated rather than
-# imported since that constant lives in a router module and analytics is a
-# service (importing router->service->router would be circular).
-MONTHLY_STUDENT_CREDIT_LIMIT = 100.0
+MONTHLY_STUDENT_CREDIT_LIMIT = UNLIMITED_PERIOD_SPEND_CAPS["student"]["month"]
 UPSELL_CANDIDATE_LIMIT = 10
 
 

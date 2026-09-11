@@ -68,7 +68,7 @@ async def verify_parent_otp(body: VerifyOtpRequest, db: Session = Depends(get_db
     if not parent:
         raise HTTPException(status_code=404, detail="Parent account not found")
 
-    token = create_parent_access_token(parent.id)
+    token = create_parent_access_token(parent.id, parent.token_version or 0)
     return {"access_token": token, "parent": {"id": parent.id, "name": parent.name}}
 
 

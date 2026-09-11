@@ -16,17 +16,14 @@ def verify_webhook_auth(auth_header: str | None, query_secret: str | None = None
          URL registered with Wati — added as an alternative for a webhook
          dashboard (or a person configuring it) that doesn't expose a way
          to set a custom header, only a plain URL to paste in.
-    Skips verification entirely (returns True) if WATI_WEBHOOK_SECRET isn't
-    configured — app.config logs a loud startup warning when that's true
-    outside development, since an unset secret means this webhook accepts
-    ANY POST as if it were a real inbound WhatsApp message (see the
-    SECURITY WARNING in that log line for what to do about it).
+    Fails closed outside development when WATI_WEBHOOK_SECRET isn't
+    configured — app.config logs a loud startup warning when that's true.
 
     hmac.compare_digest (not ==) so a byte-by-byte timing side-channel can't
     help an attacker recover the secret across many requests.
     """
     if not settings.wati_webhook_secret:
-        return True
+        return settings.environment.lower() == "development"
     if query_secret and hmac.compare_digest(query_secret, settings.wati_webhook_secret):
         return True
     if not auth_header:

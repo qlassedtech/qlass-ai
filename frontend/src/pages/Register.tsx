@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, setToken } from "../api";
 import GoogleSignInButton from "../components/GoogleSignInButton";
+import LegalFooter from "../components/LegalFooter";
 
 // Same list used across AssignQuiz/Presentations/StudentDetail/Workbook —
 // kept in sync manually since there's no shared constants module yet.
@@ -123,6 +124,7 @@ export default function Register() {
               Wrong number? Go back
             </a>
           </p>
+          <LegalFooter />
         </form>
       </div>
     );
@@ -198,6 +200,7 @@ export default function Register() {
               whole school. */}
           <Link to="/join">Are you a student? Sign up here</Link>
         </p>
+        <LegalFooter />
       </form>
     </div>
   );

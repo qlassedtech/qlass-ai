@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
@@ -29,18 +30,19 @@ from app.services.whatsapp_client import (
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech
 from app.services.llm_client import translate_with_claude
-from app.services.audio_qa import get_duration_seconds, detect_gender_from_pitch
+from app.services.audio_qa import get_duration_seconds
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
 from app.services.document_client import extract_text_from_document
 from app.services import audit_log, cost_tracker, nudges, school_billing
 from app.services.escalation import (
-    QLASS_SUPPORT_PHONE,
+    SUPPORT_PHONE,
     SCHOOL_REVIEW_STAFF_PHONES,
     get_escalation_recipients,
     format_student_requested_help_message,
 )
 from app.services.profile_builder import next_missing_field
+from app.services import rate_limit
 from app.services.rate_limit import is_rate_limited, is_signup_rate_limited, student_lock
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
@@ -60,6 +62,21 @@ router = APIRouter()
 WEBHOOK_LEASE_SECONDS = 5 * 60
 WEBHOOK_RETRY_INTERVAL_SECONDS = 30
 WEBHOOK_RETRY_BATCH_SIZE = 100
+WEBHOOK_PROCESSING_TIMEOUT_SECONDS = 240  # under the lease, so a hung job can't be re-claimed mid-flight
+WEBHOOK_MAX_ATTEMPTS = 3
+SLOW_REPLY_NOTICE = "This is taking longer than expected — please send your question again in a moment."
+PLATFORM_BUSY_NOTICE = "We're busy right now, please try again in a bit."
+
+# asyncio only keeps a weak reference to a task — without this set a
+# fire-and-forget task can be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 # Interactive quick-menu (see send_whatsapp_buttons/parse_incoming_button_reply
 # in whatsapp_client.py) — each button maps to the same canonical phrase its
@@ -144,6 +161,10 @@ def _level_choice_buttons(current_level: int) -> list[str]:
 # recently still awaiting review (see _handle_school_review_button) rather
 # than one encoded in the button itself; fine given how infrequently
 # schools self-register.
+NUDGE_OPT_OUT_PHRASES = {
+    "stop", "unsubscribe", "stop nudges", "stop messages", "opt out", "band karo", "बंद करो", "रोको",
+}
+
 SCHOOL_REVIEW_BUTTON_ACTIONS = {"Approve School": "active", "Reject School": "churned"}
 
 
@@ -167,19 +188,13 @@ async def _handle_school_review_button(db: Session, from_phone: str, new_status:
     if centre is None:
         await send_whatsapp_message(from_phone, "No self-registered school is currently awaiting review.")
         return
-    # Confirmed live (security review, Aug 2026): this webhook has no
-    # signature verification (WATI_WEBHOOK_SECRET unset — a known,
-    # accepted gap), so the SCHOOL_REVIEW_STAFF_PHONES check above is a
-    # phone-string match on attacker-controlled input, not real auth. For
-    # "Approve" the blast radius is limited (a prospect school already has
-    # working access — this just relabels the sales pipeline). "Reject"
-    # is the dangerous direction: it actively blocks real usage via
-    # school_billing.is_centre_churned. Once a school has real activity
-    # (more than a handful of real roster rows), a forged "Reject" tap
-    # would deny service to people who are actually using the product —
-    # that action now requires a real portal login (PATCH /admin/school)
-    # instead, which IS properly authenticated. A brand-new, still-empty
-    # prospect (the common case this button is actually for) can still be
+    # The SCHOOL_REVIEW_STAFF_PHONES check above is a phone-string match on
+    # webhook input — real only as long as the webhook secret is configured
+    # (see verify_webhook_auth). "Approve" has limited blast radius (a
+    # prospect already has working access); "Reject" actively blocks real
+    # usage via school_billing.is_centre_churned, so once a school has real
+    # activity that action requires a real portal login (PATCH /admin/
+    # school) instead. A brand-new, still-empty prospect can still be
     # rejected straight from WhatsApp.
     if new_status == "churned":
         real_activity = (
@@ -208,11 +223,9 @@ async def _handle_school_review_button(db: Session, from_phone: str, new_status:
 # account remains subject to the same spend controls.
 FULL_ACCESS_PHONES: frozenset[str] = frozenset()
 
-# Opposite-gender voice: a female voice for a detected-male student, a male
-# voice for a detected-female student. Speaker names are from Sarvam's
-# bulbul:v3 roster. Detection is pitch-based (see audio_qa.detect_gender_
-# from_pitch) — a coarse, admittedly error-prone heuristic accepted
-# deliberately for a first pass rather than not offering it at all.
+# Opposite-gender voice for a student whose gender an admin has set (see
+# PATCH /admin/students/{id}); otherwise the configured default speaker.
+# Speaker names are from Sarvam's bulbul:v3 roster.
 OPPOSITE_GENDER_SPEAKER = {"male": "priya", "female": "shubh"}
 
 
@@ -265,7 +278,13 @@ def _extract_school_centre_from_greeting(db: Session, message_text: str) -> Cent
     """
     text_lower = message_text.lower()
     for centre in db.query(Centre).filter(Centre.name != tenancy.QLASS_DIRECT_CENTRE_NAME).all():
-        if centre.name.lower() in text_lower:
+        slug = tenancy.slugify_centre_name(centre.name or "")
+        if slug and re.search(rf"(?<![a-z0-9]){re.escape(slug)}(?![a-z0-9])", text_lower):
+            return centre
+        name = (centre.name or "").strip().lower()
+        # Whole-phrase match with a length floor — a short name like "Sun"
+        # would otherwise match "sunday homework".
+        if len(name) >= 6 and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text_lower):
             return centre
     return None
 
@@ -490,7 +509,7 @@ async def receive_message(request: Request):
     # Return the Wati acknowledgement independently of tutor processing.
     # The job is already persisted above and the retry worker recovers it if
     # this process exits after the acknowledgement.
-    asyncio.create_task(_process_queued_webhook(webhook_message_id))
+    _spawn(_process_queued_webhook(webhook_message_id))
     return {"received": True, "handled": "processing"}
 
 
@@ -535,6 +554,32 @@ def _claim_webhook_job(db: Session, message_id: str, now: datetime) -> bool:
         )
     db.commit()
     return claimed > 0
+
+
+async def _platform_spend_cap_exceeded(db: Session) -> bool:
+    """Daily platform-wide raw-spend ceiling — alerts (logger.error) once per IST day."""
+    spend = cost_tracker.platform_spend_today(db)
+    if spend < settings.daily_platform_spend_cap_inr:
+        return False
+    alert_key = f"platform_spend_alerted:{datetime.now(cost_tracker.IST).date().isoformat()}"
+    already_alerted = True
+    try:
+        if rate_limit._redis is not None:
+            already_alerted = not await rate_limit._redis.set(alert_key, "1", ex=24 * 3600, nx=True)
+        else:
+            already_alerted = alert_key in _fallback_alert_keys
+            _fallback_alert_keys.add(alert_key)
+    except Exception:
+        pass
+    if not already_alerted:
+        logger.error(
+            "DAILY PLATFORM SPEND CAP HIT: raw spend ₹%.2f >= cap ₹%.2f — WhatsApp tutoring paused until IST midnight",
+            spend, settings.daily_platform_spend_cap_inr,
+        )
+    return True
+
+
+_fallback_alert_keys: set[str] = set()
 
 
 def _canonical_lock_phone(db: Session, from_phone: str) -> str:
@@ -587,8 +632,21 @@ async def _process_queued_webhook(message_id: str) -> None:
 
         phone = payload.get("waId")
         lock_phone = _canonical_lock_phone(db, phone) if phone else None
-        async with (student_lock(lock_phone) if lock_phone else nullcontext()):
-            await _handle_message(db, payload)
+        try:
+            async with (student_lock(lock_phone) if lock_phone else nullcontext()):
+                await asyncio.wait_for(_handle_message(db, payload), timeout=WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            db.rollback()
+            job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
+            if job:
+                job.status = "failed"
+                job.lease_expires_at = None
+                job.last_error = f"timed out after {WEBHOOK_PROCESSING_TIMEOUT_SECONDS}s"
+                db.commit()
+            logger.error("Webhook job %s timed out after %ss", message_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
+            if phone:
+                await send_whatsapp_message(phone, SLOW_REPLY_NOTICE)
+            return
 
         job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
         if job:
@@ -599,10 +657,14 @@ async def _process_queued_webhook(message_id: str) -> None:
         db.rollback()
         job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
         if job:
-            job.status = "pending"
+            exhausted = (job.attempts or 0) >= WEBHOOK_MAX_ATTEMPTS
+            job.status = "failed" if exhausted else "pending"
             job.lease_expires_at = None
             job.last_error = str(exc)[:1000]
             db.commit()
+            if exhausted:
+                logger.error("Webhook job %s failed %s times — giving up", message_id, job.attempts)
+                return
         logger.exception("Webhook job %s failed and will be retried", message_id)
     finally:
         db.close()
@@ -777,13 +839,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
             "I've let your teacher know you'd like some help! 🙋 They'll reach out soon."
             if recipients
             else f"You're not linked to a school on our records, so I can't reach a teacher for you — "
-                 f"call Qlass support directly at {QLASS_SUPPORT_PHONE} instead!"
+                 f"call {settings.brand_name} support directly at {SUPPORT_PHONE} instead!"
         )
         await send_whatsapp_message(from_phone, reply)
         return
 
     if probe_text == "call qlass":
-        await send_whatsapp_message(from_phone, f"You can call Qlass support directly at {QLASS_SUPPORT_PHONE} 📞")
+        await send_whatsapp_message(from_phone, f"You can call {settings.brand_name} support directly at {SUPPORT_PHONE} 📞")
         return
 
     # "stop nudges"/"unsubscribe" opts out of proactive re-engagement
@@ -792,7 +854,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # probe_text short-circuits above: an opt-out request must always work,
     # even for a churned/pilot-expired/out-of-credit student. Never affects
     # real tutoring replies, only this one unprompted-outreach feature.
-    if probe_text in ("stop nudges", "unsubscribe"):
+    if probe_text.strip().lower() in NUDGE_OPT_OUT_PHRASES:
         student.nudges_opt_out = True
         db.commit()
         await send_whatsapp_message(
@@ -862,6 +924,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # here, after resolving which student this actually is, rather than
     # against one shared account-wide balance. Demo/testing numbers get
     # unlimited credits (see FULL_ACCESS_PHONES) — they're never metered.
+    if await _platform_spend_cap_exceeded(db):
+        await send_whatsapp_message(from_phone, PLATFORM_BUSY_NOTICE)
+        return
+
     if from_phone not in FULL_ACCESS_PHONES and not cost_tracker.has_credits(db, student.id):
         # A dead-end text notice left a student stuck with no way to act —
         # real options (pay directly, or have the school notified) beat
@@ -926,15 +992,6 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 await send_whatsapp_message(from_phone, "Sorry, I couldn't understand that voice note — could you try again or type your question?")
                 return
             cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
-
-            if student.gender is None:
-                # Only estimate once — a cheap local computation (no API
-                # cost), used to pick an opposite-gender voice for future
-                # replies. Never re-guessed once set.
-                detected_gender = detect_gender_from_pitch(audio_bytes)
-                if detected_gender:
-                    student.gender = detected_gender
-                    db.commit()
         elif image_parsed:
             _, media_url = image_parsed
             if not student.has_feature("ocr"):
@@ -1027,13 +1084,13 @@ async def _handle_message(db: Session, payload: dict) -> None:
     # always gets *something*.
     send_result = None
     if result.wants_audio_reply:
-        speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender)
+        speaker = OPPOSITE_GENDER_SPEAKER.get(student.gender, settings.sarvam_tts_speaker)
         audio_reply = await synthesize_speech(result.reply_text, result.detected_lang, speaker=speaker)
         if audio_reply:
             cost_tracker.record_char_usage(db, "sarvam_tts", len(result.reply_text), student.id)
             send_result = await send_whatsapp_audio(from_phone, audio_reply)
             if not send_result.get("sent"):
-                logger.error("send_whatsapp_audio failed for %s: %s", from_phone, send_result)
+                logger.error("send_whatsapp_audio failed for ****%s: %s", from_phone[-4:], send_result)
             else:
                 # Also send the text transcript, in the same language as the
                 # voice note, so the student has it in writing too.
@@ -1044,7 +1101,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
             cost_tracker.record_flat_usage(db, "azure_image", student.id)
             image_result = await send_whatsapp_image(from_phone, image_bytes, caption=result.reply_text)
             if not image_result.get("sent"):
-                logger.error("send_whatsapp_image failed for %s: %s", from_phone, image_result)
+                logger.error("send_whatsapp_image failed for ****%s: %s", from_phone[-4:], image_result)
             elif not send_result:
                 # Voice reply (if any) already covered the spoken explanation;
                 # the image send itself counts as having delivered something,
@@ -1054,7 +1111,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
     if not send_result or not send_result.get("sent"):
         fallback_result = await send_whatsapp_message(from_phone, result.reply_text)
         if not fallback_result.get("sent"):
-            logger.error("send_whatsapp_message fallback also failed for %s: %s", from_phone, fallback_result)
+            logger.error("send_whatsapp_message fallback also failed for ****%s: %s", from_phone[-4:], fallback_result)
 
     if result.video:
         # Sent as its own follow-up message (Wati has no native rich video
@@ -1062,4 +1119,4 @@ async def _handle_message(db: Session, payload: dict) -> None:
         # doesn't get lost inside a long translated paragraph.
         video_result = await send_whatsapp_message(from_phone, f"📺 {result.video['title']}\n{result.video['url']}")
         if not video_result.get("sent"):
-            logger.error("send video suggestion failed for %s: %s", from_phone, video_result)
+            logger.error("send video suggestion failed for ****%s: %s", from_phone[-4:], video_result)

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -404,15 +405,33 @@ def record_free_call(db: Session, service: str, student_id: int) -> None:
     db.commit()
 
 
-def _period_start(period: str) -> datetime:
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _period_start(period: str, now: datetime | None = None) -> datetime:
+    # Day/week/month boundaries are what an Indian student experiences
+    # (IST midnight), returned in UTC for the created_at comparison.
+    now_ist = (now or datetime.now(timezone.utc)).astimezone(IST)
+    today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == "day":
-        return today_start
-    if period == "week":
-        return today_start - timedelta(days=today_start.weekday())  # most recent Monday 00:00 UTC
-    if period == "month":
-        return today_start.replace(day=1)
-    raise ValueError(f"unknown period: {period!r}")
+        start = today_start
+    elif period == "week":
+        start = today_start - timedelta(days=today_start.weekday())  # most recent Monday 00:00 IST
+    elif period == "month":
+        start = today_start.replace(day=1)
+    else:
+        raise ValueError(f"unknown period: {period!r}")
+    return start.astimezone(timezone.utc)
+
+
+def platform_spend_today(db: Session) -> float:
+    """Raw provider cost (INR, pre-markup) across every student since IST midnight."""
+    total = (
+        db.query(func.coalesce(func.sum(CreditEvent.raw_cost), 0))
+        .filter(CreditEvent.raw_cost > 0, CreditEvent.created_at >= _period_start("day"))
+        .scalar()
+    )
+    return float(total)
 
 
 def get_student_monthly_spend(db: Session, student_id: int) -> float:
@@ -483,10 +502,9 @@ def record_youtube_search(db: Session, student_id: int) -> float:
     MARKUP_MULTIPLIER to whichever student's turn pushed it over, same
     "actual cost x2" policy as every other service.
     """
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     today_count = (
         db.query(func.count(CreditEvent.id))
-        .filter(CreditEvent.service.in_(["youtube_search", "youtube_search_overage"]), CreditEvent.created_at >= today_start)
+        .filter(CreditEvent.service.in_(["youtube_search", "youtube_search_overage"]), CreditEvent.created_at >= _period_start("day"))
         .scalar()
     )
     if today_count < YOUTUBE_FREE_SEARCHES_PER_DAY:

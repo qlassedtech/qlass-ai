@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str = "changeme"
+    brand_name: str = "Skoolgpt"
 
     database_url: str
     redis_url: str = "redis://localhost:6379/0"
@@ -125,6 +126,19 @@ class Settings(BaseSettings):
     leads_webhook_url: str | None = None
     leads_webhook_secret: str | None = None
 
+    # Human support fallback for every "talk to a human" flow, and the
+    # staff numbers allowed to approve/reject a self-registered school
+    # from WhatsApp (see app.services.escalation). Comma-separated.
+    support_phone: str = "9031003985"
+    school_review_staff_phones: str = "919031003985,918460184666"
+
+    # Platform-wide hard ceiling on raw LLM/provider spend per IST day —
+    # see cost_tracker.platform_spend_today and the WhatsApp message gate.
+    daily_platform_spend_cap_inr: float = 2000.0
+
+    def school_review_staff_phone_list(self) -> tuple[str, ...]:
+        return tuple(p.strip() for p in self.school_review_staff_phones.split(",") if p.strip())
+
     def cors_origins(self) -> list[str]:
         return [origin.strip().rstrip("/") for origin in self.allowed_origins.split(",") if origin.strip()]
 
@@ -134,22 +148,15 @@ class Settings(BaseSettings):
             self.secret_key == "changeme" or len(self.secret_key) < 32
         ):
             raise ValueError("SECRET_KEY must be at least 32 characters outside development")
-        # A missing wati_webhook_secret makes app.services.whatsapp_client.
-        # verify_webhook_auth accept ANY unauthenticated POST to /whatsapp/
-        # webhook as if it were a real Wati-delivered message — full
-        # impersonation of any student's WhatsApp identity/wallet by whoever
-        # finds the URL. Deliberately a warning, not a raised error: unlike
-        # secret_key (generated once, locally, before first deploy), this
-        # value has to round-trip through Wati's own dashboard, so a hard
-        # failure here would take down the whole backend on a routine
-        # restart if that manual step hasn't happened yet. Logged instead so
-        # it's loud in `journalctl`/startup logs without being an outage.
+        # Deliberately a warning, not a raised error: this value has to
+        # round-trip through Wati's own dashboard, so a hard failure here
+        # would take down the whole backend on a routine restart if that
+        # manual step hasn't happened yet.
         if self.environment.lower() in {"production", "staging"} and not self.wati_webhook_secret:
             logging.getLogger(__name__).warning(
-                "SECURITY WARNING: WATI_WEBHOOK_SECRET is not set — the WhatsApp webhook is accepting "
-                "UNAUTHENTICATED requests and will process a POST from anyone as a real inbound message. "
-                "Set a custom Authorization value in Wati's Webhook settings and WATI_WEBHOOK_SECRET here "
-                "to the same value."
+                "SECURITY WARNING: WATI_WEBHOOK_SECRET is not set — the WhatsApp webhook will REJECT every "
+                "inbound request until it is. Set a custom Authorization value in Wati's Webhook settings "
+                "and WATI_WEBHOOK_SECRET here to the same value."
             )
         return self
 

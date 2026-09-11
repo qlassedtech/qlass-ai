@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import ChatHistory, Student  # noqa: E402
 from app.services.habit import HABIT_MILESTONES  # noqa: E402
@@ -82,7 +83,7 @@ async def send_nudges(dry_run: bool) -> None:
                     # until Firebase is actually configured (push_client.py)
                     # or this student has never registered a device token.
                     if student.fcm_token:
-                        push_result = await send_push(student.fcm_token, "Qlass AI Tutor", message)
+                        push_result = await send_push(student.fcm_token, f"{settings.brand_name} AI Tutor", message)
                         if push_result.get("sent"):
                             print(f"Sent push nudge to student {student.id} ({name})")
                 sent += 1

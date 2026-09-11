@@ -9,7 +9,7 @@ from app.models.core import Student
 from app.services import cost_tracker, tenancy
 from app.services.otp import LOGIN_OTP_TEMPLATE_NAME, generate_and_store_otp, verify_otp
 from app.services.phone import normalize_phone
-from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited, student_lock
+from app.services.rate_limit import client_ip, is_otp_rate_limited, is_signup_rate_limited, student_lock
 from app.services.referral import apply_referral_at_signup
 from app.services.student_auth import create_student_access_token
 from app.services.whatsapp_client import send_template_message, send_whatsapp_message
@@ -104,8 +104,7 @@ async def register(body: RegisterRequest, request: Request, db: Session = Depend
     the race where two near-simultaneous submissions of the same phone
     number could each create their own account and credit grant.
     """
-    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
-    if await is_signup_rate_limited(client_ip):
+    if await is_signup_rate_limited(client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many signup attempts — please try again in a few minutes")
 
     validated = _validate_registration(body)

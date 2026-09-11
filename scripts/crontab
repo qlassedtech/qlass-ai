@@ -1,0 +1,26 @@
+# Versioned crontab fragment for the Skoolgpt backend host.
+# Install with:  crontab scripts/crontab   (server timezone assumed to be IST)
+MAILTO=""
+APP=/usr/share/nginx/aitutor.qlass.in/public_python_aios
+PY=/usr/share/nginx/aitutor.qlass.in/public_python_aios/venv/bin/python
+
+# Nightly DB backup — 02:30 IST
+30 2 * * *   cd $APP && bash scripts/backup_db.sh >> logs/cron-backup.log 2>&1
+
+# Subscription expiry reminders — daily 08:00 IST
+0 8 * * *    cd $APP && $PY scripts/send_subscription_expiry_reminders.py >> logs/cron-subscription-expiry.log 2>&1
+
+# Re-engagement nudges — daily 11:00 IST
+0 11 * * *   cd $APP && $PY scripts/send_reengagement_nudges.py >> logs/cron-reengagement.log 2>&1
+
+# Engagement nudges — daily 18:00 IST
+0 18 * * *   cd $APP && $PY scripts/send_engagement_nudges.py >> logs/cron-engagement.log 2>&1
+
+# Habit nudges — daily 19:00 IST
+0 19 * * *   cd $APP && $PY scripts/send_habit_nudges.py >> logs/cron-habit.log 2>&1
+
+# Parent digests — Sunday 09:00 IST
+0 9 * * 0    cd $APP && $PY scripts/send_parent_digests.py >> logs/cron-parent-digests.log 2>&1
+
+# Referral nudges — Sunday 10:00 IST
+0 10 * * 0   cd $APP && $PY scripts/send_referral_nudges.py >> logs/cron-referral.log 2>&1

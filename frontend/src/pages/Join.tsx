@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { absoluteUrl, publicApi, setStudentToken } from "../api";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import ThemeToggle from "../components/ThemeToggle";
+import LegalFooter, { ConsentLine } from "../components/LegalFooter";
 
 /**
  * Pulls just the display name out of a Google ID token, client-side, with
@@ -31,12 +32,12 @@ const FEATURES = [
   { icon: "🕐", title: "Round-the-Clock Academic Support", text: "Get clear, step-by-step help at any hour — not limited to school or tuition timings." },
   { icon: "📸", title: "Learn From a Photograph", text: "Share a photo of any question and receive a complete, step-by-step solution within moments." },
   { icon: "🎙️", title: "Ask Using Your Voice", text: "Speak a question instead of typing it, and receive a spoken explanation in return." },
-  { icon: "🌐", title: "Available in Five Languages", text: "Learn in English, Hindi, Bhojpuri, Magahi, or Maithili — whichever you're most comfortable with." },
+  { icon: "🌐", title: "Hindi and English", text: "Learn in Hindi and English — and it understands Bhojpuri, Magahi and Maithili too." },
   { icon: "📄", title: "Submit a Full Assignment", text: "Upload an entire worksheet or homework file as a PDF or Word document, not one question at a time." },
   { icon: "📝", title: "Practice With Real Assessments", text: "Attempt scored quizzes and board-exam-style mock tests to identify exactly where you need to improve." },
   { icon: "🎬", title: "Video Explanations on Demand", text: "Receive a video explanation matched precisely to your question, not a generic search result." },
   { icon: "📊", title: "Track Academic Progress", text: "Monitor accuracy and improvement over time, backed by a clear record of performance." },
-  { icon: "📚", title: "Grounded in Your NCERT Textbook", text: "Answers are drawn directly from your NCERT syllabus, with the exact chapter cited — never a generic guess." },
+  { icon: "📚", title: "Grounded in Your NCERT Textbook", text: "Answers grounded in your textbook chapters, following the NCERT syllabus." },
 ];
 
 // A school evaluating this page cares about a different question than a
@@ -242,6 +243,10 @@ function ChatBubbleContent({ msg }: { msg: ChatMsg }) {
   return <>{msg.text}</>;
 }
 
+// Same bot number as SchoolProfile's share link — lets a student start
+// even if the welcome message never arrives.
+const WHATSAPP_START_LINK = "https://wa.me/917827740390?text=Hi";
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Animates through CHAT_SCENARIOS one message at a time, with a typing
@@ -380,7 +385,7 @@ export default function Join() {
       publicApi.schoolInfo(schoolSlug).then((res) => {
         setSchoolName(res.name);
         setSchoolLogo(res.logo_url);
-      });
+      }).catch(() => {});
     }
   }, [schoolSlug]);
 
@@ -450,6 +455,10 @@ export default function Join() {
               ? "Check your WhatsApp — we've sent you a message to pick up where you left off."
               : "Check your WhatsApp for a welcome message with your free AI credits, and reply to begin learning."}
           </p>
+          <a href={WHATSAPP_START_LINK} className="button-link" target="_blank" rel="noopener noreferrer">
+            Open WhatsApp to start
+          </a>
+          <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>Didn't get a message? Tap above and say hi — the tutor will reply.</p>
         </div>
       ) : otpRequired ? (
         <form onSubmit={handleVerifyOtp}>
@@ -532,6 +541,7 @@ export default function Join() {
             </select>
           </label>
           {error && <p className="error">{error}</p>}
+          <ConsentLine />
           <button type="submit" disabled={loading}>
             {loading ? "Please wait..." : "Begin Learning for Free"}
           </button>
@@ -625,6 +635,7 @@ export default function Join() {
           <span> / </span>
           <a href="tel:+917827740390">+91 78277 40390</a>
         </p>
+        <LegalFooter />
       </div>
     </div>
   );

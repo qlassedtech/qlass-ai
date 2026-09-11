@@ -115,3 +115,14 @@ def test_create_new_student_falls_back_to_qlass_direct_without_a_school_name(db_
     student = asyncio.run(_create_new_student(db_session, "919000000097", "Hi"))
 
     assert student.centre_id == qlass_direct.id
+
+
+def test_greeting_centre_match_requires_whole_phrase_and_min_length(db_session):
+    db_session.add(Centre(name="Sun"))
+    db_session.add(Centre(name="Sunrise Public School"))
+    db_session.commit()
+
+    assert _extract_school_centre_from_greeting(db_session, "sunday homework help") is None
+    matched = _extract_school_centre_from_greeting(db_session, "Hi, I am a student from Sunrise Public School.")
+    assert matched is not None and matched.name == "Sunrise Public School"
+    assert _extract_school_centre_from_greeting(db_session, "Hi school:sunrise-public-school").name == "Sunrise Public School"

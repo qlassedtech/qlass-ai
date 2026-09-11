@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type Student, type Teacher } from "../api";
+import { api, errorMessage, type Student, type Teacher } from "../api";
 
 export default function Credits() {
   const [students, setStudents] = useState<Student[]>([]);
@@ -8,10 +8,11 @@ export default function Credits() {
   const [amounts, setAmounts] = useState<Record<number, string>>({});
   const [reasons, setReasons] = useState<Record<number, "refund" | "goodwill" | "correction">>({});
   const [status, setStatus] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   function load() {
-    api.fetchAllStudents().then(setStudents);
-    api.me().then(setTeacher);
+    api.fetchAllStudents().then(setStudents).catch((err) => setLoadError(errorMessage(err, "Failed to load students")));
+    api.me().then(setTeacher).catch(() => {});
   }
 
   useEffect(load, []);
@@ -22,7 +23,7 @@ export default function Credits() {
     if (!amount) return;
     const reason = reasons[id] || "goodwill";
     try {
-      await api.addStudentCredits(id, amount, `Qlass ${reason} credit`, reason);
+      await api.addStudentCredits(id, amount, `Skoolgpt ${reason} credit`, reason);
       setAmounts((prev) => ({ ...prev, [id]: "" }));
       setStatus("Credits added!");
       load();
@@ -41,6 +42,8 @@ export default function Credits() {
           <p>Each student holds their own AI credit wallet</p>
         </div>
       </div>
+
+      {loadError && <p className="error">{loadError}</p>}
 
       <div className="card" style={{ marginBottom: 20 }}>
         <h3>Parent/Student Top-Up Link</h3>

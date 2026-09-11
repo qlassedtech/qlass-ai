@@ -21,6 +21,9 @@ import Chat from "./pages/Chat";
 import ParentDashboard from "./pages/ParentDashboard";
 import Pay from "./pages/Pay";
 import Flowchart from "./pages/Flowchart";
+import Terms from "./pages/Terms";
+import Privacy from "./pages/Privacy";
+import Refunds from "./pages/Refunds";
 import Layout from "./components/Layout";
 import StudentLayout from "./components/StudentLayout";
 
@@ -59,6 +62,9 @@ export default function App() {
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/pay" element={<Pay />} />
         <Route path="/join" element={<Join />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/refunds" element={<Refunds />} />
         {/* Internal engineering reference, not a customer-facing feature —
             public/unauthenticated like /join and /register (no secrets are
             shown, just how the product's own flows are wired), but never

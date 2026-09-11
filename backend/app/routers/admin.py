@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.core import AuditLog, Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import audit_log, cost_tracker, school_billing
-from app.services.escalation import QLASS_SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
+from app.services.escalation import SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
 from app.services.analytics import get_school_analytics
 from app.services.deletion import fulfill_deletion_request
@@ -29,7 +30,7 @@ from app.services.phone import normalize_phone
 from app.services.quiz_service import generate_quiz_questions
 from app.services.sales import get_schools_overview
 from app.services.school_statement import generate_school_statement_pdf
-from app.services.rate_limit import is_otp_rate_limited, is_signup_rate_limited, student_lock
+from app.services.rate_limit import client_ip, is_login_blocked, is_otp_rate_limited, is_signup_rate_limited, record_login_failure, student_lock
 from app.services.pdf_render import render_workbook_pdf
 from app.services.progress_report import get_student_stats, get_activity_stats, get_chapter_coverage, format_teacher_digest
 from app.services.gamma_service import create_presentation_generation, get_generation_status
@@ -48,6 +49,7 @@ from app.services.sarvam_client import transcribe_audio
 from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.roster_extraction import extract_student_rows, extract_teacher_rows
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DEFAULT_FEATURES = {"voice": False, "ocr": False, "image_generation": False, "documents": False, "youtube_videos": False}
@@ -216,18 +218,16 @@ def _get_scoped_student_or_404(db: Session, teacher: Teacher, student_id: int) -
 
 
 @router.post("/auth/login")
-async def login(body: LoginRequest, db: Session = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     phone = normalize_phone(body.phone)
-    # Unlike the OTP flows below, this endpoint previously had NO rate
-    # limiting at all — confirmed live an attacker could brute-force a
-    # known/guessed teacher/admin/super_admin phone's password with
-    # unlimited attempts. Same 5-attempts/10-minutes budget as OTP verify,
-    # keyed by the target phone (not the caller's IP) so an attacker can't
-    # reset their budget by rotating source IPs.
-    if await is_otp_rate_limited("teacher_login_password", phone):
+    ip = client_ip(request)
+    # Counts FAILED attempts only, per (phone, IP) plus a looser per-phone
+    # ceiling — see rate_limit.is_login_blocked.
+    if await is_login_blocked(phone, ip):
         raise HTTPException(status_code=429, detail="Too many login attempts — please wait a few minutes and try again")
     teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher or not teacher.password_hash or not verify_password(body.password, teacher.password_hash):
+        await record_login_failure(phone, ip)
         raise HTTPException(status_code=401, detail="Invalid phone or password")
     token = create_access_token(teacher.id, teacher.token_version or 0)
     return {"access_token": token, "teacher": {"id": teacher.id, "name": teacher.name, "role": teacher.role}}
@@ -387,8 +387,7 @@ async def register_school(body: RegisterSchoolRequest, request: Request, db: Ses
         which solves a different problem — routing an inbound message from
         an alternate number, not registration-time proof).
     """
-    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
-    if await is_signup_rate_limited(client_ip):
+    if await is_signup_rate_limited(client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many school registrations from this network — please try again later")
     admin_phone = normalize_phone(body.admin_phone)
     if db.query(Teacher).filter(Teacher.phone == admin_phone).first():
@@ -586,17 +585,17 @@ class ForgotPasswordRequest(BaseModel):
 
 @router.post("/auth/forgot-password")
 async def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("password_reset_request", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("password_reset_request", phone):
         raise HTTPException(status_code=429, detail="Too many requests — please wait a while before trying again")
-    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     # Always return the same response whether or not this phone has an
     # account — a different response would let someone probe which phone
     # numbers have portal logins.
     if teacher:
-        otp = await generate_and_store_otp("password_reset", body.phone)
-        await send_whatsapp_message(
-            body.phone, f"Your Skoolgpt password reset code is *{otp}*. It expires in 10 minutes."
-        )
+        otp = await generate_and_store_otp("password_reset", phone)
+        # Template send — a session message can't reach a cold contact.
+        await send_template_message(phone, LOGIN_OTP_TEMPLATE_NAME, [{"name": "1", "value": otp}])
     return {"sent": True}
 
 
@@ -608,12 +607,13 @@ class ResetPasswordRequest(BaseModel):
 
 @router.post("/auth/reset-password")
 async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
-    if await is_otp_rate_limited("password_reset_verify", body.phone):
+    phone = normalize_phone(body.phone)
+    if await is_otp_rate_limited("password_reset_verify", phone):
         raise HTTPException(status_code=429, detail="Too many attempts — please request a new code")
-    if not await verify_otp("password_reset", body.phone, body.otp):
+    if not await verify_otp("password_reset", phone, body.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
     _require_valid_password(body.new_password)
-    teacher = db.query(Teacher).filter(Teacher.phone == body.phone).first()
+    teacher = db.query(Teacher).filter(Teacher.phone == phone).first()
     if not teacher:
         raise HTTPException(status_code=404, detail="Account not found")
     teacher.password_hash = hash_password(body.new_password)
@@ -832,8 +832,18 @@ async def approve_student(
 def create_student(
     body: StudentCreateRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
+    phone = normalize_phone(body.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone cannot be empty")
+    existing = (
+        db.query(Student.id)
+        .filter(Student.phone == phone, Student.centre_id == teacher.centre_id, Student.is_deleted.is_(False))
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="A student with this phone number already exists in your school")
     student = Student(
-        name=body.name, phone=body.phone, class_=body.class_,
+        name=body.name, phone=phone, class_=body.class_,
         board=body.board or tenancy.default_board_for_centre(db, teacher.centre_id),
         school=body.school or tenancy.default_school_for_centre(db, teacher.centre_id),
         features=dict(DEFAULT_FEATURES), centre_id=teacher.centre_id,
@@ -842,6 +852,7 @@ def create_student(
     db.commit()
     db.refresh(student)
     cost_tracker.add_trial_credits(db, student.id)
+    audit_log.record(db, teacher.id, "create_student", "student", student.id, detail=f"phone ****{phone[-4:]}")
     return _student_to_dict(db, student)
 
 
@@ -1109,10 +1120,30 @@ def update_student(
         # gets matched back to this profile (see app.routers.whatsapp),
         # so an empty value here would silently orphan the student from
         # their own conversation history the next time they message.
-        phone = body.phone.strip()
+        phone = normalize_phone(body.phone)
         if not phone:
             raise HTTPException(status_code=400, detail="phone cannot be empty")
-        student.phone = phone
+        if phone != student.phone:
+            if teacher.role not in ("admin", "org_admin", "super_admin"):
+                raise HTTPException(status_code=403, detail="Only admins can change a student's phone number")
+            # Checked platform-wide: an inbound WhatsApp message matches on
+            # phone/whatsapp_phone regardless of centre.
+            clash = (
+                db.query(Student.id)
+                .filter(
+                    Student.id != student.id,
+                    Student.is_deleted.is_(False),
+                    (Student.phone == phone) | (Student.whatsapp_phone == phone),
+                )
+                .first()
+            )
+            if clash:
+                raise HTTPException(status_code=409, detail="That phone number is already linked to a different student")
+            audit_log.record(
+                db, teacher.id, "change_student_phone", "student", student.id,
+                detail=f"****{(student.phone or '')[-4:]} -> ****{phone[-4:]}",
+            )
+            student.phone = phone
     if body.class_ is not None:
         student.class_ = body.class_
     if body.board is not None:
@@ -1186,6 +1217,7 @@ def set_student_password(
     if len(body.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     student.password_hash = hash_password(body.password)
+    student.token_version = (student.token_version or 0) + 1
     db.commit()
     return {"has_password": True}
 
@@ -1618,9 +1650,9 @@ async def create_teacher(
     try:
         await send_whatsapp_message(
             phone,
-            f"Welcome to Skoolgpt, {body.name}! 🎉 An account has been set up for you on the Skoolgpt "
-            f"Partner Console.\n\nLog in with:\nPhone: {phone}\nPassword: {body.password}\n\n"
-            f"You can change your password any time from the login page's \"Forgot password?\" link.",
+            f"Welcome to {settings.brand_name}, {body.name}! 🎉 An account has been set up for you on the "
+            f"{settings.brand_name} Partner Console.\n\nTo set your own password, open {settings.portal_base_url} "
+            f"and tap \"Forgot password?\" on the login page, then log in with this phone number.",
         )
     except Exception:
         pass
@@ -2131,6 +2163,10 @@ def create_school_order(
     """
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to top up credits")
+    # An org_admin has no centre of their own — the verify step would take
+    # the money and then fail on SchoolCreditEvent.centre_id NOT NULL.
+    if teacher.centre_id is None:
+        raise HTTPException(status_code=400, detail="Select a school before topping up — this account isn't linked to one")
     if _razorpay_client is None:
         raise HTTPException(status_code=503, detail="Payments aren't configured yet — contact Skoolgpt support")
     if body.amount < MIN_TOPUP_AMOUNT:
@@ -2180,10 +2216,22 @@ def verify_school_payment(
     if school_billing.has_processed_external_ref(db, body.razorpay_payment_id):
         return {"credited": 0.0, "balance": school_billing.get_balance(db, teacher.centre_id)}
     amount_inr = order["amount"] / 100
-    new_balance = school_billing.add_credits(
-        db, teacher.centre_id, amount_inr, note=f"Razorpay payment by {teacher.name} ({body.razorpay_payment_id})",
-        external_ref=body.razorpay_payment_id,
-    )
+    try:
+        new_balance = school_billing.add_credits(
+            db, teacher.centre_id, amount_inr, note=f"Razorpay payment by {teacher.name} ({body.razorpay_payment_id})",
+            external_ref=body.razorpay_payment_id,
+        )
+    except Exception:
+        db.rollback()
+        logger.error(
+            "school top-up credit failed after Razorpay capture — reconcile manually: payment_id=%s order_id=%s "
+            "centre_id=%s teacher_id=%s amount_inr=%s",
+            body.razorpay_payment_id, body.razorpay_order_id, teacher.centre_id, teacher.id, amount_inr,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Your payment was received but couldn't be credited automatically — support will reconcile it shortly",
+        )
     return {"credited": amount_inr, "balance": new_balance}
 
 
@@ -2281,7 +2329,7 @@ def _my_tutor_credits_exhausted_detail(student: Student) -> str:
             "You've used up your plan's included AI usage for this period — top up usage credits to keep "
             "going until it resets, from the My AI Tutor page"
         )
-    return f"You're out of AI credits for your personal tutor account — top up from the My AI Tutor page, or call Qlass support at {QLASS_SUPPORT_PHONE}"
+    return f"You're out of AI credits for your personal tutor account — top up from the My AI Tutor page, or call {settings.brand_name} support at {SUPPORT_PHONE}"
 
 
 async def _my_tutor_reply(db: Session, student: Student, message_text: str) -> dict:

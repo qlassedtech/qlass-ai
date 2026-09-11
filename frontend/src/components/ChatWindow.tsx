@@ -49,7 +49,7 @@ export default function ChatWindow({
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    fetchHistory().then(setMessages);
+    fetchHistory().then(setMessages).catch((err) => setError(err instanceof Error ? err.message : "Couldn't load chat history"));
   }, [fetchHistory]);
 
   useEffect(() => {

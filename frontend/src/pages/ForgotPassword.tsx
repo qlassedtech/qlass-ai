@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import LegalFooter from "../components/LegalFooter";
 
 export default function ForgotPassword() {
   const [phone, setPhone] = useState("");
@@ -85,6 +86,7 @@ export default function ForgotPassword() {
         <p className="auth-links">
           <Link to="/login">Back to sign in</Link>
         </p>
+        <LegalFooter />
       </form>
     </div>
   );

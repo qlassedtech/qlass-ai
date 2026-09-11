@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type Student } from "../api";
+import { api, errorMessage, type Student } from "../api";
 
 export default function StudentList() {
   const [students, setStudents] = useState<Student[]>([]);
@@ -21,6 +21,7 @@ export default function StudentList() {
         setStudents(all);
         setPending(pendingList);
       })
+      .catch((err) => setError(errorMessage(err, "Failed to load students")))
       .finally(() => setLoading(false));
   }
 
@@ -61,6 +62,8 @@ export default function StudentList() {
         </div>
         <button onClick={() => setShowForm((v) => !v)}>{showForm ? "Cancel" : "+ Enroll Student"}</button>
       </div>
+
+      {error && !showForm && <p className="error">{error}</p>}
 
       {pending.length > 0 && (
         <div className="card" style={{ marginBottom: 24, borderColor: "var(--warning, #d97706)" }}>

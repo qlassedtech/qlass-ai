@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { api, absoluteUrl, type Student, type ProgressResponse, type Teacher } from "../api";
+import { api, errorMessage, absoluteUrl, type Student, type ProgressResponse, type Teacher } from "../api";
 
 const FEATURE_KEYS = ["voice", "ocr", "image_generation", "documents", "youtube_videos"] as const;
 const CLASS_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
@@ -54,12 +54,14 @@ export default function StudentDetail() {
   const [subLoading, setSubLoading] = useState(false);
   const [editingContact, setEditingContact] = useState(false);
   const [contactStatus, setContactStatus] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   function load() {
     api.fetchAllStudents().then((all) => {
       const found = all.find((s) => s.id === studentId) || null;
       setStudent(found);
+      if (!found) setLoadError("Student not found");
       if (found) {
         setName(found.name || "");
         setPhone(found.phone || "");
@@ -72,9 +74,9 @@ export default function StudentDetail() {
         setParentName(found.parent_name || "");
         setWhatsappPhone(found.whatsapp_phone || "");
       }
-    });
-    api.getProgress(studentId).then(setProgress);
-    api.me().then(setTeacher);
+    }).catch((err) => setLoadError(errorMessage(err, "Failed to load student")));
+    api.getProgress(studentId).then(setProgress).catch((err) => setLoadError(errorMessage(err, "Failed to load progress")));
+    api.me().then(setTeacher).catch(() => {});
   }
 
   useEffect(load, [studentId]);
@@ -192,7 +194,7 @@ export default function StudentDetail() {
     }
   }
 
-  if (!student) return <p>Loading...</p>;
+  if (!student) return loadError ? <p className="error">{loadError}</p> : <p>Loading...</p>;
 
   function buildTopUpLink(): string {
     // student_id disambiguates a shared family phone with more than one
@@ -253,6 +255,7 @@ export default function StudentDetail() {
   return (
     <div>
       <Link to="/students">&larr; Back to roster</Link>
+      {loadError && <p className="error">{loadError}</p>}
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 12 }}>
         <div className="photo-preview" onClick={() => photoInputRef.current?.click()} style={{ cursor: "pointer" }}>
           {student.photo_url ? (

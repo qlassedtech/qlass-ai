@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ChatWindow from "../components/ChatWindow";
 import LevelSwitcher from "../components/LevelSwitcher";
-import { api } from "../api";
+import { api, errorMessage } from "../api";
 
 declare global {
   interface Window {
@@ -28,6 +28,7 @@ export default function MyTutor() {
   const [subLoading, setSubLoading] = useState(false);
   const [subStatus, setSubStatus] = useState<string | null>(null);
   const [tutorLevel, setTutorLevel] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   function loadProfile() {
     api.getMyTutor().then((t) => {
@@ -36,7 +37,7 @@ export default function MyTutor() {
       setSubscriptionExpiresAt(t.subscription_expires_at);
       setAutoRenewing(t.auto_renewing);
       setTutorLevel(t.tutor_level);
-    });
+    }).catch((err) => setLoadError(errorMessage(err, "Failed to load your tutor account")));
   }
 
   useEffect(loadProfile, []);
@@ -110,6 +111,8 @@ export default function MyTutor() {
           />
         </div>
       </div>
+
+      {loadError && <p className="error">{loadError}</p>}
 
       <div className="card" style={{ marginBottom: 20 }}>
         {subscriptionPlan === "unlimited" ? (

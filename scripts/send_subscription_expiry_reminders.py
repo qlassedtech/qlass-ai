@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Parent, Student, Teacher  # noqa: E402
 from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
@@ -41,7 +42,7 @@ def _format_reminder(name: str, expires_at: datetime, price_label: str) -> str:
     days_left = (expires_at.date() - datetime.now(timezone.utc).date()).days
     when = "today" if days_left <= 0 else f"in {days_left} day{'s' if days_left != 1 else ''}"
     return (
-        f"⏰ Hi! {name}'s Qlass unlimited AI tutor plan ({price_label}) expires {when} "
+        f"⏰ Hi! {name}'s {settings.brand_name} unlimited AI tutor plan ({price_label}) expires {when} "
         f"({expires_at.strftime('%d %b %Y')}). Renew soon to avoid any interruption!"
     )
 

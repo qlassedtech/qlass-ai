@@ -18,6 +18,10 @@ export function normalizePhone(raw: string): string {
   return digits.length === 10 ? `91${digits}` : digits;
 }
 
+export function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
 function getToken(): string | null {
   return localStorage.getItem("token");
 }

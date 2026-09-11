@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type SchoolOverview, type Teacher } from "../api";
+import { api, errorMessage, type SchoolOverview, type Teacher } from "../api";
 
 const FEATURE_KEYS = ["voice", "ocr", "image_generation", "documents", "youtube_videos"] as const;
 const COLUMNS = ["name", "phone", "class", "board", "school"] as const;
@@ -40,9 +40,9 @@ export default function BulkUpload() {
       // skipping this for those roles used to silently create students
       // belonging to no school at all).
       if (teacher.role === "org_admin" || teacher.role === "super_admin") {
-        api.getSchoolsOverview().then(setSchools);
+        api.getSchoolsOverview().then(setSchools).catch((err) => setError(errorMessage(err, "Failed to load schools")));
       }
-    });
+    }).catch((err) => setError(errorMessage(err, "Failed to load your account")));
   }, []);
 
   const needsSchoolPicker = me?.role === "org_admin" || me?.role === "super_admin";

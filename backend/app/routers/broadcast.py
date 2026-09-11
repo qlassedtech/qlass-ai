@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.core import Student, Teacher
+from app.services import audit_log
 from app.services.teacher_auth import get_current_teacher
 from app.services.whatsapp_client import send_broadcast_template
 
@@ -66,6 +67,10 @@ async def send_broadcast(
             phone_numbers = [phone for phone in phone_numbers if phone in allowed]
         receivers = [{"whatsappNumber": phone, "customParams": []} for phone in phone_numbers]
     else:
+        if teacher.role == "super_admin" and not any(
+            (req.filters.class_, req.filters.board, req.filters.centre_id)
+        ):
+            raise HTTPException(status_code=400, detail="Provide at least one filter")
         query = db.query(Student.phone, Student.name)
         if req.filters.class_:
             query = query.filter(Student.class_ == req.filters.class_)
@@ -93,4 +98,8 @@ async def send_broadcast(
         raise HTTPException(status_code=400, detail="No matching recipients found")
 
     result = await send_broadcast_template(req.template_name, req.broadcast_name, receivers)
+    audit_log.record(
+        db, teacher.id, "send_broadcast", "broadcast", 0,
+        detail=f"template={req.template_name} name={req.broadcast_name} recipients={len(receivers)}",
+    )
     return {"recipient_count": len(receivers), "wati_result": result}

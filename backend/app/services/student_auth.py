@@ -13,9 +13,10 @@ from app.services.teacher_auth import JWT_ALGORITHM, JWT_EXPIRY_HOURS
 _bearer = HTTPBearer()
 
 
-def create_student_access_token(student_id: int) -> str:
+def create_student_access_token(student_id: int, token_version: int = 0) -> str:
     payload = {
         "sub": str(student_id),
+        "tv": token_version,  # see Student.token_version
         "type": "student",  # distinguishes from a teacher token — see app.services.teacher_auth
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -30,10 +31,13 @@ async def get_current_student(
         if payload.get("type") != "student":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
         student_id = int(payload["sub"])
+        token_version = payload.get("tv", 0)
     except (jwt.PyJWTError, KeyError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Student not found")
+    if token_version != (student.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return student

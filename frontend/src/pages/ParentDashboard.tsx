@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import ParentLayout from "../components/ParentLayout";
-import { parentApi, type ParentProfile, type ParentProgress } from "../api";
+import { errorMessage, parentApi, type ParentProfile, type ParentProgress } from "../api";
 
 export default function ParentDashboard() {
   const [profile, setProfile] = useState<ParentProfile | null>(null);
@@ -8,11 +8,12 @@ export default function ParentDashboard() {
   const [consent, setConsent] = useState<{ statement: string; given: boolean; given_at: string | null } | null>(null);
   const [deletionRequested, setDeletionRequested] = useState(false);
   const [showDeletionConfirm, setShowDeletionConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    parentApi.me().then(setProfile);
-    parentApi.progress().then(setProgress);
-    parentApi.getConsent().then(setConsent);
+    parentApi.me().then(setProfile).catch((err) => setError(errorMessage(err, "Failed to load your account")));
+    parentApi.progress().then(setProgress).catch((err) => setError(errorMessage(err, "Failed to load progress")));
+    parentApi.getConsent().then(setConsent).catch((err) => setError(errorMessage(err, "Failed to load consent status")));
   }, []);
 
   async function handleGiveConsent() {
@@ -29,7 +30,7 @@ export default function ParentDashboard() {
   if (!profile) {
     return (
       <ParentLayout>
-        <p>Loading...</p>
+        {error ? <p className="error">{error}</p> : <p>Loading...</p>}
       </ParentLayout>
     );
   }
@@ -41,6 +42,7 @@ export default function ParentDashboard() {
 
   return (
     <ParentLayout>
+      {error && <p className="error">{error}</p>}
       {consent && !consent.given && (
         <div className="card" style={{ marginBottom: 20, background: "var(--accent-lighter)" }}>
           <p style={{ marginBottom: 12 }}>{consent.statement}</p>
