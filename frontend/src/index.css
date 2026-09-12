@@ -569,6 +569,69 @@ label {
   max-width: 1140px;
 }
 
+/* Wraps everything below the logo row so it can be collapsed as one unit
+   on a phone (see the media query below). On desktop this must still
+   behave exactly like its children being direct flex items of .sidebar
+   did before this wrapper existed — stretching to fill the remaining
+   height so .logout's margin-top:auto still pins it to the bottom. */
+.sidebar-collapsible {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Below this, .sidebar's fixed 232px width plus .content's own padding
+   left no room for the actual page on a phone — confirmed live on the
+   /call and /chat student pages, both starting from off-screen. Sidebar
+   becomes a slim top bar (logo + a toggle button, always visible) with
+   its full contents (user card, nav links, sign out) collapsed into a
+   dropdown under it, shown only once .sidebar-open is toggled on. */
+.sidebar-toggle {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    flex-direction: column;
+    min-height: 0;
+  }
+  .sidebar {
+    width: 100%;
+    padding: 14px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .sidebar-collapsible {
+    display: none;
+    flex-direction: column;
+    margin-top: 14px;
+  }
+  .sidebar.sidebar-open .sidebar-collapsible {
+    display: flex;
+  }
+  .sidebar .logout {
+    margin-top: 12px;
+  }
+  .content {
+    padding: 20px 16px 40px;
+    max-width: 100%;
+  }
+}
+
 .page-header {
   display: flex;
   justify-content: space-between;
