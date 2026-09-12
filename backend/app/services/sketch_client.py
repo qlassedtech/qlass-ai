@@ -45,6 +45,12 @@ structure), stack them vertically instead — each on its own line, at least 16p
 rather than placing them side by side at the same height. When unsure whether two labels have \
 enough room, give them more room, not less.
 
+Be internally consistent: don't draw an arrow depicting a quantity at the same point where a \
+label says that quantity is zero or absent (e.g. if you label a point "vy = 0", don't also draw \
+a vertical velocity arrow there — the correct diagram shows NO vertical arrow at that point, \
+only the horizontal one). Every arrow and every label must agree with each other and with the \
+real physical/scientific facts of what's being illustrated, not just look plausible in isolation.
+
 Example 1 — prompt "the water cycle":
 [
   {{"type": "ellipse", "x": 80, "y": 220, "rx": 60, "ry": 30}},
