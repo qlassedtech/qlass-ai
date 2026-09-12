@@ -8,6 +8,66 @@ type LogEntry = { who: "you" | "tutor"; text: string; note?: string };
 
 type CallStatus = "connecting" | "open" | "closed" | "error" | "mic_denied";
 
+// Mirrors the drawing-primitive schema backend/app/services/sketch_client.py
+// asks the model for — see its module docstring for the authoritative
+// shape. Deliberately loose here (unknown fields just get ignored below)
+// since this is untrusted-ish LLM-generated data passed through a network
+// hop, not a contract either side can fully guarantee at the type level.
+type DiagramElement =
+  | { type: "rect"; x: number; y: number; w: number; h: number }
+  | { type: "ellipse"; x: number; y: number; rx: number; ry: number }
+  | { type: "line"; points: [number, number][] }
+  | { type: "arrow"; x1: number; y1: number; x2: number; y2: number }
+  | { type: "text"; x: number; y: number; text: string };
+
+// Fixed 400x300 coordinate space, matching the backend's canvas assumption
+// exactly so no client-side scaling/translation is needed.
+const DIAGRAM_W = 400;
+const DIAGRAM_H = 300;
+
+// rough.js is loaded lazily, only on this page (see loadRoughJs below),
+// rather than an npm dependency/import or a global <script> tag in
+// index.html — it's used nowhere else in this app, and every other page
+// (Join, Login, the teacher portal) would otherwise pay for ~36KB of JS on
+// every load for a feature only this one page uses, which cuts against
+// this app's own low-bandwidth design for its actual audience.
+declare global {
+  interface Window {
+    rough?: {
+      canvas: (canvas: HTMLCanvasElement) => {
+        rectangle: (x: number, y: number, w: number, h: number, opts?: Record<string, unknown>) => void;
+        ellipse: (x: number, y: number, w: number, h: number, opts?: Record<string, unknown>) => void;
+        line: (x1: number, y1: number, x2: number, y2: number, opts?: Record<string, unknown>) => void;
+        linearPath: (points: [number, number][], opts?: Record<string, unknown>) => void;
+      };
+    };
+  }
+}
+
+const ROUGH_JS_SRC = "https://cdnjs.cloudflare.com/ajax/libs/rough.js/3.1.0/rough.umd.js";
+
+// Loads rough.js once and caches the in-flight/completed promise on
+// `window` itself (not a module-level variable) so remounting this page
+// (e.g. navigating away and back) never injects a second <script> tag or
+// re-fetches it — a plain HTML script tag has no built-in de-dup the way
+// an ES module import would. Resolves to true/false rather than
+// rejecting, since a failed load must never throw into a caller — the
+// diagram feature degrades to "no diagram" silently either way.
+function loadRoughJs(): Promise<boolean> {
+  const w = window as unknown as { __roughJsLoad?: Promise<boolean> };
+  if (w.__roughJsLoad) return w.__roughJsLoad;
+  if (window.rough) return (w.__roughJsLoad = Promise.resolve(true));
+
+  w.__roughJsLoad = new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.src = ROUGH_JS_SRC;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+  return w.__roughJsLoad;
+}
+
 // Whatever the browser's MediaRecorder actually supports, preferring Opus
 // inside WebM — backend app.services.sarvam_client._AUDIO_CONTENT_TYPES
 // maps the ".webm" extension straight to "audio/webm", which Sarvam's STT
@@ -38,6 +98,25 @@ export default function Call() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
   const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const diagramCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Bumped every time a new diagram scene starts animating, and checked by
+  // every pending setTimeout callback before it draws — the same
+  // defensive "did something newer supersede me" pattern this file's own
+  // WS message handling already leans on elsewhere (e.g. process_message's
+  // own "a newer message already superseded this one" case), so a second
+  // diagram arriving mid-animation cleanly abandons the first rather than
+  // the two animations interleaving their draws on the same canvas.
+  const diagramGenerationRef = useRef(0);
+  const diagramTimeoutsRef = useRef<number[]>([]);
+
+  // Kicked off as soon as this page mounts, in parallel with the WebSocket
+  // connecting below — by the time a "diagram" frame could plausibly
+  // arrive (after mic permission, a full record-transcribe-tutor round
+  // trip), rough.js has almost always already finished loading. If it
+  // hasn't, renderDiagram just silently does nothing for that one frame.
+  useEffect(() => {
+    loadRoughJs();
+  }, []);
 
   // --- WebSocket lifecycle -------------------------------------------------
   useEffect(() => {
@@ -71,6 +150,8 @@ export default function Call() {
           setLog((prev) => [...prev, { who: "you", text: String(frame.text ?? "") }]);
         } else if (frame.type === "reply_text") {
           setLog((prev) => [...prev, { who: "tutor", text: String(frame.text ?? "") }]);
+        } else if (frame.type === "diagram") {
+          renderDiagram(Array.isArray(frame.scene) ? (frame.scene as DiagramElement[]) : []);
         } else if (frame.type === "tts_failed") {
           setLog((prev) => {
             const copy = [...prev];
@@ -96,9 +177,113 @@ export default function Call() {
       ws.close();
       stopMicVisualizer();
       recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
+      diagramGenerationRef.current += 1; // abandon any in-flight diagram animation
+      diagramTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
+      diagramTimeoutsRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // --- Diagram sketch rendering (rough.js) --------------------------------
+  // Reveals `scene`'s elements one at a time, in array order (order is
+  // meaningful — see sketch_client's system prompt: outline shapes are
+  // generated before their labels), paced evenly over roughly 3-6 seconds
+  // total so it reads as a tutor "drawing while explaining" rather than a
+  // diagram just popping in. Fails completely silently (no error shown to
+  // the student) if rough.js didn't load or the canvas isn't mounted —
+  // this is a nice-to-have on top of the core voice flow, never allowed to
+  // block or visibly break it.
+  function renderDiagram(scene: DiagramElement[]) {
+    const canvas = diagramCanvasRef.current;
+    const rough = window.rough;
+    if (!canvas || !rough || scene.length === 0) return;
+
+    let rc: ReturnType<NonNullable<Window["rough"]>["canvas"]>;
+    let ctx: CanvasRenderingContext2D | null;
+    try {
+      rc = rough.canvas(canvas);
+      ctx = canvas.getContext("2d");
+    } catch {
+      return;
+    }
+    if (!ctx) return;
+
+    // Supersede any previous animation still in flight.
+    diagramGenerationRef.current += 1;
+    const generation = diagramGenerationRef.current;
+    diagramTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
+    diagramTimeoutsRef.current = [];
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const totalDurationMs = 4500; // within the ~3-6s target
+    const stepMs = Math.max(150, totalDurationMs / scene.length);
+
+    scene.forEach((element, index) => {
+      const timeoutId = window.setTimeout(() => {
+        // A newer diagram (or an unmounted page) already took over — don't
+        // draw a stale element on top of whatever's there now.
+        if (diagramGenerationRef.current !== generation) return;
+        drawDiagramElement(rc, ctx!, element);
+      }, index * stepMs);
+      diagramTimeoutsRef.current.push(timeoutId);
+    });
+  }
+
+  function drawDiagramElement(
+    rc: ReturnType<NonNullable<Window["rough"]>["canvas"]>,
+    ctx: CanvasRenderingContext2D,
+    element: DiagramElement,
+  ) {
+    try {
+      switch (element.type) {
+        case "rect":
+          rc.rectangle(element.x, element.y, element.w, element.h);
+          break;
+        case "ellipse":
+          // rough.js takes a center point plus full width/height, not a
+          // radius — the backend schema gives radii, so double them here.
+          rc.ellipse(element.x, element.y, element.rx * 2, element.ry * 2);
+          break;
+        case "line":
+          if (element.points.length >= 2) rc.linearPath(element.points);
+          break;
+        case "arrow": {
+          rc.line(element.x1, element.y1, element.x2, element.y2);
+          // rough.js has no arrowhead primitive — draw one manually as two
+          // short lines angled back from the endpoint.
+          const angle = Math.atan2(element.y2 - element.y1, element.x2 - element.x1);
+          const headLen = 10;
+          const spread = Math.PI / 7;
+          rc.line(
+            element.x2,
+            element.y2,
+            element.x2 - headLen * Math.cos(angle - spread),
+            element.y2 - headLen * Math.sin(angle - spread),
+          );
+          rc.line(
+            element.x2,
+            element.y2,
+            element.x2 - headLen * Math.cos(angle + spread),
+            element.y2 - headLen * Math.sin(angle + spread),
+          );
+          break;
+        }
+        case "text":
+          ctx.font = "14px sans-serif";
+          // canvas fillStyle can't resolve a CSS custom property, and the
+          // diagram is drawn on a fixed light background (see .call-
+          // diagram-canvas below) regardless of page theme, so a plain
+          // fixed dark color is used rather than trying to theme it.
+          ctx.fillStyle = "#333333";
+          ctx.fillText(element.text, element.x, element.y);
+          break;
+      }
+    } catch {
+      // One malformed element (out-of-range values rough.js chokes on,
+      // etc.) should not stop the rest of the scene from drawing.
+    }
+  }
 
   // --- Mic amplitude visualization (while recording) ---------------------
   function startMicVisualizer(stream: MediaStream) {
@@ -252,6 +437,11 @@ export default function Call() {
         .call-log-entry.you { background: var(--call-log-you-bg); align-self: flex-end; }
         .call-log-entry.tutor { background: var(--call-log-tutor-bg); align-self: flex-start; }
         .call-log-note { font-size: 12px; opacity: 0.7; margin-top: 4px; }
+        .call-diagram-canvas {
+          display: block; max-width: 100%; height: auto; width: 400px;
+          margin: 8px auto 20px; background: #fdfdfb; border-radius: 10px;
+          border: 1px solid var(--call-diagram-border);
+        }
       `}</style>
 
       <div className="page-header">
@@ -291,6 +481,13 @@ export default function Call() {
 
       <div ref={orbRef} className={`call-orb${recording ? " recording" : ""}`} />
 
+      <canvas
+        ref={diagramCanvasRef}
+        className="call-diagram-canvas"
+        width={DIAGRAM_W}
+        height={DIAGRAM_H}
+      />
+
       <button
         className="call-talk-btn"
         onClick={handleTalkButtonClick}
@@ -314,11 +511,11 @@ export default function Call() {
       </div>
 
       <style>{`
-        :root { --call-orb-light: #93c5fd; --call-orb-dark: #2563eb; --call-orb-glow: rgba(37,99,235,0.55); --call-btn-bg: #2563eb; --call-btn-fg: #fff; --call-log-you-bg: #eef2ff; --call-log-tutor-bg: #f0fdf4; }
+        :root { --call-orb-light: #93c5fd; --call-orb-dark: #2563eb; --call-orb-glow: rgba(37,99,235,0.55); --call-btn-bg: #2563eb; --call-btn-fg: #fff; --call-log-you-bg: #eef2ff; --call-log-tutor-bg: #f0fdf4; --call-diagram-border: #e2e2df; }
         @media (prefers-color-scheme: dark) {
-          :root:not([data-theme="light"]) { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; }
+          :root:not([data-theme="light"]) { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; }
         }
-        :root[data-theme="dark"] { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; }
+        :root[data-theme="dark"] { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; }
       `}</style>
     </div>
   );

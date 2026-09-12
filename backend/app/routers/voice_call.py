@@ -30,6 +30,17 @@ one binary audio frame:
   - {"type": "transcript", "text": "..."}       — what Sarvam heard, sent
     as soon as it's back, before the tutor reply is generated, so the UI
     can show it immediately.
+  - {"type": "diagram", "scene": [...]}          — sent only if the
+    tutor's reply carried an image_prompt AND sketch generation succeeded.
+    Sent BEFORE reply_text so the client can start the sketch animation
+    while the reply audio is still being synthesized. `scene` is a JSON
+    array of drawing primitives on a fixed 400x300 coordinate space (see
+    app.services.sketch_client's module docstring for the exact element
+    schema) for the client to render/animate with rough.js — order in the
+    array is draw order. Never sent if there was no image_prompt this
+    turn, or if sketch generation failed; the client should simply not
+    expect a diagram in that case, exactly like a missing tts_failed frame
+    doesn't imply anything went wrong.
   - {"type": "reply_text", "text": "..."}       — the tutor's reply text
     (identical to what WhatsApp/chat would show), sent before the
     corresponding audio so the transcript log updates immediately even if
@@ -61,7 +72,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.services import audio_qa, cost_tracker, chat_core, sarvam_client
+from app.services import audio_qa, cost_tracker, chat_core, sarvam_client, sketch_client
 from app.services.student_auth import get_student_by_token
 
 logger = logging.getLogger(__name__)
@@ -181,15 +192,33 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
         await websocket.send_json({"type": "error", "message": _COULD_NOT_HEAR_MESSAGE})
         return False
 
-    # image_prompt/video are tutor decisions this MVP call UI doesn't
-    # render (see this router's module docstring / the feature's own
-    # scoping) — logged, not acted on, so a diagram/video request over a
-    # call doesn't just silently disappear without a trace.
-    if result.image_prompt or result.video:
+    # video is a tutor decision this MVP call UI still doesn't render (see
+    # this router's module docstring / the feature's own scoping) — logged,
+    # not acted on, so a video request over a call doesn't just silently
+    # disappear without a trace. image_prompt, on the other hand, now gets
+    # rendered as a progressively-drawn sketch diagram (see sketch_client).
+    if result.video:
         logger.info(
-            "voice_call: reply for student_id=%s carried image_prompt/video, not rendered in call UI (out of scope for this MVP)",
+            "voice_call: reply for student_id=%s carried video, not rendered in call UI (out of scope for this MVP)",
             student.id,
         )
+
+    if result.image_prompt:
+        # A failed/unusable sketch degrades exactly like a failed TTS call
+        # does: nothing diagram-related is sent, and the turn continues
+        # normally with reply_text/audio — this must never fail the turn.
+        scene, sketch_result = await sketch_client.generate_sketch_scene(result.image_prompt)
+        if scene:
+            cost_tracker.record_claude_usage(
+                db, sketch_result.model, sketch_result.input_tokens, sketch_result.output_tokens, student.id,
+                cache_write_tokens=sketch_result.cache_write_tokens, cache_read_tokens=sketch_result.cache_read_tokens,
+            )
+            await websocket.send_json({"type": "diagram", "scene": scene})
+        else:
+            logger.info(
+                "voice_call: sketch generation failed/unusable for student_id=%s, image_prompt=%r",
+                student.id, result.image_prompt,
+            )
 
     await websocket.send_json({"type": "reply_text", "text": result.reply_text})
 

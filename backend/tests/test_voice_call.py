@@ -12,8 +12,9 @@ from starlette.websockets import WebSocketDisconnect
 from app.database import get_db
 from app.main import app
 from app.models.core import Centre, Student
-from app.services import chat_core, cost_tracker, sarvam_client
+from app.services import chat_core, cost_tracker, sarvam_client, sketch_client
 from app.services.chat_core import ChatTurnResult
+from app.services.llm_client import LLMResult
 from app.services.student_auth import create_student_access_token
 
 
@@ -143,6 +144,84 @@ def test_failed_transcription_sends_error_but_keeps_connection_open(db_session, 
             ws.send_bytes(b"garbled-again")
             frame2 = ws.receive_json()
             assert frame2["type"] == "error"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_image_prompt_reply_sends_diagram_frame_before_reply_text(db_session, monkeypatch):
+    student = _make_student(db_session, voice_enabled=True)
+    cost_tracker.add_credits(db_session, student.id, 50.0, note="test credit")
+    token = create_student_access_token(student.id)
+
+    scene = [{"type": "rect", "x": 10, "y": 10, "w": 50, "h": 50}]
+
+    async def fake_transcribe(audio_bytes, filename="voice_note.ogg"):
+        return "draw a plant cell"
+
+    async def fake_process_message(db, student, message_text):
+        return ChatTurnResult(reply_text="Here's the plant cell.", image_prompt="a plant cell")
+
+    async def fake_generate_sketch_scene(prompt):
+        assert prompt == "a plant cell"
+        return scene, LLMResult(text="...", model="claude-haiku-4-5-20251001", input_tokens=5, output_tokens=5)
+
+    async def fake_synthesize(text, language_code=None, speaker=None):
+        return b"fake-opus-bytes"
+
+    monkeypatch.setattr(sarvam_client, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(chat_core, "process_message", fake_process_message)
+    monkeypatch.setattr(sketch_client, "generate_sketch_scene", fake_generate_sketch_scene)
+    monkeypatch.setattr(sarvam_client, "synthesize_speech", fake_synthesize)
+
+    client = _client(db_session)
+    try:
+        with client.websocket_connect(f"/ws/voice-call?token={token}") as ws:
+            ws.send_bytes(b"some-audio")
+            ws.receive_json()  # transcript
+
+            diagram_frame = ws.receive_json()
+            assert diagram_frame == {"type": "diagram", "scene": scene}
+
+            reply_frame = ws.receive_json()
+            assert reply_frame["type"] == "reply_text"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_failed_sketch_generation_does_not_send_diagram_or_fail_the_turn(db_session, monkeypatch):
+    student = _make_student(db_session, voice_enabled=True)
+    cost_tracker.add_credits(db_session, student.id, 50.0, note="test credit")
+    token = create_student_access_token(student.id)
+
+    async def fake_transcribe(audio_bytes, filename="voice_note.ogg"):
+        return "draw a plant cell"
+
+    async def fake_process_message(db, student, message_text):
+        return ChatTurnResult(reply_text="Here's the plant cell.", image_prompt="a plant cell")
+
+    async def fake_generate_sketch_scene_fails(prompt):
+        return None, None
+
+    async def fake_synthesize(text, language_code=None, speaker=None):
+        return b"fake-opus-bytes"
+
+    monkeypatch.setattr(sarvam_client, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(chat_core, "process_message", fake_process_message)
+    monkeypatch.setattr(sketch_client, "generate_sketch_scene", fake_generate_sketch_scene_fails)
+    monkeypatch.setattr(sarvam_client, "synthesize_speech", fake_synthesize)
+
+    client = _client(db_session)
+    try:
+        with client.websocket_connect(f"/ws/voice-call?token={token}") as ws:
+            ws.send_bytes(b"some-audio")
+            ws.receive_json()  # transcript
+
+            # No diagram frame — straight to reply_text, turn proceeds normally.
+            reply_frame = ws.receive_json()
+            assert reply_frame["type"] == "reply_text"
+
+            audio_frame = ws.receive_bytes()
+            assert audio_frame == b"fake-opus-bytes"
     finally:
         app.dependency_overrides.clear()
 
