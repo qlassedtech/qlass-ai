@@ -95,7 +95,12 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
             )
             resp.raise_for_status()
             return resp.json().get("transcript")
-    except httpx.HTTPError:
+    except httpx.HTTPStatusError as exc:
+        # 402 = Sarvam account out of credits — an ops problem, not a bad recording.
+        logger.error("Sarvam STT failed status=%s body=%s", exc.response.status_code, exc.response.text[:300])
+        return None
+    except httpx.HTTPError as exc:
+        logger.error("Sarvam STT request error: %s", exc)
         return None
 
 
@@ -122,7 +127,11 @@ async def _call_tts_api(text: str, language_code: str, speaker: str) -> bytes | 
             resp.raise_for_status()
             audios = resp.json().get("audios") or []
             return base64.b64decode(audios[0]) if audios else None
-    except httpx.HTTPError:
+    except httpx.HTTPStatusError as exc:
+        logger.error("Sarvam TTS failed status=%s body=%s", exc.response.status_code, exc.response.text[:300])
+        return None
+    except httpx.HTTPError as exc:
+        logger.error("Sarvam TTS request error: %s", exc)
         return None
 
 

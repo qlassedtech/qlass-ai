@@ -993,7 +993,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
 
             message_text = await transcribe_audio(audio_bytes)
             if not message_text:
-                await send_whatsapp_message(from_phone, "Sorry, I couldn't understand that voice note — could you try again or type your question?")
+                await send_whatsapp_message(
+                    from_phone,
+                    "Sorry, I couldn't process that voice note right now — please type your question and I'll answer straight away.",
+                )
                 return
             cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
         elif image_parsed:
