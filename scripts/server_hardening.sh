@@ -104,6 +104,24 @@ server {
     client_max_body_size 10m;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
+    # WebSocket routes (e.g. the real-time voice-call feature) need the
+    # Upgrade/Connection headers forwarded and a long read/send timeout —
+    # a plain proxy_pass silently 404s a WS upgrade otherwise, since nginx
+    # falls back to treating it as a normal HTTP request.
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8096;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_connect_timeout 10s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8096;
         proxy_set_header Host $host;
