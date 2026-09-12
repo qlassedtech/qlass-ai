@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import json
 import time
 import uuid
 from collections import defaultdict
@@ -199,6 +200,43 @@ async def is_payment_rate_limited(phone: str, ip: str) -> bool:
     per_phone = await _sliding_window_count(f"payrate:phone:{phone}", PAYMENT_RATE_LIMIT_WINDOW_SECONDS)
     per_ip = await _sliding_window_count(f"payrate:ip:{ip}", PAYMENT_RATE_LIMIT_WINDOW_SECONDS)
     return per_phone > PAYMENT_RATE_LIMIT_MAX_PER_PHONE or per_ip > PAYMENT_RATE_LIMIT_MAX_PER_IP
+
+
+# Disposable "last worksheet answers pending" state for
+# app.services.chat_core's worksheet-generation intent — a student who
+# asks for a worksheet gets the questions immediately, with the answer key
+# held back until they reply "answers"; that key needs to live SOMEWHERE
+# between those two turns. Redis with a short TTL, rather than a new
+# Student column, since this is purely transient per-conversation state
+# with no reason to survive indefinitely (a student who never asks for the
+# answers just has this expire quietly). Same in-process-dict fallback
+# every other Redis-backed helper here uses when Redis isn't reachable.
+PENDING_WORKSHEET_TTL_SECONDS = 30 * 60
+_fallback_worksheets: dict[str, list] = {}
+
+
+async def set_pending_worksheet_answers(student_id: int, questions: list[dict]) -> None:
+    key = f"worksheet:{student_id}"
+    if _redis is None:
+        _fallback_worksheets[key] = questions
+        return
+    await _redis.set(key, json.dumps(questions), ex=PENDING_WORKSHEET_TTL_SECONDS)
+
+
+async def get_pending_worksheet_answers(student_id: int) -> list[dict] | None:
+    key = f"worksheet:{student_id}"
+    if _redis is None:
+        return _fallback_worksheets.get(key)
+    raw = await _redis.get(key)
+    return json.loads(raw) if raw else None
+
+
+async def clear_pending_worksheet_answers(student_id: int) -> None:
+    key = f"worksheet:{student_id}"
+    if _redis is None:
+        _fallback_worksheets.pop(key, None)
+        return
+    await _redis.delete(key)
 
 
 def student_lock(phone: str):

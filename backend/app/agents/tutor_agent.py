@@ -167,6 +167,7 @@ class TutorAgent(BaseAgent):
         active_document_text: str | None = None,
         pending_class_confirm: str | None = None,
         pending_profile_field: str | None = None,
+        tutor_style: str = "balanced",
     ) -> tuple[str, str]:
         """
         Returns (static, dynamic) — split so the caller can mark only the
@@ -246,15 +247,36 @@ class TutorAgent(BaseAgent):
             "- If you don't have grounded textbook material for this topic (see below), still teach "
             "confidently from general knowledge, but don't invent board/class-specific facts (like "
             "exact syllabus page numbers or exam patterns) you can't actually know.\n"
-            "- CRITICAL — when the student shares a problem/equation/exercise to SOLVE (e.g. \"10 = "
-            "3x - 5\", a word problem, a numeric exercise), do NOT immediately solve the whole thing "
-            "for them. Give a hint or just the first step, then ask them to try the next step "
-            "themselves — like a real tutor watching them work, not a solutions manual. Only walk "
-            "through the full solution if they're genuinely stuck after a real attempt, or explicitly "
-            "ask you to just solve it. This is different from a check question you asked yourself — "
-            "here the STUDENT brought a problem to solve, so let them do the solving with your "
-            "guidance, not the other way around.\n"
-            "- CRITICAL — cover ONE thing per message, not several. Never combine \"here's a list of "
+            # hint_first: a stricter, opt-in Socratic mode (see
+            # Student.tutor_style) — replaces the softer default rule below
+            # entirely for this student only. Never changes behavior for a
+            # student still on "balanced" (the default for everyone today).
+            + (
+                "- CRITICAL — this student has HINT MODE turned on, a stricter teaching style they "
+                "opted into. When the student shares a problem/equation/exercise to SOLVE (e.g. \"10 = "
+                "3x - 5\", a word problem, a numeric exercise) that they could plausibly attempt "
+                "themselves, do NOT give the final answer or a complete worked solution on the FIRST "
+                "ask, no matter how simple the problem looks. Respond with exactly ONE guiding question "
+                "or the smallest possible next step, then stop and wait for the student's own attempt "
+                "before continuing — like a real tutor standing over their shoulder, never a solutions "
+                "manual. Keep track of how many exchanges you've spent guiding-without-solving on this "
+                "SAME problem: after 3 such exchanges where the student still hasn't reached the "
+                "answer, stop guiding and explicitly offer a choice instead — something like \"Want me "
+                "to walk through it fully, or keep trying?\" — and only give the complete solution once "
+                "they say yes / clearly ask you to just solve it. A question that's really asking you "
+                "to EXPLAIN a concept (not solve a problem) is unaffected by any of this — explain it "
+                "normally, with full depth, exactly as you always would.\n"
+                if tutor_style == "hint_first"
+                else "- CRITICAL — when the student shares a problem/equation/exercise to SOLVE (e.g. \"10 = "
+                "3x - 5\", a word problem, a numeric exercise), do NOT immediately solve the whole thing "
+                "for them. Give a hint or just the first step, then ask them to try the next step "
+                "themselves — like a real tutor watching them work, not a solutions manual. Only walk "
+                "through the full solution if they're genuinely stuck after a real attempt, or explicitly "
+                "ask you to just solve it. This is different from a check question you asked yourself — "
+                "here the STUDENT brought a problem to solve, so let them do the solving with your "
+                "guidance, not the other way around.\n"
+            )
+            + "- CRITICAL — cover ONE thing per message, not several. Never combine \"here's a list of "
             "5 related concepts\" AND \"here's a new numeric example question\" in the same reply — "
             "pick one. Long, multi-part messages get cut off mid-sentence on WhatsApp and confuse the "
             "student (e.g. asking them to solve a problem using numbers that got cut off before you "
@@ -358,9 +380,13 @@ class TutorAgent(BaseAgent):
                 "When image=true, add ONE more line directly BEFORE the TRACK line, "
                 "in this exact format: [[IMAGE_PROMPT: <a clear, specific description for an image "
                 "generator, e.g. \"a labeled diagram of a plant cell showing nucleus, chloroplast, "
-                "mitochondria, vacuole, for a Class 8 science textbook\">]]. Your visible reply text "
-                "must still stand on its own with real explanation — the image is a supplement, never "
-                "a replacement for actually teaching in words.\n"
+                "mitochondria, vacuole, for a Class 8 science textbook\">]]. For any science/math "
+                "concept, the prompt must explicitly ask for a clearly labeled educational diagram "
+                "(labeled parts/axes/steps, simple clean line-art style, plain background) — never a "
+                "generic decorative illustration or realistic art style, which isn't actually useful "
+                "for learning. Your visible reply text must still stand on its own with real "
+                "explanation — the image is a supplement, never a replacement for actually teaching in "
+                "words.\n"
                 if image_generation_enabled
                 else "- image: always false — image generation isn't available for this student.\n"
             )
@@ -514,6 +540,7 @@ class TutorAgent(BaseAgent):
         pending_profile_field: str | None = None,
         retrieved_chunks: list[RetrievedChunk] | None = None,
         model: str = "claude-sonnet-4-6",
+        tutor_style: str = "balanced",
     ) -> dict:
         # Retrieval itself (Postgres full-text candidate search + the LLM
         # relevance judgment) happens in the caller, before this is called
@@ -527,7 +554,7 @@ class TutorAgent(BaseAgent):
         retrieved_chunks = retrieved_chunks or []
         static_prompt, dynamic_prompt = self.build_context(
             student, retrieved_chunks, weak_topics or [], image_generation_enabled, voice_enabled, video_enabled,
-            active_document_text, pending_class_confirm, pending_profile_field,
+            active_document_text, pending_class_confirm, pending_profile_field, tutor_style,
         )
         # Two separate blocks (see build_context's docstring) — only the
         # static one is cache-marked, so a per-turn change in dynamic_prompt

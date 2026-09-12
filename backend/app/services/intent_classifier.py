@@ -8,14 +8,16 @@ from app.services.retrieval import RetrievedChunk
 # unrecognized label breaking downstream routing.
 INTENTS = ("menu", "progress", "credit_usage", "referral", "teacher_help", "quiz_stop", "other")
 
-_CLASSIFY_MAX_TOKENS = 100
+_CLASSIFY_MAX_TOKENS = 160  # bumped from 100 — the CLASSIFY tag grew (hint_mode/notes/worksheet fields)
 _EXCERPT_PREVIEW_CHARS = 300
 
 _SYSTEM_PROMPT = (
     "Classify the student's latest WhatsApp message. Respond with ONLY one line in "
     'EXACTLY this format, nothing else — no explanation, no markdown:\n'
     '[[CLASSIFY intent=<label> wants_quiz=<yes|no> quiz_topic="<topic>|NONE" '
-    'wants_mock_test=<yes|no> mock_test_topic="<topic>|NONE" quiz_skip=<yes|no>]]\n\n'
+    'wants_mock_test=<yes|no> mock_test_topic="<topic>|NONE" quiz_skip=<yes|no> '
+    'hint_mode=<on|off|none> wants_notes=<yes|no> wants_worksheet=<yes|no> '
+    'worksheet_topic="<topic>|NONE"]]\n\n'
     "intent — exactly one of:\n"
     "menu — asking to see the main menu of options, or a bare \"help\"/\"options\" "
     "with no actual question (e.g. \"menu\", \"help\", \"what can you do\"). CRITICAL — "
@@ -78,6 +80,24 @@ _SYSTEM_PROMPT = (
     "question only — the quiz keeps going afterward, it does not end the quiz (that's "
     "quiz_stop above, a different and much rarer intent). This is irrelevant (and safely "
     "ignored) when no quiz is active — still fill it in based on the message alone.\n\n"
+    "hint_mode — on if the student is asking to turn ON a stricter mode where the tutor "
+    "gives hints/guiding questions instead of full solutions (e.g. \"turn on hint mode\", "
+    "\"enable hint mode\", \"hint mode on\", \"don't just give me answers\", \"make me work "
+    "for it\", \"stop solving it for me, just give hints\"). off if asking to turn it OFF "
+    "(e.g. \"turn off hint mode\", \"hint mode off\", \"disable hint mode\", \"just give me "
+    "the answers again\"). none for every other message — this is rare, default to none.\n\n"
+    "wants_notes — yes if the student is asking for a written summary/notes of what's been "
+    "discussed/taught so far (e.g. \"give me notes\", \"summarize this\", \"make notes on "
+    "this\", \"notes banao\", \"summarize what we covered\"). no otherwise.\n\n"
+    "wants_worksheet / worksheet_topic — yes if the student is asking for a set of practice "
+    "questions to work through on their OWN (ungraded, no back-and-forth quiz flow) — e.g. "
+    "\"worksheet on fractions\", \"give me practice questions on photosynthesis\", \"some "
+    "questions to practice\". This is DIFFERENT from wants_quiz above (a quiz is a live, "
+    "turn-by-turn graded Q&A the tutor runs right now) — a worksheet is a batch of questions "
+    "delivered all at once with no live grading, more like homework. If the message reads as "
+    "wanting to be quizzed/tested live, prefer wants_quiz, not wants_worksheet. "
+    "worksheet_topic is the topic if named, or resolved from the \"Last discussed topic\" "
+    "context the same way quiz_topic is, else NONE. no/NONE if not requesting a worksheet.\n\n"
 )
 
 _RELEVANCE_SYSTEM_PROMPT = (
@@ -173,6 +193,8 @@ class MessageClassification:
         self, intent: str, quiz_topic: str | None, mock_test_topic: str | None,
         wants_mock_test: bool, quiz_skip: bool, llm_result: LLMResult,
         relevant_excerpts: list[int] | None = None, relevance_llm_result: LLMResult | None = None,
+        hint_mode: str | None = None, wants_notes: bool = False,
+        wants_worksheet: bool = False, worksheet_topic: str | None = None,
     ):
         self.intent = intent
         self.quiz_topic = quiz_topic
@@ -185,6 +207,11 @@ class MessageClassification:
         # LLM call (see classify_relevant_excerpts) — so callers can record
         # its token usage too. None means no second call was made.
         self.relevance_llm_result = relevance_llm_result
+        # "on"/"off"/None — see the hint_mode field in _SYSTEM_PROMPT.
+        self.hint_mode = hint_mode
+        self.wants_notes = wants_notes
+        self.wants_worksheet = wants_worksheet
+        self.worksheet_topic = worksheet_topic
 
 
 def _parse_classification(raw_text: str) -> dict:
@@ -205,12 +232,29 @@ def _parse_classification(raw_text: str) -> dict:
 
     quiz_skip = _field(block, "quiz_skip") == "yes"
 
+    hint_mode_raw = (_field(block, "hint_mode") or "none").lower()
+    hint_mode = hint_mode_raw if hint_mode_raw in ("on", "off") else None
+
+    wants_notes = _field(block, "wants_notes") == "yes"
+
+    wants_worksheet = _field(block, "wants_worksheet") == "yes"
+    worksheet_topic_raw = _field(block, "worksheet_topic")
+    worksheet_topic = (
+        worksheet_topic_raw.strip()
+        if wants_worksheet and worksheet_topic_raw and worksheet_topic_raw.upper() != "NONE"
+        else None
+    )
+
     return {
         "intent": intent,
         "quiz_topic": quiz_topic,
         "wants_mock_test": wants_mock_test,
         "mock_test_topic": mock_test_topic,
         "quiz_skip": quiz_skip,
+        "hint_mode": hint_mode,
+        "wants_notes": wants_notes,
+        "wants_worksheet": wants_worksheet,
+        "worksheet_topic": worksheet_topic,
     }
 
 
@@ -255,7 +299,8 @@ async def classify_intent(
         _SYSTEM_PROMPT,
         [{"role": "user", "content": context}],
         fallback="[[CLASSIFY intent=other wants_quiz=no quiz_topic=NONE wants_mock_test=no "
-                  "mock_test_topic=NONE quiz_skip=no]]",
+                  "mock_test_topic=NONE quiz_skip=no hint_mode=none wants_notes=no "
+                  "wants_worksheet=no worksheet_topic=NONE]]",
         model="claude-haiku-4-5-20251001",
         max_tokens=_CLASSIFY_MAX_TOKENS,
     )
@@ -272,6 +317,8 @@ async def classify_intent(
         intent=parsed["intent"], quiz_topic=parsed["quiz_topic"], mock_test_topic=parsed["mock_test_topic"],
         wants_mock_test=parsed["wants_mock_test"], quiz_skip=parsed["quiz_skip"], llm_result=result,
         relevant_excerpts=relevant_excerpts, relevance_llm_result=relevance_result,
+        hint_mode=parsed["hint_mode"], wants_notes=parsed["wants_notes"],
+        wants_worksheet=parsed["wants_worksheet"], worksheet_topic=parsed["worksheet_topic"],
     )
 
 

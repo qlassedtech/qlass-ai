@@ -2,6 +2,13 @@
 // see .env.example. Falls back to localhost for local dev with no .env.
 export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
+// Same host as API_BASE, just ws(s):// instead of http(s):// — used only
+// by the voice-call page (see pages/Call.tsx) to open its WebSocket to
+// backend app.routers.voice_call. Derived rather than hardcoded so a
+// deployed VITE_API_BASE (https://...) automatically gets wss://, not a
+// stale ws:// that a browser would refuse to open from an https:// page.
+export const WS_BASE = API_BASE.replace(/^http/, "ws");
+
 // Mirrors app.services.phone.normalize_phone exactly — every phone stored
 // in this codebase is 91-prefixed, digits only. Without this, a real
 // teacher/parent/student typing their number without "91" gets silently
@@ -34,7 +41,12 @@ export function setToken(token: string | null) {
 // A separate key/session from the teacher token above — the unified login
 // page can issue either kind depending on the phone number entered (see
 // api.checkPhone), and both can coexist since they're stored separately.
-function getStudentToken(): string | null {
+// Exported (unlike the teacher getToken above) because pages/Call.tsx
+// needs it directly to build its WebSocket URL — a browser WebSocket
+// handshake can't set a custom Authorization header, so the token has to
+// go in the URL as a `?token=` query param instead of through
+// requestStudent's normal header-based auth.
+export function getStudentToken(): string | null {
   return localStorage.getItem("student_token");
 }
 
@@ -677,6 +689,9 @@ export interface StudentProfile {
   // studentApi.linkGoogleAccount) — null for every student who hasn't.
   email: string | null;
   tutor_level: number;
+  // "balanced" (default) or "hint_first" — see backend app.agents.
+  // tutor_agent.build_context / studentApi.setTutorStyle.
+  tutor_style: string;
 }
 
 export interface ChatMessage {
@@ -690,6 +705,13 @@ export interface ChatMessage {
 export interface ChatReplyResponse {
   reply: string;
   credit_balance: number;
+  // Set only when the tutor decided a diagram was warranted for this
+  // reply AND generation succeeded — a relative /static/... URL (see
+  // backend app.routers.student_app._save_generated_image), same static
+  // mount profile photos already use. Only the plain-text /chat/send
+  // endpoint returns this today (mirrors app.routers.whatsapp's own
+  // image delivery, which only fires on the main tutoring branch).
+  image_url?: string | null;
 }
 
 export const studentApi = {
@@ -729,6 +751,12 @@ export const studentApi = {
   // set_tutor_level).
   setLevel: (level: number) =>
     requestStudent("/student-app/tutor-level", { method: "POST", body: JSON.stringify({ level }) }) as Promise<StudentProfile>,
+  // Structured teaching-style switch for the portal toggle — the WhatsApp
+  // equivalent is typing "hint mode on"/"hint mode off", both resolve to
+  // the exact same student.tutor_style write server-side (see
+  // app.routers.student_app's set_tutor_style).
+  setTutorStyle: (style: "balanced" | "hint_first") =>
+    requestStudent("/student-app/tutor-style", { method: "POST", body: JSON.stringify({ style }) }) as Promise<StudentProfile>,
 };
 
 export interface CreateOrderResponse {

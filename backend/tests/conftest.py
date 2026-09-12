@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 import app.models.core  # noqa: F401 - registers models on Base
@@ -19,7 +20,17 @@ import app.models.core  # noqa: F401 - registers models on Base
 
 @pytest.fixture()
 def db_session():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    # StaticPool (a single shared connection reused by every caller) rather
+    # than SQLAlchemy's plain default for a bare "sqlite:///:memory:" URL
+    # (SingletonThreadPool, one connection per thread) — a FastAPI
+    # TestClient websocket_connect (see tests/test_voice_call.py) runs the
+    # ASGI app in a background worker thread, so a per-thread pool handed
+    # that thread a second, completely empty in-memory database the moment
+    # any query executed there ("no such table: students"), even though
+    # this fixture's setup ran fine in the main test thread just before.
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
     Base.metadata.create_all(bind=engine)
     TestSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = TestSession()

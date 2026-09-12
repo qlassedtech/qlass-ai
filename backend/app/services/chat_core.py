@@ -43,7 +43,7 @@ from app.models.core import ChatHistory, Student, TopicProgress
 from app.services import cost_tracker
 from app.services.document_client import apply_active_document_pin
 from app.services.escalation import get_escalation_recipients, format_escalation_message, format_escalation_reason
-from app.services.habit import evaluate_habit_milestones
+from app.services.habit import evaluate_habit_milestones, next_milestone_countdown
 from app.services.intent_classifier import classify_intent, classify_relevant_excerpts
 from app.services.llm_client import translate_with_claude
 from app.services.profile_builder import is_plausible_profile_answer, next_missing_field, should_ask_this_turn
@@ -51,6 +51,8 @@ from app.services.progress_report import (
     get_student_stats, get_activity_stats, get_welcome_back_note, get_chapter_coverage, format_progress_message,
 )
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
+from app.services.quiz_service import generate_quiz_questions
+from app.services.rate_limit import clear_pending_worksheet_answers, get_pending_worksheet_answers, set_pending_worksheet_answers
 from app.services.referral import (
     generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer,
     REFERRAL_SIGNUP_BONUS, REFERRAL_LIFETIME_CAP,
@@ -138,6 +140,22 @@ CANONICAL_COMMAND_INTENT = {
 # phrasing never risks int()-ing garbage.
 LEVEL_COMMAND_TARGET = {"level 1": 1, "level 2": 2, "level 3": 3, "level 4": 4}
 
+# Exact-phrase overrides for switching Student.tutor_style, same guaranteed-
+# deterministic override CANONICAL_COMMAND_INTENT gives level-switching —
+# any OTHER phrasing (e.g. "can you just give me hints instead of answers")
+# still works via classify_intent's own hint_mode field (a real LLM
+# judgment, needed since hint-mode requests come in far more varied wording
+# than the fixed menu commands above).
+HINT_MODE_COMMANDS = {
+    "hint mode on": "on", "turn on hint mode": "on", "enable hint mode": "on",
+    "hint mode off": "off", "turn off hint mode": "off", "disable hint mode": "off",
+}
+
+WORKSHEET_ANSWERS_COMMAND = "answers"  # what a student replies to reveal a pending worksheet's answer key
+NOTES_HISTORY_TURNS = 16  # last N chat_history turns fed to the notes-summarizer — see the "notes" branch below
+WORKSHEET_QUESTION_COUNT = 8  # more than a quick ad-hoc quiz (5), fewer than a full mock test (15)
+NOTES_MODEL = "claude-haiku-4-5-20251001"  # narrow summarization task — cheap tier is enough
+
 TUTOR_LEVEL_LABELS = {
     1: "Level 1 — fastest replies, lightest on credits",
     2: "Level 2 — quick and well-formatted",
@@ -200,6 +218,57 @@ def _usage_status(feature: str, weekly_counts: dict[str, int]) -> tuple[int, int
     return used, cfg["max"]
 
 
+# Plain substring match, not an LLM classification — WhatsApp can't do
+# real-time voice calls itself (see app.routers.voice_call's module
+# docstring for the whole reason this feature exists as a separate portal
+# page), so this only ever needs to catch a student asking, in plain
+# words, for the link to that page. Deliberately NOT added to
+# app.services.intent_classifier's LLM-judged intent taxonomy — that would
+# mean a prompt change, a new INTENTS entry, and a new ladder branch in
+# process_message for something that's really just "hand over a URL",
+# free of any tutoring/credit logic. A handful of fixed phrases covers the
+# realistic ways a student actually asks for this on WhatsApp; anything
+# more creatively phrased still reaches the tutor as a normal message,
+# which will just answer it conversationally (worst case: the tutor
+# explains it doesn't do voice calls on WhatsApp) rather than silently
+# failing.
+_VOICE_CALL_PHRASES = ("call my tutor", "call the tutor", "call tutor", "talk to my tutor", "talk to tutor")
+
+
+def _voice_call_link_reply(student: Student, message_text: str) -> "ChatTurnResult | None":
+    """
+    Returns a ChatTurnResult with a link to the /call page on the student
+    web portal if message_text is asking for it, else None. See
+    app.routers.voice_call's module docstring for the feature this is the
+    WhatsApp-side discovery entry point for.
+
+    No token/session handoff is attempted here — a student tapping this
+    link on WhatsApp lands on a normal portal login screen (phone number),
+    the same as every other WhatsApp -> portal link this product already
+    sends (e.g. the /pay top-up link — see app.routers.whatsapp). Building
+    an actual already-logged-in-elsewhere session handoff would be a new
+    piece of cross-channel auth infrastructure with no existing pattern to
+    reuse, for a one-tap convenience — not worth it for this feature.
+    """
+    lowered = message_text.lower()
+    if not any(phrase in lowered for phrase in _VOICE_CALL_PHRASES):
+        return None
+
+    if not student.has_feature("voice"):
+        return ChatTurnResult(
+            reply_text="Voice calling isn't available on your account yet — you can still send me a voice note here on WhatsApp!"
+        )
+
+    link = f"{settings.portal_base_url}/call?phone={student.phone}"
+    return ChatTurnResult(
+        reply_text=(
+            f"Sure! Open this link on your phone or computer to talk to me out loud: {link}\n\n"
+            "Log in with your phone number if asked. Heads up — this uses more data than a WhatsApp voice "
+            "note, so text or a voice note here will work better on a slow connection."
+        )
+    )
+
+
 @dataclass
 class ChatTurnResult:
     reply_text: str  # final text — citation/usage-notice already appended, translated if needed
@@ -240,6 +309,17 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     # text message still funnels through here regardless.
     if student.approval_status == "pending":
         return ChatTurnResult(reply_text=PENDING_APPROVAL_REPLY)
+
+    call_reply = _voice_call_link_reply(student, message_text)
+    if call_reply is not None:
+        # Deliberately bypasses classify_intent/the intent ladder entirely
+        # (no LLM call, no chat_history write, no credits spent) — this is
+        # a pure "here's a link" reply, same free-UI-affordance treatment
+        # as the menu branch below gets. Checked this early so it also
+        # short-circuits ahead of the pending-quiz-answer path, since
+        # "call my tutor" said mid-quiz should still hand over the link
+        # rather than being swallowed as a quiz answer attempt.
+        return call_reply
 
     message_text = message_text[:MAX_MESSAGE_CHARS]
     # Computed BEFORE this message is saved, so "days since last message"
@@ -343,6 +423,19 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
     mock_test_request = classification.wants_mock_test or message_text.strip().lower() in (
         "mock test", "give me a mock test", "start a mock test", "start mock test",
     )
+    # Exact-phrase overrides win here too, same discipline as the level
+    # switches above — anything else still resolves via classify_intent's
+    # own hint_mode field (see HINT_MODE_COMMANDS' own comment).
+    hint_mode_change = HINT_MODE_COMMANDS.get(message_text.strip().lower(), classification.hint_mode)
+    notes_request = classification.wants_notes
+    worksheet_topic_request = classification.worksheet_topic if classification.wants_worksheet else None
+    # Only spends a Redis round-trip when the message is literally the
+    # reveal command — every other message never even checks.
+    pending_worksheet_answers = (
+        await get_pending_worksheet_answers(student.id)
+        if message_text.strip().lower() == WORKSHEET_ANSWERS_COMMAND
+        else None
+    )
 
     did_answer_via_llm = False
     image_prompt = None
@@ -379,6 +472,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 capability_hints.append("send a photo of a tricky homework question")
             if student.has_feature("voice"):
                 capability_hints.append("send a voice note")
+                capability_hints.append("say \"call my tutor\" to talk out loud on the web")
             if student.has_feature("documents"):
                 capability_hints.append("share a PDF or Word file of your homework")
             if student.has_feature("youtube_videos"):
@@ -426,7 +520,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         stats = get_student_stats(db, student.id)
         activity = get_activity_stats(db, student.id)
         coverage = get_chapter_coverage(db, student)
-        reply_text = format_progress_message(stats, activity, coverage)
+        streak_note = next_milestone_countdown(student)
+        reply_text = format_progress_message(stats, activity, coverage, streak_note)
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "credit_usage":
         # Same "no model-invented numbers" principle as progress above.
@@ -471,6 +566,31 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             # _level_choice_buttons) — plain text on channels that ignore
             # it (web/app), same convention as menu_buttons above.
             level_choice = student.tutor_level
+        detected_lang = student.preferred_language or "en-IN"
+    elif hint_mode_change in ("on", "off"):
+        # Purely a teaching-STYLE switch (Student.tutor_style) — orthogonal
+        # to change_level above (which picks the model tier). Never touches
+        # tutor_level.
+        student.tutor_style = "hint_first" if hint_mode_change == "on" else "balanced"
+        db.commit()
+        reply_text = (
+            "🧠 Hint mode is now ON — instead of giving you the full answer right away, I'll guide "
+            "you with questions and hints so you can work it out yourself. Say \"hint mode off\" "
+            "anytime to switch back."
+            if hint_mode_change == "on"
+            else "Hint mode is now OFF — back to my normal style. Say \"hint mode on\" anytime to "
+            "switch back to hints-first."
+        )
+        detected_lang = student.preferred_language or "en-IN"
+    elif notes_request:
+        reply_text = await _generate_notes(db, student)
+        detected_lang = student.preferred_language or "en-IN"
+    elif pending_worksheet_answers:
+        reply_text = _format_worksheet_answers(pending_worksheet_answers)
+        await clear_pending_worksheet_answers(student.id)
+        detected_lang = student.preferred_language or "en-IN"
+    elif worksheet_topic_request:
+        reply_text = await _generate_worksheet(db, student, worksheet_topic_request)
         detected_lang = student.preferred_language or "en-IN"
     elif intent == "referral":
         # Generated lazily here too (not just at signup) so students
@@ -647,6 +767,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             pending_profile_field=pending_profile_field,
             retrieved_chunks=relevant_chunks,
             model=TUTOR_LEVEL_MODELS.get(student.tutor_level, TUTOR_LEVEL_MODELS[DEFAULT_TUTOR_LEVEL]),
+            tutor_style=student.tutor_style or "balanced",
         )
         reply_text = result["reply"]
         detected_lang = result["lang"]
@@ -887,6 +1008,82 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         image_prompt=image_prompt, wants_audio_reply=wants_audio_reply, menu_buttons=menu_buttons,
         video=video_result, level_offer=level_offer, level_choice=level_choice,
     )
+
+
+async def _generate_notes(db: Session, student: Student) -> str:
+    """
+    Auto-generated study notes for the "give me notes"/"summarize this"
+    intent — a cheap Haiku summarization of the student's last
+    NOTES_HISTORY_TURNS chat_history rows (not the shorter HISTORY_TURNS
+    window used for the tutor's own conversational context, since a good
+    summary needs more back-and-forth than a single reply needs to sound
+    natural), formatted as a short WhatsApp-friendly bullet list. Billed
+    the same way every other Claude call in this module is.
+    """
+    from app.services.llm_client import call_llm
+
+    rows = (
+        db.query(ChatHistory)
+        .filter(ChatHistory.student_id == student.id)
+        .order_by(ChatHistory.created_at.desc())
+        .limit(NOTES_HISTORY_TURNS)
+        .all()
+    )
+    if not rows:
+        return "We haven't covered anything yet — ask me a question first, then I can summarize it for you!"
+    transcript = "\n".join(f"{row.role}: {row.message}" for row in reversed(rows))
+    system_prompt = (
+        "Summarize what was actually taught/discussed in this tutoring conversation as short study "
+        "notes for the student. Write 5-8 short bullet points covering only real academic content — "
+        "skip greetings, menu options, small talk, and system asides. Prefer the most recent topic "
+        "discussed if several unrelated ones appear. WhatsApp formatting: *bold* for key terms, plain "
+        "hyphen bullets, short lines, no markdown headers, no tables. Respond with ONLY the bullet "
+        "points, nothing else."
+    )
+    result = await call_llm(
+        system_prompt=system_prompt, messages=[{"role": "user", "content": transcript}], model=NOTES_MODEL,
+    )
+    cost_tracker.record_claude_usage(
+        db, result.model, result.input_tokens, result.output_tokens, student.id,
+        cache_write_tokens=result.cache_write_tokens, cache_read_tokens=result.cache_read_tokens,
+    )
+    return f"📝 *Notes on what we've covered:*\n\n{result.text.strip()}"
+
+
+async def _generate_worksheet(db: Session, student: Student, topic: str) -> str:
+    """
+    "worksheet on <topic>" / "give me practice questions on <topic>" —
+    reuses quiz_service.generate_quiz_questions directly (no Quiz/Question/
+    Answer rows, no turn-by-turn grading loop: a worksheet is delivered all
+    at once, ungraded, more like homework than a live quiz — see
+    app.services.quiz_flow for the different, graded flow this is
+    deliberately NOT reusing). The answer key is held back until the
+    student asks for it (see WORKSHEET_ANSWERS_COMMAND), stashed in Redis
+    with a short TTL rather than a new Student column since it's purely
+    disposable per-conversation state.
+    """
+    questions, llm_result = await generate_quiz_questions(
+        topic, student.class_, num_questions=WORKSHEET_QUESTION_COUNT, board=student.board,
+    )
+    cost_tracker.record_claude_usage(
+        db, llm_result.model, llm_result.input_tokens, llm_result.output_tokens, student.id,
+        cache_write_tokens=llm_result.cache_write_tokens, cache_read_tokens=llm_result.cache_read_tokens,
+    )
+    if not questions:
+        return f"Sorry, I couldn't put together a worksheet on {topic} right now — try again in a bit?"
+    lines = [f"📝 *Worksheet: {topic}*"]
+    for i, q in enumerate(questions, start=1):
+        lines.append(f"{i}. {q['question']}")
+    lines.append(f"\nReply \"{WORKSHEET_ANSWERS_COMMAND}\" anytime to see the solutions.")
+    await set_pending_worksheet_answers(student.id, questions)
+    return "\n".join(lines)
+
+
+def _format_worksheet_answers(questions: list[dict]) -> str:
+    lines = ["📝 *Worksheet answers:*"]
+    for i, q in enumerate(questions, start=1):
+        lines.append(f"{i}. {q['answer']}")
+    return "\n".join(lines)
 
 
 async def _notify_recipient(teacher, student_name: str, reason: str, message: str) -> None:

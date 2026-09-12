@@ -23,21 +23,39 @@ def create_student_access_token(student_id: int, token_version: int = 0) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=JWT_ALGORITHM)
 
 
-async def get_current_student(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer), db: Session = Depends(get_db)
-) -> Student:
+def get_student_by_token(token: str, db: Session) -> Student | None:
+    """
+    Decode+lookup shared by both the normal REST dependency below (which
+    gets the token from the Authorization header) and the voice-call
+    WebSocket endpoint (app.routers.voice_call), which gets it from a
+    `?token=` query param instead — a browser WebSocket handshake can't set
+    a custom Authorization header, so that endpoint can't use the
+    HTTPBearer-based dependency directly, but must still apply exactly the
+    same validation (signature, token type, expiry, token_version). Returns
+    None rather than raising, since a WebSocket close/error frame is sent
+    differently than an HTTP 401.
+    """
     try:
-        payload = jwt.decode(credentials.credentials, settings.secret_key, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.secret_key, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "student":
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+            return None
         student_id = int(payload["sub"])
         token_version = payload.get("tv", 0)
     except (jwt.PyJWTError, KeyError, ValueError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        return None
 
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Student not found")
+        return None
     if token_version != (student.token_version or 0):
+        return None
+    return student
+
+
+async def get_current_student(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer), db: Session = Depends(get_db)
+) -> Student:
+    student = get_student_by_token(credentials.credentials, db)
+    if not student:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return student

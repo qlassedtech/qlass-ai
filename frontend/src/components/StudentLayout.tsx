@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Outlet, useNavigate } from "react-router-dom";
+import { Outlet, useNavigate, Link, useLocation } from "react-router-dom";
 import { setStudentToken, studentApi, type StudentProfile } from "../api";
 import GoogleSignInButton from "./GoogleSignInButton";
 import ThemeToggle from "./ThemeToggle";
 
 export default function StudentLayout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [student, setStudent] = useState<StudentProfile | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
 
@@ -49,9 +50,24 @@ export default function StudentLayout() {
         )}
         <div className="nav-group">
           <span className="nav-group-label">Learning</span>
-          <span className="active" style={{ display: "block", padding: "10px 14px", borderRadius: 10 }}>
+          <Link
+            to="/chat"
+            className={location.pathname === "/chat" ? "active" : undefined}
+            style={{ display: "block", padding: "10px 14px", borderRadius: 10 }}
+          >
             AI Tutor Chat
-          </span>
+          </Link>
+          {/* Voice calling can't run on WhatsApp (no two-way real-time call
+              support in the Business API) — this is the portal page that
+              exists purely because of that gap; see backend
+              app.routers.voice_call's module docstring. */}
+          <Link
+            to="/call"
+            className={location.pathname === "/call" ? "active" : undefined}
+            style={{ display: "block", padding: "10px 14px", borderRadius: 10 }}
+          >
+            🎙️ Talk out loud
+          </Link>
         </div>
         {student && (
           <div className="nav-group">

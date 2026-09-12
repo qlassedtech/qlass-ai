@@ -28,6 +28,19 @@ export default function Chat() {
               setStudent(updated);
             }}
           />
+          {student && (
+            <label className="hint-mode-toggle" title="Get guiding hints instead of full answers right away">
+              <input
+                type="checkbox"
+                checked={student.tutor_style === "hint_first"}
+                onChange={async (e) => {
+                  const updated = await studentApi.setTutorStyle(e.target.checked ? "hint_first" : "balanced");
+                  setStudent(updated);
+                }}
+              />
+              🧠 Hint mode
+            </label>
+          )}
         </div>
       </div>
       <ChatWindow

@@ -615,6 +615,21 @@ label {
   box-shadow: none;
 }
 
+.hint-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--table-header-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .inline-form {
   display: flex;
   gap: 12px;
@@ -769,6 +784,13 @@ label {
 .chat-bubble-typing {
   color: var(--text-muted);
   font-style: italic;
+}
+
+.chat-bubble-image {
+  display: block;
+  max-width: 100%;
+  margin-top: 8px;
+  border-radius: 10px;
 }
 
 .chat-input-row {

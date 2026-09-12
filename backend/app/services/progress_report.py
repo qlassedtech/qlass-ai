@@ -184,7 +184,9 @@ def get_chapter_coverage(db: Session, student) -> dict | None:
     return {"covered": covered, "not_covered": not_covered, "total": len(chapters)}
 
 
-def format_progress_message(stats: dict, activity: dict | None = None, coverage: dict | None = None) -> str:
+def format_progress_message(
+    stats: dict, activity: dict | None = None, coverage: dict | None = None, streak_note: str | None = None,
+) -> str:
     if stats["total_evaluated"] == 0:
         return (
             "You haven't answered any check questions yet — keep chatting with me and I'll start "
@@ -200,6 +202,12 @@ def format_progress_message(stats: dict, activity: dict | None = None, coverage:
         lines.append("- No major weak spots right now — nice work! 👏")
     if activity and activity["streak_days"] >= 2:
         lines.append(f"- 🔥 {activity['streak_days']}-day streak — keep it going!")
+    # Proactive countdown to the next habit-bonus checkpoint (see
+    # app.services.habit.next_milestone_countdown) — additive, on its own
+    # line, so a student sees not just how long their streak already is
+    # but how close the next reward actually is.
+    if streak_note:
+        lines.append(f"- 🎯 {streak_note}")
     if coverage and coverage["total"] > 0:
         # Not "NCERT chapters" — get_chapter_coverage also serves BSEB
         # students now (see _BOARD_TO_SUBJECT_BOARD), and naming the wrong
@@ -213,7 +221,7 @@ def format_progress_message(stats: dict, activity: dict | None = None, coverage:
     return "\n".join(lines)
 
 
-def format_parent_digest(student_name: str, stats: dict, activity: dict) -> str:
+def format_parent_digest(student_name: str, stats: dict, activity: dict, streak_note: str | None = None) -> str:
     """
     Weekly digest sent directly to a parent's own WhatsApp (see
     scripts/send_parent_digests.py) — warmer, "your child" framing, and
@@ -233,11 +241,16 @@ def format_parent_digest(student_name: str, stats: dict, activity: dict) -> str:
         lines.append(f"- Could use more practice on: {', '.join(stats['weak_topics'])}")
     if activity["streak_days"] >= 2:
         lines.append(f"- 🔥 {activity['streak_days']}-day streak — keep encouraging them!")
+    # One added line, not a redesign — same next-milestone countdown shown
+    # to the student themselves (see app.services.habit.
+    # next_milestone_countdown and format_progress_message above).
+    if streak_note:
+        lines.append(f"- 🎯 {streak_note}")
     lines.append("\nThe more they chat with their AI tutor, the more this can help them.")
     return "\n".join(lines)
 
 
-def format_parent_digest_summary(stats: dict, activity: dict) -> str:
+def format_parent_digest_summary(stats: dict, activity: dict, streak_note: str | None = None) -> str:
     """One-line version of format_parent_digest, for a template parameter."""
     if stats["messages_sent"] == 0:
         return "no tutor sessions this week — a gentle nudge to check in might help"
@@ -248,6 +261,10 @@ def format_parent_digest_summary(stats: dict, activity: dict) -> str:
         parts.append(f"needs practice: {', '.join(stats['weak_topics'])}")
     if activity["streak_days"] >= 2:
         parts.append(f"{activity['streak_days']}-day streak")
+    # Additive next-milestone countdown — see app.services.habit.
+    # next_milestone_countdown.
+    if streak_note:
+        parts.append(streak_note)
     return " · ".join(parts)
 
 

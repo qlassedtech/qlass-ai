@@ -228,6 +228,13 @@ class Student(Base):
     # Every new student starts at 4 so nobody's day-one experience quietly
     # gets worse when this shipped — see tenancy.create_student_profile.
     tutor_level = Column(Integer, default=4)
+    # "balanced" (default, unchanged since launch — a soft hint-not-solve
+    # rule, see app.agents.tutor_agent.build_context) or "hint_first" — a
+    # stricter Socratic mode a student opts into (WhatsApp "hint mode on",
+    # or the portal toggle) that never gives a final answer on the first
+    # ask for a solvable problem. Purely a teaching-style choice, unlike
+    # tutor_level above (which picks the model tier) — orthogonal to it.
+    tutor_style = Column(Text, nullable=False, server_default="balanced", default="balanced")
     # Set to the level being offered (2 or 1) while a 50%/75%
     # trial-credit-threshold downgrade nudge is awaiting a yes/no reply —
     # see chat_core.py's usage-threshold block. Cleared once answered

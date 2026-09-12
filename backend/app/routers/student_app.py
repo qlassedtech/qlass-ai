@@ -1,17 +1,20 @@
+import uuid
+
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.business_rules import TUTOR_LEVEL_MODELS
-from app.config import settings
+from app.config import REPO_ROOT, settings
 from app.database import get_db
 from app.models.core import ChatHistory, Parent, Student, Teacher
-from app.services import cost_tracker, school_billing
+from app.services import chat_core, cost_tracker, school_billing
 from app.services.audio_qa import detect_gender_from_pitch, get_duration_seconds
 from app.services.document_client import extract_text_from_document
 from app.services.escalation import SUPPORT_PHONE, get_escalation_recipients
 from app.services.google_auth import GoogleAuthError, verify_google_id_token
+from app.services.image_client import generate_image
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
@@ -22,9 +25,21 @@ from app.services.sarvam_client import transcribe_audio
 from app.services.student_auth import create_student_access_token, get_current_student
 from app.services.teacher_auth import verify_password
 from app.services.chat_core import PENDING_APPROVAL_REPLY
-from app.services.student_chat import process_web_message
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
 from app.services.whatsapp_client import send_template_message
+
+# Where a tutor-generated diagram (see chat_core's image_prompt decision)
+# gets saved for portal delivery — same static-mount pattern app.services.
+# uploads.py already uses for profile photos (app.main's "/static" mount),
+# rather than inventing a second delivery mechanism just for this feature.
+_GENERATED_IMAGE_DIR = REPO_ROOT / "backend" / "static" / "uploads" / "generated"
+_GENERATED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_generated_image(image_bytes: bytes) -> str:
+    filename = f"{uuid.uuid4().hex}.png"
+    (_GENERATED_IMAGE_DIR / filename).write_bytes(image_bytes)
+    return f"/static/uploads/generated/{filename}"
 
 router = APIRouter()
 
@@ -46,6 +61,7 @@ def student_summary(db: Session, student: Student) -> dict:
         "referral_code": student.referral_code,
         "email": student.email,
         "tutor_level": student.tutor_level,
+        "tutor_style": student.tutor_style,
     }
 
 
@@ -262,6 +278,32 @@ def set_tutor_level(
     return student_summary(db, student)
 
 
+class SetTutorStyleRequest(BaseModel):
+    style: str
+
+
+@router.post("/student-app/tutor-style")
+def set_tutor_style(
+    body: SetTutorStyleRequest, db: Session = Depends(get_db), student: Student = Depends(get_current_student),
+):
+    """
+    Direct, structured way to switch teaching STYLE (Student.tutor_style)
+    from the web/mobile UI — mirrors set_tutor_level immediately above
+    exactly (same auth, same pattern), just a different underlying column.
+    Orthogonal to tutor_level: this never touches the model tier, only
+    whether the tutor gives hints-first or its normal balanced behavior
+    (see app.agents.tutor_agent.build_context). The WhatsApp equivalent is
+    typing "hint mode on"/"hint mode off" (see app.services.chat_core's
+    HINT_MODE_COMMANDS / hint_mode classification field), since there's no
+    separate UI to hit an endpoint from there.
+    """
+    if body.style not in ("balanced", "hint_first"):
+        raise HTTPException(status_code=400, detail="style must be 'balanced' or 'hint_first'")
+    student.tutor_style = body.style
+    db.commit()
+    return student_summary(db, student)
+
+
 @router.get("/student-app/chat/history")
 def get_chat_history(db: Session = Depends(get_db), student: Student = Depends(get_current_student)):
     rows = (
@@ -418,8 +460,26 @@ async def _reply_to_locked(db: Session, student: Student, message_text: str) -> 
                 f"(or call {settings.brand_name} support at {SUPPORT_PHONE})"
             )
         raise HTTPException(status_code=402, detail=detail)
-    reply = await process_web_message(db, student, message_text)
-    return {"reply": reply, "credit_balance": cost_tracker.get_balance(db, student.id)}
+    # Calls chat_core directly (rather than the thinner app.services.
+    # student_chat.process_web_message wrapper other web/app/teacher
+    # callers still use) specifically so this endpoint can also see
+    # result.image_prompt — process_web_message's own docstring notes that
+    # gap explicitly: web/app never turned a tutor-decided diagram into an
+    # actual image the way WhatsApp does (see app.routers.whatsapp). Video
+    # formatting below mirrors process_web_message's own, unchanged.
+    result = await chat_core.process_message(db, student, message_text)
+    reply_text = result.reply_text
+    if result.video:
+        reply_text = f"{reply_text}\n\n📺 {result.video['title']}\n{result.video['url']}"
+    image_url = None
+    if result.image_prompt:
+        image_bytes = await generate_image(result.image_prompt)
+        if image_bytes:
+            cost_tracker.record_flat_usage(db, "azure_image", student.id)
+            image_url = _save_generated_image(image_bytes)
+    return {
+        "reply": reply_text, "image_url": image_url, "credit_balance": cost_tracker.get_balance(db, student.id),
+    }
 
 
 @router.post("/student-app/chat/send")

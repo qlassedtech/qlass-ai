@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import type { ChatMessage } from "../api";
+import { absoluteUrl, type ChatMessage } from "../api";
 
 // The tutor writes replies using WhatsApp's own *bold* convention (see
 // backend app.agents.tutor_agent's system prompt) — WhatsApp's client
@@ -16,17 +16,28 @@ function formatMessage(text: string) {
   });
 }
 
+// A generated diagram (see ChatReplyResponse.image_url) rides alongside a
+// reply, not in place of it — kept as a separate optional field on the
+// rendered message rather than folded into `message`'s text.
+type DisplayMessage = ChatMessage & { image_url?: string | null };
+
+interface ChatReply {
+  reply: string;
+  credit_balance: number;
+  image_url?: string | null;
+}
+
 interface ChatWindowProps {
   fetchHistory: () => Promise<ChatMessage[]>;
-  sendMessage: (message: string) => Promise<{ reply: string; credit_balance: number }>;
+  sendMessage: (message: string) => Promise<ChatReply>;
   onBalanceChange?: (balance: number) => void;
   // Optional — only the student chat app has these endpoints wired up
   // server-side today (see backend app.routers.student_app); when omitted
   // (e.g. the teacher's own "My AI Tutor" page), the attach/mic buttons
   // simply don't render rather than pointing at a route that doesn't exist.
-  onSendImage?: (file: File) => Promise<{ reply: string; credit_balance: number }>;
-  onSendVoice?: (blob: Blob, filename: string) => Promise<{ reply: string; credit_balance: number }>;
-  onSendDocument?: (file: File) => Promise<{ reply: string; credit_balance: number }>;
+  onSendImage?: (file: File) => Promise<ChatReply>;
+  onSendVoice?: (blob: Blob, filename: string) => Promise<ChatReply>;
+  onSendDocument?: (file: File) => Promise<ChatReply>;
 }
 
 const MAX_RECORDING_MS = 120_000;
@@ -34,7 +45,7 @@ const MAX_RECORDING_MS = 120_000;
 export default function ChatWindow({
   fetchHistory, sendMessage, onBalanceChange, onSendImage, onSendVoice, onSendDocument,
 }: ChatWindowProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sendingLabel, setSendingLabel] = useState("Thinking...");
@@ -63,14 +74,17 @@ export default function ChatWindow({
     };
   }, []);
 
-  function appendReply(userLabel: string, run: () => Promise<{ reply: string; credit_balance: number }>, label: string) {
+  function appendReply(userLabel: string, run: () => Promise<ChatReply>, label: string) {
     setError(null);
     setMessages((prev) => [...prev, { role: "user", message: userLabel, created_at: new Date().toISOString() }]);
     setSending(true);
     setSendingLabel(label);
     run()
-      .then(({ reply, credit_balance }) => {
-        setMessages((prev) => [...prev, { role: "assistant", message: reply, created_at: new Date().toISOString() }]);
+      .then(({ reply, credit_balance, image_url }) => {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", message: reply, created_at: new Date().toISOString(), image_url },
+        ]);
         onBalanceChange?.(credit_balance);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Something went wrong"))
@@ -147,6 +161,13 @@ export default function ChatWindow({
         {messages.map((m, i) => (
           <div key={i} className={`chat-bubble chat-bubble-${m.role}`}>
             {formatMessage(m.message)}
+            {m.image_url && (
+              <img
+                src={absoluteUrl(m.image_url) || undefined}
+                alt="Tutor-generated diagram"
+                className="chat-bubble-image"
+              />
+            )}
           </div>
         ))}
         {sending && <div className="chat-bubble chat-bubble-assistant chat-bubble-typing">{sendingLabel}</div>}

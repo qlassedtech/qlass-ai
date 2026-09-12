@@ -18,6 +18,7 @@ import AssignQuiz from "./pages/AssignQuiz";
 import MyTutor from "./pages/MyTutor";
 import MyAccount from "./pages/MyAccount";
 import Chat from "./pages/Chat";
+import Call from "./pages/Call";
 import ParentDashboard from "./pages/ParentDashboard";
 import Pay from "./pages/Pay";
 import Flowchart from "./pages/Flowchart";
@@ -99,6 +100,7 @@ export default function App() {
           }
         >
           <Route path="/chat" element={<Chat />} />
+          <Route path="/call" element={<Call />} />
         </Route>
         <Route
           path="/parent"

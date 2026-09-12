@@ -74,3 +74,49 @@ async def evaluate_habit_milestones(db: Session, student: Student) -> None:
     if changed:
         student.habit_milestones_paid = list(paid)
         db.commit()
+
+
+def next_milestone_countdown(student: Student) -> str | None:
+    """
+    Proactive streak visibility — "Day 4 of your streak — 3 more days to
+    your next ₹10 bonus!" — rather than only ever showing the streak
+    number retroactively (see app.services.progress_report). Looks at the
+    NEXT not-yet-earned HABIT_MILESTONES entry relative to elapsed days
+    since signup, regardless of whether the student is active every single
+    day (elapsed_days, like evaluate_habit_milestones above, is simple
+    calendar time since Student.created_at, not a consecutive-activity
+    streak) — this is a countdown to the next reward checkpoint, not the
+    same "consecutive days active" number app.services.progress_report.
+    get_activity_stats reports elsewhere; both are shown together in
+    format_progress_message. Returns None once every milestone is already
+    earned, or created_at is unset (shouldn't happen for a real row, but
+    keeps this safe to call unconditionally).
+    """
+    paid = set(student.habit_milestones_paid or [])
+    if len(paid) == len(HABIT_MILESTONES):
+        return None
+
+    created_at = student.created_at
+    if created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    elapsed_days = (datetime.now(timezone.utc) - created_at).days
+
+    for name, start, _end, bonus in HABIT_MILESTONES:
+        if name in paid:
+            continue
+        if elapsed_days < start:
+            days_away = start - elapsed_days
+            day_word = "day" if days_away == 1 else "days"
+            return (
+                f"Day {elapsed_days} of your journey — {days_away} more {day_word} to your next "
+                f"₹{bonus:.0f} bonus!"
+            )
+        # Already inside this milestone's activity window (or past it) but
+        # not yet paid — evaluate_habit_milestones pays it the moment
+        # there's real activity in-window, so there's nothing meaningful to
+        # count down to; move on to checking the next milestone instead of
+        # reporting a misleading "0 days away" for one that's really just
+        # pending today's message.
+    return None

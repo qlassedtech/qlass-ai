@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from app.routers import (
     whatsapp, health, broadcast, admin, payments, student_app, parent_app, razorpay_webhook, public, leads,
+    voice_call,
 )
 from app.database import Base, engine
 from app.config import settings, REPO_ROOT
@@ -63,6 +64,7 @@ app.include_router(parent_app.router, tags=["parent-app"])
 app.include_router(razorpay_webhook.router, tags=["razorpay-webhook"])
 app.include_router(public.router, tags=["public"])
 app.include_router(leads.router, tags=["leads"])
+app.include_router(voice_call.router, tags=["voice-call"])
 
 
 def _sanitize_non_finite(value):
