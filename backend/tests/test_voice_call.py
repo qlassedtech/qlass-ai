@@ -193,6 +193,45 @@ def test_image_prompt_reply_sends_diagram_frame_before_reply_text(db_session, mo
         app.dependency_overrides.clear()
 
 
+def test_video_reply_sends_video_frame(db_session, monkeypatch):
+    student = _make_student(db_session, voice_enabled=True)
+    cost_tracker.add_credits(db_session, student.id, 50.0, note="test credit")
+    token = create_student_access_token(student.id)
+
+    async def fake_transcribe(audio_bytes, filename="voice_note.ogg"):
+        return "show me a video on photosynthesis"
+
+    async def fake_process_message(db, student, message_text):
+        return ChatTurnResult(
+            reply_text="Here's a video on photosynthesis.",
+            video={"title": "Photosynthesis Explained", "url": "https://youtube.com/watch?v=abc123"},
+        )
+
+    async def fake_synthesize(text, language_code=None, speaker=None):
+        return b"fake-opus-bytes"
+
+    monkeypatch.setattr(sarvam_client, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(chat_core, "process_message", fake_process_message)
+    monkeypatch.setattr(sarvam_client, "synthesize_speech", fake_synthesize)
+
+    client = _client(db_session)
+    try:
+        with client.websocket_connect(f"/ws/voice-call?token={token}") as ws:
+            ws.send_bytes(b"some-audio")
+            ws.receive_json()  # transcript
+
+            video_frame = ws.receive_json()
+            assert video_frame == {
+                "type": "video", "title": "Photosynthesis Explained", "url": "https://youtube.com/watch?v=abc123",
+            }
+
+            reply_frame = ws.receive_json()
+            assert reply_frame["type"] == "reply_text"
+            assert "youtube.com" not in reply_frame["text"]  # never leaked into the spoken/text reply
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_failed_sketch_generation_does_not_send_diagram_or_fail_the_turn(db_session, monkeypatch):
     student = _make_student(db_session, voice_enabled=True)
     cost_tracker.add_credits(db_session, student.id, 50.0, note="test credit")

@@ -48,6 +48,15 @@ one binary audio frame:
     single combined LLMResult at this router's own call site below, so
     that billing code didn't need to change shape even though the actual
     Claude spend per diagram roughly doubled.
+  - {"type": "video", "title": "...", "url": "..."}  — sent only if the
+    tutor's reply carried a video suggestion (same mechanism as WhatsApp's
+    own "📺 <title>\n<url>" follow-up message — see routers.whatsapp).
+    Sent alongside reply_text (order between the two doesn't matter, unlike
+    diagram/reply_text above) — the client shows it as a clickable link in
+    the transcript log, since embedding/autoplaying a YouTube video inside
+    this page is out of scope. Never read aloud (kept out of reply_text
+    for exactly the same reason app.services.chat_core keeps it out of
+    reply_text for every other channel: a spoken-aloud raw URL is useless).
   - {"type": "reply_text", "text": "..."}       — the tutor's reply text
     (identical to what WhatsApp/chat would show), sent before the
     corresponding audio so the transcript log updates immediately even if
@@ -199,16 +208,13 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
         await websocket.send_json({"type": "error", "message": _COULD_NOT_HEAR_MESSAGE})
         return False
 
-    # video is a tutor decision this MVP call UI still doesn't render (see
-    # this router's module docstring / the feature's own scoping) — logged,
-    # not acted on, so a video request over a call doesn't just silently
-    # disappear without a trace. image_prompt, on the other hand, now gets
-    # rendered as a progressively-drawn sketch diagram (see sketch_client).
+    # Sent as its own "video" frame (see module docstring) — the client
+    # shows it as a clickable link, same spirit as WhatsApp's own separate
+    # "📺 <title>" follow-up message (routers.whatsapp), just never spoken
+    # aloud by TTS (kept out of reply_text, same reason chat_core keeps it
+    # out of reply_text for every channel).
     if result.video:
-        logger.info(
-            "voice_call: reply for student_id=%s carried video, not rendered in call UI (out of scope for this MVP)",
-            student.id,
-        )
+        await websocket.send_json({"type": "video", "title": result.video["title"], "url": result.video["url"]})
 
     if result.image_prompt:
         # A failed/unusable sketch degrades exactly like a failed TTS call

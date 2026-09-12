@@ -4,7 +4,8 @@ import { WS_BASE, getStudentToken, type StudentProfile } from "../api";
 
 type Context = { student: StudentProfile | null };
 
-type LogEntry = { who: "you" | "tutor"; text: string; note?: string };
+type VideoRef = { title: string; url: string };
+type LogEntry = { who: "you" | "tutor"; text: string; note?: string; video?: VideoRef };
 
 type CallStatus = "connecting" | "open" | "closed" | "error" | "mic_denied";
 
@@ -108,6 +109,11 @@ export default function Call() {
   // the two animations interleaving their draws on the same canvas.
   const diagramGenerationRef = useRef(0);
   const diagramTimeoutsRef = useRef<number[]>([]);
+  // "video" and "reply_text" frames can arrive in either order (see
+  // voice_call.py's module docstring) — this holds a video that arrived
+  // BEFORE the tutor log entry it belongs to exists yet, so it can be
+  // attached the moment that entry is created instead of being dropped.
+  const pendingVideoRef = useRef<VideoRef | null>(null);
 
   // Kicked off as soon as this page mounts, in parallel with the WebSocket
   // connecting below — by the time a "diagram" frame could plausibly
@@ -149,7 +155,23 @@ export default function Call() {
         if (frame.type === "transcript") {
           setLog((prev) => [...prev, { who: "you", text: String(frame.text ?? "") }]);
         } else if (frame.type === "reply_text") {
-          setLog((prev) => [...prev, { who: "tutor", text: String(frame.text ?? "") }]);
+          const video = pendingVideoRef.current ?? undefined;
+          pendingVideoRef.current = null;
+          setLog((prev) => [...prev, { who: "tutor", text: String(frame.text ?? ""), video }]);
+        } else if (frame.type === "video") {
+          const video: VideoRef = { title: String(frame.title ?? "Video"), url: String(frame.url ?? "") };
+          setLog((prev) => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last && last.who === "tutor") {
+              // reply_text already arrived — attach directly.
+              copy[copy.length - 1] = { ...last, video };
+              return copy;
+            }
+            // reply_text hasn't arrived yet — stash it for the handler above.
+            pendingVideoRef.current = video;
+            return prev;
+          });
         } else if (frame.type === "diagram") {
           renderDiagram(Array.isArray(frame.scene) ? (frame.scene as DiagramElement[]) : []);
         } else if (frame.type === "tts_failed") {
@@ -452,6 +474,8 @@ export default function Call() {
         .call-log-entry.you { background: var(--call-log-you-bg); align-self: flex-end; }
         .call-log-entry.tutor { background: var(--call-log-tutor-bg); align-self: flex-start; }
         .call-log-note { font-size: 12px; opacity: 0.7; margin-top: 4px; }
+        .call-log-video { font-size: 13px; margin-top: 6px; }
+        .call-log-video a { color: inherit; text-decoration: underline; }
         .call-diagram-canvas {
           display: block; max-width: 100%; height: auto; width: 400px;
           margin: 8px auto 20px; background: #fdfdfb; border-radius: 10px;
@@ -521,6 +545,14 @@ export default function Call() {
           <div key={i} className={`call-log-entry ${entry.who}`}>
             <strong>{entry.who === "you" ? "You" : "Tutor"}:</strong> {entry.text}
             {entry.note && <div className="call-log-note">{entry.note}</div>}
+            {entry.video && (
+              <div className="call-log-video">
+                📺{" "}
+                <a href={entry.video.url} target="_blank" rel="noopener noreferrer">
+                  {entry.video.title}
+                </a>
+              </div>
+            )}
           </div>
         ))}
       </div>
