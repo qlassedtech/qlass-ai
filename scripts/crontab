@@ -7,6 +7,9 @@ PY=/usr/share/nginx/aitutor.qlass.in/public_python_aios/venv/bin/python
 # Nightly DB backup — 02:30 IST
 30 2 * * *   cd $APP && bash scripts/backup_db.sh >> logs/cron-backup.log 2>&1
 
+# Sarvam credit probe — daily 07:30 IST (alerts via Sentry when voice is down)
+30 7 * * *   cd $APP && $PY scripts/check_sarvam_credits.py >> logs/cron-sarvam-probe.log 2>&1
+
 # Subscription expiry reminders — daily 08:00 IST
 0 8 * * *    cd $APP && $PY scripts/send_subscription_expiry_reminders.py >> logs/cron-subscription-expiry.log 2>&1
 
