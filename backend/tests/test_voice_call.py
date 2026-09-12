@@ -163,7 +163,12 @@ def test_image_prompt_reply_sends_diagram_frame_before_reply_text(db_session, mo
 
     async def fake_generate_sketch_scene(prompt):
         assert prompt == "a plant cell"
-        return scene, LLMResult(text="...", model="claude-haiku-4-5-20251001", input_tokens=5, output_tokens=5)
+        # generate_sketch_scene now bills two Claude calls (generation +
+        # critique) combined into one LLMResult — see sketch_client's
+        # _combine_llm_results — but that's an internal detail this
+        # router-level test doesn't need to exercise; it just mocks the
+        # already-combined result the same way it always mocked one call.
+        return scene, LLMResult(text="...", model="claude-sonnet-4-6", input_tokens=5, output_tokens=5)
 
     async def fake_synthesize(text, language_code=None, speaker=None):
         return b"fake-opus-bytes"

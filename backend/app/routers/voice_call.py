@@ -40,7 +40,14 @@ one binary audio frame:
     array is draw order. Never sent if there was no image_prompt this
     turn, or if sketch generation failed; the client should simply not
     expect a diagram in that case, exactly like a missing tts_failed frame
-    doesn't imply anything went wrong.
+    doesn't imply anything went wrong. Producing this scene is now a
+    two-Claude-call pipeline under the hood (generation, then a
+    self-critique pass for content/domain correctness — see
+    sketch_client.generate_sketch_scene's docstring) plus a deterministic
+    text-collision repair pass; both calls are billed together as a
+    single combined LLMResult at this router's own call site below, so
+    that billing code didn't need to change shape even though the actual
+    Claude spend per diagram roughly doubled.
   - {"type": "reply_text", "text": "..."}       — the tutor's reply text
     (identical to what WhatsApp/chat would show), sent before the
     corresponding audio so the transcript log updates immediately even if
@@ -207,6 +214,13 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
         # A failed/unusable sketch degrades exactly like a failed TTS call
         # does: nothing diagram-related is sent, and the turn continues
         # normally with reply_text/audio — this must never fail the turn.
+        #
+        # generate_sketch_scene now makes two Claude calls per diagram
+        # (generation + a self-critique/domain-correctness pass — see its
+        # docstring), but it sums both calls' usage into one combined
+        # LLMResult before returning, so this stays a single
+        # record_claude_usage call — same shape as before the critique
+        # pass was added, just billing more actual token spend per call.
         scene, sketch_result = await sketch_client.generate_sketch_scene(result.image_prompt)
         if scene:
             cost_tracker.record_claude_usage(
