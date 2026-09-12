@@ -269,8 +269,22 @@ export default function Call() {
           );
           break;
         }
-        case "text":
+        case "text": {
           ctx.font = "14px sans-serif";
+          // The model is told to space labels apart, but it occasionally
+          // misjudges text width and places two labels close enough to
+          // overlap into an unreadable smear. A translucent white backing
+          // box drawn UNDER each label (each one drawn in array order, so
+          // a later label's halo sits on top of an earlier label's text)
+          // keeps whichever label was placed last fully legible even when
+          // they collide — imperfect, but strictly better than two
+          // half-obscured labels blending together.
+          const metrics = ctx.measureText(element.text);
+          const padX = 3, padY = 2;
+          ctx.fillStyle = "rgba(253, 253, 251, 0.88)";
+          ctx.fillRect(
+            element.x - padX, element.y - 11 - padY, metrics.width + padX * 2, 14 + padY * 2,
+          );
           // canvas fillStyle can't resolve a CSS custom property, and the
           // diagram is drawn on a fixed light background (see .call-
           // diagram-canvas below) regardless of page theme, so a plain
@@ -278,6 +292,7 @@ export default function Call() {
           ctx.fillStyle = "#333333";
           ctx.fillText(element.text, element.x, element.y);
           break;
+        }
       }
     } catch {
       // One malformed element (out-of-range values rough.js chokes on,

@@ -38,6 +38,13 @@ shapes first and label ("text") elements last, after the shapes they label alrea
 Keep the whole scene to at most {_MAX_ELEMENTS} elements. Favor a small number of clear, \
 well-labeled shapes over a cluttered diagram.
 
+Text labels must never collide. A short label (one word) needs roughly 60px of horizontal \
+clearance from the next label at a similar y; a longer label (a phrase) needs 120px or more. \
+If several labels would naturally cluster in one area (e.g. multiple parts of the same small \
+structure), stack them vertically instead — each on its own line, at least 16px of y apart — \
+rather than placing them side by side at the same height. When unsure whether two labels have \
+enough room, give them more room, not less.
+
 Example 1 — prompt "the water cycle":
 [
   {{"type": "ellipse", "x": 80, "y": 220, "rx": 60, "ry": 30}},
