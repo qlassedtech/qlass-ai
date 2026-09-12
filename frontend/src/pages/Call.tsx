@@ -92,6 +92,7 @@ export default function Call() {
   const [errorNote, setErrorNote] = useState<string | null>(null);
 
   const orbRef = useRef<HTMLDivElement | null>(null);
+  const mouthRef = useRef<SVGEllipseElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -364,6 +365,14 @@ export default function Call() {
     });
   }
 
+  // Resting (mouth-closed) and fully-open ellipse heights, in the face
+  // SVG's own 0-200 coordinate space (see the <svg viewBox> below) — a
+  // zero-cost stand-in for lip-sync: no per-frame image/video generation,
+  // just mapping the same live amplitude value that used to only drive
+  // the plain orb's scale/glow onto how open the mouth looks.
+  const MOUTH_CLOSED_RY = 4;
+  const MOUTH_OPEN_RY = 26;
+
   function runVisualizerLoop() {
     const analyser = analyserRef.current;
     const orb = orbRef.current;
@@ -374,10 +383,14 @@ export default function Call() {
       if (!analyserRef.current || !orbRef.current) return;
       analyserRef.current.getByteFrequencyData(data);
       const avg = data.reduce((sum, v) => sum + v, 0) / data.length; // 0-255
-      const scale = 1 + Math.min(avg / 255, 1) * 0.45;
-      const glow = 20 + Math.min(avg / 255, 1) * 60;
+      const level = Math.min(avg / 255, 1);
+      const scale = 1 + level * 0.08; // subtle now — the mouth carries most of the reaction
+      const glow = 16 + level * 40;
       orbRef.current.style.transform = `scale(${scale})`;
       orbRef.current.style.boxShadow = `0 0 ${glow}px ${glow / 2}px var(--call-orb-glow)`;
+      if (mouthRef.current) {
+        mouthRef.current.setAttribute("ry", String(MOUTH_CLOSED_RY + level * (MOUTH_OPEN_RY - MOUTH_CLOSED_RY)));
+      }
       rafRef.current = requestAnimationFrame(tick);
     }
     rafRef.current = requestAnimationFrame(tick);
@@ -394,6 +407,9 @@ export default function Call() {
     if (orbRef.current) {
       orbRef.current.style.transform = "scale(1)";
       orbRef.current.style.boxShadow = "";
+    }
+    if (mouthRef.current) {
+      mouthRef.current.setAttribute("ry", String(MOUTH_CLOSED_RY));
     }
   }
 
@@ -461,8 +477,25 @@ export default function Call() {
           background: radial-gradient(circle at 35% 30%, var(--call-orb-light), var(--call-orb-dark));
           margin: 24px auto; transition: box-shadow 0.1s ease-out;
           animation: call-orb-idle-pulse 3.2s ease-in-out infinite;
+          position: relative;
         }
         .call-orb.recording, .call-orb.speaking { animation: none; }
+        /* The "avatar" itself — a zero-cost stand-in for a video avatar.
+           Eyes blink on a fixed CSS timer (no JS needed); the mouth's ry
+           is driven imperatively in runVisualizerLoop's tick() from the
+           same live mic/playback amplitude that used to only scale/glow
+           the plain orb — see MOUTH_CLOSED_RY/MOUTH_OPEN_RY above. */
+        .call-face { position: absolute; inset: 0; width: 100%; height: 100%; }
+        .call-face-eyes ellipse { fill: var(--call-face-feature); animation: call-face-blink 4.4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+        .call-face-eyes ellipse:nth-child(2) { animation-delay: 0.08s; }
+        .call-face-mouth { fill: var(--call-face-feature); transition: ry 0.05s linear; }
+        @keyframes call-face-blink {
+          0%, 92%, 100% { transform: scaleY(1); }
+          96% { transform: scaleY(0.12); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .call-face-eyes ellipse { animation: none; }
+        }
         .call-talk-btn {
           display: block; margin: 0 auto; padding: 12px 28px; border-radius: 999px;
           border: none; font-size: 15px; font-weight: 600; cursor: pointer;
@@ -518,7 +551,15 @@ export default function Call() {
         <p className="error" style={{ textAlign: "center" }}>{errorNote}</p>
       )}
 
-      <div ref={orbRef} className={`call-orb${recording ? " recording" : ""}`} />
+      <div ref={orbRef} className={`call-orb${recording ? " recording" : ""}`}>
+        <svg className="call-face" viewBox="0 0 200 200" aria-hidden="true">
+          <g className="call-face-eyes">
+            <ellipse cx="70" cy="80" rx="11" ry="14" />
+            <ellipse cx="130" cy="80" rx="11" ry="14" />
+          </g>
+          <ellipse ref={mouthRef} className="call-face-mouth" cx="100" cy="132" rx="26" ry="4" />
+        </svg>
+      </div>
 
       <canvas
         ref={diagramCanvasRef}
@@ -558,11 +599,11 @@ export default function Call() {
       </div>
 
       <style>{`
-        :root { --call-orb-light: #93c5fd; --call-orb-dark: #2563eb; --call-orb-glow: rgba(37,99,235,0.55); --call-btn-bg: #2563eb; --call-btn-fg: #fff; --call-log-you-bg: #eef2ff; --call-log-tutor-bg: #f0fdf4; --call-diagram-border: #e2e2df; }
+        :root { --call-orb-light: #93c5fd; --call-orb-dark: #2563eb; --call-orb-glow: rgba(37,99,235,0.55); --call-btn-bg: #2563eb; --call-btn-fg: #fff; --call-log-you-bg: #eef2ff; --call-log-tutor-bg: #f0fdf4; --call-diagram-border: #e2e2df; --call-face-feature: #1c2a5e; }
         @media (prefers-color-scheme: dark) {
-          :root:not([data-theme="light"]) { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; }
+          :root:not([data-theme="light"]) { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; --call-face-feature: #0d1533; }
         }
-        :root[data-theme="dark"] { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; }
+        :root[data-theme="dark"] { --call-orb-light: #60a5fa; --call-orb-dark: #1d4ed8; --call-orb-glow: rgba(96,165,250,0.6); --call-log-you-bg: #1e293b; --call-log-tutor-bg: #14291f; --call-diagram-border: #3f3f3f; --call-face-feature: #0d1533; }
       `}</style>
     </div>
   );
