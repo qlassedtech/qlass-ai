@@ -49,6 +49,58 @@ def test_zero_cost_call_does_not_touch_balance(db_session):
     assert balance == 10.0
 
 
+def test_claude_usage_persists_feature_label(db_session):
+    """
+    The core of the per-feature cost visibility feature: record_claude_usage
+    must persist whatever `feature` label a caller passes onto the
+    CreditEvent row, so app.services.analytics.get_ai_cost_breakdown can
+    later group spend by it.
+    """
+    from app.models.core import CreditEvent
+
+    student = _make_student(db_session)
+    cost_tracker.add_credits(db_session, student.id, 100.0)
+    cost_tracker.record_claude_usage(
+        db_session, "claude-sonnet-4-6", 1000, 500, student.id, feature="tutor_reply",
+    )
+    event = db_session.query(CreditEvent).filter(CreditEvent.student_id == student.id, CreditEvent.raw_cost.isnot(None)).first()
+    assert event.feature == "tutor_reply"
+
+
+def test_claude_usage_feature_is_optional_and_backward_compatible(db_session):
+    """Any existing caller that doesn't pass `feature` must keep working unchanged (feature ends up None)."""
+    from app.models.core import CreditEvent
+
+    student = _make_student(db_session)
+    cost_tracker.add_credits(db_session, student.id, 100.0)
+    cost_tracker.record_claude_usage(db_session, "claude-sonnet-4-6", 1000, 500, student.id)
+    event = db_session.query(CreditEvent).filter(CreditEvent.student_id == student.id, CreditEvent.raw_cost.isnot(None)).first()
+    assert event.feature is None
+
+
+def test_record_platform_claude_usage_never_deducts_but_records_real_cost(db_session):
+    """
+    Platform-absorbed calls (e.g. proactive nudges — see app.services.nudges)
+    must never touch the student's wallet, but the real raw_cost/feature
+    still need to be recorded so they show up in cost analytics instead of
+    vanishing as untracked COGS.
+    """
+    from app.models.core import CreditEvent
+
+    student = _make_student(db_session)
+    cost_tracker.add_credits(db_session, student.id, 50.0)
+    cost_tracker.record_platform_claude_usage(
+        db_session, "claude-haiku-4-5-20251001", 1000, 500, student.id, feature="nudge_funfact",
+    )
+    assert cost_tracker.get_balance(db_session, student.id) == 50.0  # wallet untouched
+
+    event = db_session.query(CreditEvent).filter(CreditEvent.student_id == student.id, CreditEvent.raw_cost.isnot(None)).first()
+    assert event is not None
+    assert event.amount == 0
+    assert event.raw_cost > 0
+    assert event.feature == "nudge_funfact"
+
+
 def test_referral_credit_is_uncapped(db_session):
     """Explicit product decision: referral credits have NO lifetime cap."""
     student = _make_student(db_session)

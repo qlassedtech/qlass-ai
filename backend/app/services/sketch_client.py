@@ -6,17 +6,22 @@ from app.services.llm_client import LLMResult, call_llm
 
 logger = logging.getLogger(__name__)
 
-# Sonnet tier, not Haiku — this module makes two calls per diagram (see
-# generate_sketch_scene's docstring): a first pass that generates the scene,
-# and a second self-critique pass that checks it for internal/domain
-# consistency (the "vy=0 point with a vertical arrow drawn on it" class of
-# bug — see _CRITIQUE_SYSTEM_PROMPT). Both need real reasoning, not just
-# structured-output compliance, so this uses the same "good" tier as the
-# tutor's own top level (see business_rules.TUTOR_LEVEL_MODELS[4]) rather
-# than the cheap auxiliary tier chat_core.NOTES_MODEL uses — the added cost
-# for two short JSON round-trips is small next to the reliability win
-# across every subject (see this module's own docstring for a real number).
+# Sonnet tier for GENERATION only. This module makes two calls per diagram
+# (see generate_sketch_scene's docstring): a first pass that generates the
+# scene, which is open-ended creative diagram design and needs the same
+# "good" tier as the tutor's own top level (see
+# business_rules.TUTOR_LEVEL_MODELS[4]) rather than the cheap auxiliary tier
+# chat_core.NOTES_MODEL uses.
 SKETCH_MODEL = "claude-sonnet-4-6"
+
+# The second, self-critique pass (_critique_and_fix_scene) is a narrower
+# task than generation: validate/correct a JSON scene against the explicit
+# rubric in _CRITIQUE_SYSTEM_PROMPT, not open-ended creative design. That
+# makes it a reasonable candidate for the cheap tier — same one
+# chat_core.NOTES_MODEL and quiz_service.QUIZ_MODEL already use for
+# similarly narrow, well-defined tasks — which roughly halves this
+# pipeline's per-diagram cost since it's the second of exactly two calls.
+SKETCH_CRITIQUE_MODEL = "claude-haiku-4-5-20251001"
 
 _VALID_TYPES = {"rect", "ellipse", "line", "arrow", "text"}
 
@@ -370,7 +375,7 @@ async def _critique_and_fix_scene(original_prompt: str, scene: list[dict]) -> tu
         result = await call_llm(
             system_prompt=_CRITIQUE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": critique_input}],
-            model=SKETCH_MODEL,
+            model=SKETCH_CRITIQUE_MODEL,
         )
     except Exception:
         logger.exception("_critique_and_fix_scene: critique call failed; keeping the original scene")
@@ -392,34 +397,9 @@ async def _critique_and_fix_scene(original_prompt: str, scene: list[dict]) -> tu
     return corrected, result
 
 
-def _combine_llm_results(first: LLMResult, second: LLMResult | None) -> LLMResult:
-    """
-    generate_sketch_scene now makes two Claude calls (generation +
-    critique) but its public return shape is still a single
-    (scene, llm_result) tuple — voice_call.py bills once per diagram with
-    a single cost_tracker.record_claude_usage call, so this sums both
-    calls' token counts into one LLMResult rather than changing that call
-    site's shape. `text` on the combined result is meaningless/unused —
-    nothing downstream re-parses a "final" LLMResult.text, only its token
-    fields are read (by cost_tracker). `model` is taken from `first`;
-    both calls always use SKETCH_MODEL so this is never actually ambiguous.
-    `second` is None when the critique call itself failed (see
-    _critique_and_fix_scene) — in that case only the first call's usage is
-    billed, since the second one never completed.
-    """
-    if second is None:
-        return first
-    return LLMResult(
-        text="",
-        model=first.model,
-        input_tokens=first.input_tokens + second.input_tokens,
-        output_tokens=first.output_tokens + second.output_tokens,
-        cache_write_tokens=first.cache_write_tokens + second.cache_write_tokens,
-        cache_read_tokens=first.cache_read_tokens + second.cache_read_tokens,
-    )
-
-
-async def generate_sketch_scene(prompt: str) -> tuple[list[dict], LLMResult] | tuple[None, None]:
+async def generate_sketch_scene(
+    prompt: str,
+) -> tuple[list[dict], LLMResult, LLMResult | None] | tuple[None, None, None]:
     """
     Generates a simple labeled hand-drawn-style diagram (as a list of
     drawing primitives, see the schema in _SYSTEM_PROMPT) matching `prompt`,
@@ -449,16 +429,25 @@ async def generate_sketch_scene(prompt: str) -> tuple[list[dict], LLMResult] | t
          _resolve_text_collisions too, since a correction could reinstate
          a collision the first repair pass had already fixed.
 
-    Returns (scene, llm_result) on success so the caller can bill actual
-    token usage (mirrors quiz_service.generate_quiz_questions's
-    tuple-return shape) — `llm_result` now covers BOTH Claude calls
-    combined (see _combine_llm_results) so voice_call.py's billing call
-    site still only needs to bill once per diagram. Returns (None, None)
-    on any parse/generation failure in the FIRST pass (mirrors
-    image_client.generate_image's None-on-failure convention) — callers
-    must treat that as "nothing to render", not an error. Once a scene
-    exists, a critique-side failure never degrades to (None, None) — the
-    original valid scene is always what's used at worst.
+    Returns (scene, generation_result, critique_result) on success so the
+    caller can bill actual token usage per-pass (mirrors
+    quiz_service.generate_quiz_questions's tuple-return shape) — the two
+    Claude calls are returned SEPARATELY, not summed into one combined
+    LLMResult, so a caller can tag each with its own feature label (e.g.
+    "diagram_generate" vs "diagram_critique" — see
+    app.services.analytics.get_ai_cost_breakdown — the reason this needs
+    per-pass visibility in the first place: it's what made it possible to
+    see that the critique pass alone justified downgrading it to
+    SKETCH_CRITIQUE_MODEL, the cheap tier, while generation stays on
+    SKETCH_MODEL).
+    `critique_result` is None when the critique call itself failed (see
+    _critique_and_fix_scene) — the caller should then bill only the
+    generation call, since the critique one never completed. Returns
+    (None, None, None) on any parse/generation failure in the FIRST pass
+    (mirrors image_client.generate_image's None-on-failure convention) —
+    callers must treat that as "nothing to render", not an error. Once a
+    scene exists, a critique-side failure never degrades to a None return —
+    the original valid scene is always what's used at worst.
     """
     generation_result = await call_llm(
         system_prompt=_SYSTEM_PROMPT, messages=[{"role": "user", "content": prompt}], model=SKETCH_MODEL,
@@ -467,11 +456,11 @@ async def generate_sketch_scene(prompt: str) -> tuple[list[dict], LLMResult] | t
     scene = _parse_scene(generation_result.text)
     if scene is None:
         logger.warning("generate_sketch_scene: could not parse a usable scene for prompt=%r", prompt)
-        return None, None
+        return None, None, None
 
     scene = _resolve_text_collisions(scene)
 
     scene, critique_result = await _critique_and_fix_scene(prompt, scene)
     scene = _resolve_text_collisions(scene)
 
-    return scene, _combine_llm_results(generation_result, critique_result)
+    return scene, generation_result, critique_result

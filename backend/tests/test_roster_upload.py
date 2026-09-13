@@ -62,7 +62,7 @@ async def test_csv_with_a_school_own_column_names_falls_back_to_llm_extraction(d
     billed = []
     monkeypatch.setattr(
         "app.routers.admin.school_billing.record_claude_usage",
-        lambda db, centre_id, service, in_tok, out_tok: billed.append((centre_id, service)),
+        lambda db, centre_id, service, in_tok, out_tok, feature=None: billed.append((centre_id, service, feature)),
     )
 
     rows = await _rows_from_roster_upload(
@@ -71,4 +71,4 @@ async def test_csv_with_a_school_own_column_names_falls_back_to_llm_extraction(d
 
     assert rows == [{"name": "Aman Kumar", "phone": "919000000001", "class": "10", "board": None, "school": None}]
     assert "Student Name" in seen["source_text"]
-    assert billed == [(42, "roster_extraction")]
+    assert billed == [(42, "roster_extraction", "roster_extraction")]

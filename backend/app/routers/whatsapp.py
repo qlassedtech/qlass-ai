@@ -260,6 +260,7 @@ async def _send_localized_notice(db: Session, from_phone: str, student: Student,
             cost_tracker.record_claude_usage(
                 db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens, student.id,
                 cache_write_tokens=translated_result.cache_write_tokens, cache_read_tokens=translated_result.cache_read_tokens,
+                feature="translation",
             )
     await send_whatsapp_message(from_phone, message)
 
@@ -401,7 +402,7 @@ async def _resolve_active_student(db: Session, from_phone: str, message_text: st
             cost_tracker.record_claude_usage(
                 db, routing.llm_result.model, routing.llm_result.input_tokens, routing.llm_result.output_tokens,
                 student.id, cache_write_tokens=routing.llm_result.cache_write_tokens,
-                cache_read_tokens=routing.llm_result.cache_read_tokens,
+                cache_read_tokens=routing.llm_result.cache_read_tokens, feature="profile_routing_classify",
             )
         return student, early_reply
 
@@ -960,7 +961,7 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 cost_tracker.record_claude_usage(
                     db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens,
                     student.id, cache_write_tokens=translated_result.cache_write_tokens,
-                    cache_read_tokens=translated_result.cache_read_tokens,
+                    cache_read_tokens=translated_result.cache_read_tokens, feature="translation",
                 )
         button_result = await send_whatsapp_buttons(from_phone, notice, CREDIT_EXHAUSTED_BUTTONS)
         if not button_result.get("sent"):

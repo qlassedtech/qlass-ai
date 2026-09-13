@@ -46,6 +46,7 @@ async def start_quiz(db: Session, student: Student, topic: str) -> str:
     cost_tracker.record_claude_usage(
         db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
         cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
+        feature="quiz_generate",
     )
     if not questions_data:
         return (
@@ -78,6 +79,7 @@ async def start_mock_test(db: Session, student: Student, topic: str) -> str:
     cost_tracker.record_claude_usage(
         db, gen_result.model, gen_result.input_tokens, gen_result.output_tokens, student.id,
         cache_write_tokens=gen_result.cache_write_tokens, cache_read_tokens=gen_result.cache_read_tokens,
+        feature="quiz_generate",
     )
     if not questions_data:
         return (
@@ -143,6 +145,7 @@ async def handle_quiz_answer(db: Session, student: Student, message_text: str, q
         cost_tracker.record_claude_usage(
             db, grade_result.model, grade_result.input_tokens, grade_result.output_tokens, student.id,
             cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
+            feature="quiz_classify",
         )
         feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
     db.add(Answer(

@@ -221,18 +221,27 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
         # does: nothing diagram-related is sent, and the turn continues
         # normally with reply_text/audio — this must never fail the turn.
         #
-        # generate_sketch_scene now makes two Claude calls per diagram
+        # generate_sketch_scene makes two Claude calls per diagram
         # (generation + a self-critique/domain-correctness pass — see its
-        # docstring), but it sums both calls' usage into one combined
-        # LLMResult before returning, so this stays a single
-        # record_claude_usage call — same shape as before the critique
-        # pass was added, just billing more actual token spend per call.
-        scene, sketch_result = await sketch_client.generate_sketch_scene(result.image_prompt)
+        # docstring) and now returns each pass's usage separately so they
+        # can be billed — and tagged with their own feature label — one at
+        # a time, instead of billing one call with their costs summed
+        # together (which would make it impossible to see what the
+        # critique pass alone costs — see
+        # app.services.analytics.get_ai_cost_breakdown).
+        scene, generation_result, critique_result = await sketch_client.generate_sketch_scene(result.image_prompt)
         if scene:
             cost_tracker.record_claude_usage(
-                db, sketch_result.model, sketch_result.input_tokens, sketch_result.output_tokens, student.id,
-                cache_write_tokens=sketch_result.cache_write_tokens, cache_read_tokens=sketch_result.cache_read_tokens,
+                db, generation_result.model, generation_result.input_tokens, generation_result.output_tokens,
+                student.id, cache_write_tokens=generation_result.cache_write_tokens,
+                cache_read_tokens=generation_result.cache_read_tokens, feature="diagram_generate",
             )
+            if critique_result is not None:
+                cost_tracker.record_claude_usage(
+                    db, critique_result.model, critique_result.input_tokens, critique_result.output_tokens,
+                    student.id, cache_write_tokens=critique_result.cache_write_tokens,
+                    cache_read_tokens=critique_result.cache_read_tokens, feature="diagram_critique",
+                )
             await websocket.send_json({"type": "diagram", "scene": scene})
         else:
             logger.info(

@@ -7,6 +7,15 @@ from app.business_rules import UNLIMITED_PERIOD_SPEND_CAPS
 from app.models.core import ChatHistory, CreditEvent, SchoolCreditEvent, Student, TopicProgress
 from app.services.escalation import ESCALATION_THRESHOLD
 
+# Row's `service` column is the model TIER (see
+# app.services.cost_tracker._tier_for_model / school_billing.PRICING), not
+# a feature name — kept as its own column in the breakdown below rather
+# than folded into `feature`, since the whole point of get_ai_cost_breakdown
+# is to cross-tab the two (e.g. "diagram_critique on claude_sonnet" vs
+# "diagram_critique on claude_haiku", the exact comparison the Haiku-
+# downgrade decision needs).
+UNLABELED_FEATURE = "unlabeled"
+
 WEAK_TOPIC_LIMIT = 5
 INACTIVE_STUDENT_LIMIT = 10
 INACTIVE_THRESHOLD_DAYS = 7
@@ -190,3 +199,57 @@ def get_school_analytics(db: Session, student_ids: list[int], centre_id: int | N
         "upsell_candidates": upsell_candidates,
         "at_risk_students": at_risk_students,
     }
+
+
+def get_ai_cost_breakdown(db: Session, days: int = 30) -> list[dict]:
+    """
+    Per-feature (and per-model-tier) Claude spend over the trailing `days`
+    — the report /admin/analytics/ai-costs exposes, and the actual reason
+    this whole feature-tagging effort exists: `service`/tier alone
+    (claude_sonnet/claude_haiku/...) could never answer "which FEATURE is
+    driving spend" — only "which model tier is". Sums BOTH ledgers
+    (CreditEvent, the per-student wallet most Claude calls bill to; and
+    SchoolCreditEvent, the per-school ledger workbook/roster-extraction/
+    quiz-assignment generation bills to instead — see
+    app.services.school_billing) so a school-billed feature like "workbook"
+    isn't invisible here just because it happens to be billed to a
+    different ledger than "tutor_reply".
+
+    Returns a list of {"feature": str, "tier": str, "total_cost": float,
+    "call_count": int} rows, one per (feature, tier) combination that had
+    at least one call in range — sorted by total_cost descending, so the
+    biggest driver of spend is always first. `feature` is "unlabeled" for
+    any (pre-existing, or otherwise unlabeled) row with no feature set,
+    so old data before this column existed still shows up here rather than
+    silently vanishing from the total.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    combined: dict[tuple[str, str], dict[str, float]] = {}
+
+    for model, created_at_col, raw_cost_col, feature_col, service_col in (
+        (CreditEvent, CreditEvent.created_at, CreditEvent.raw_cost, CreditEvent.feature, CreditEvent.service),
+        (SchoolCreditEvent, SchoolCreditEvent.created_at, SchoolCreditEvent.raw_cost, SchoolCreditEvent.feature, SchoolCreditEvent.service),
+    ):
+        rows = (
+            db.query(
+                func.coalesce(feature_col, UNLABELED_FEATURE),
+                func.coalesce(service_col, UNLABELED_FEATURE),
+                func.sum(raw_cost_col),
+                func.count(model.id),
+            )
+            .filter(raw_cost_col > 0, created_at_col >= since)
+            .group_by(feature_col, service_col)
+            .all()
+        )
+        for feature, tier, total_cost, call_count in rows:
+            key = (feature, tier)
+            bucket = combined.setdefault(key, {"total_cost": 0.0, "call_count": 0})
+            bucket["total_cost"] += float(total_cost)
+            bucket["call_count"] += int(call_count)
+
+    breakdown = [
+        {"feature": feature, "tier": tier, "total_cost": v["total_cost"], "call_count": v["call_count"]}
+        for (feature, tier), v in combined.items()
+    ]
+    breakdown.sort(key=lambda row: row["total_cost"], reverse=True)
+    return breakdown

@@ -339,7 +339,7 @@ def grant_habit_credit(db: Session, student_id: int, amount: float, note: str) -
     return amount
 
 
-def _deduct(db: Session, service: str, raw_cost: float, student_id: int) -> float:
+def _deduct(db: Session, service: str, raw_cost: float, student_id: int, feature: str | None = None) -> float:
     if raw_cost <= 0:
         return get_balance(db, student_id)  # nothing actually billed (e.g. a failed/no-op call) — no ledger noise
     student = db.query(Student).filter(Student.id == student_id).first()
@@ -356,9 +356,36 @@ def _deduct(db: Session, service: str, raw_cost: float, student_id: int) -> floa
         student is not None and _is_unlimited_active(student) and not is_unlimited_over_period_cap(db, student)
     )
     amount = 0.0 if covered_by_flat_fee else -raw_cost * MARKUP_MULTIPLIER
-    db.add(CreditEvent(amount=amount, service=service, raw_cost=raw_cost, student_id=student_id))
+    db.add(CreditEvent(amount=amount, service=service, raw_cost=raw_cost, student_id=student_id, feature=feature))
     db.commit()
     return get_balance(db, student_id)
+
+
+# Anthropic's Message Batches API bills every token at half the standard
+# per-token rate (see app.services.nudges' fun_fact call, submitted via
+# scripts/submit_nudge_funfact_batch.py) — applied as a flat multiplier on
+# top of the normal pricing table rather than a second PRICING dict, so a
+# batched call still shows up under the same model tier in
+# get_ai_cost_breakdown, just at its real (lower) cost.
+BATCH_COST_MULTIPLIER = 0.5
+
+
+def _claude_raw_cost(
+    model: str, input_tokens: int, output_tokens: int, cache_write_tokens: int, cache_read_tokens: int,
+    batch: bool = False,
+) -> tuple[str, float]:
+    """Shared pricing math for record_claude_usage/record_platform_claude_usage — returns (tier, raw_cost)."""
+    tier = _tier_for_model(model)
+    rates = PRICING[tier]
+    raw_cost = (
+        (input_tokens / 1000) * rates["input_per_1k_tokens"]
+        + (output_tokens / 1000) * rates["output_per_1k_tokens"]
+        + (cache_write_tokens / 1000) * rates["input_per_1k_tokens"] * CACHE_WRITE_MULTIPLIER
+        + (cache_read_tokens / 1000) * rates["input_per_1k_tokens"] * CACHE_READ_MULTIPLIER
+    )
+    if batch:
+        raw_cost *= BATCH_COST_MULTIPLIER
+    return tier, raw_cost
 
 
 def record_claude_usage(
@@ -369,16 +396,60 @@ def record_claude_usage(
     student_id: int,
     cache_write_tokens: int = 0,
     cache_read_tokens: int = 0,
+    feature: str | None = None,
 ) -> float:
-    tier = _tier_for_model(model)
-    rates = PRICING[tier]
-    raw_cost = (
-        (input_tokens / 1000) * rates["input_per_1k_tokens"]
-        + (output_tokens / 1000) * rates["output_per_1k_tokens"]
-        + (cache_write_tokens / 1000) * rates["input_per_1k_tokens"] * CACHE_WRITE_MULTIPLIER
-        + (cache_read_tokens / 1000) * rates["input_per_1k_tokens"] * CACHE_READ_MULTIPLIER
-    )
-    return _deduct(db, tier, raw_cost, student_id)
+    """
+    Bills a Claude call to `student_id`'s wallet (via _deduct — the usual
+    2x-markup deduction, or amount=0 while covered by an unlimited plan's
+    flat fee). `feature` is an optional short label naming which product
+    feature actually made this call (e.g. "tutor_reply", "quiz_generate",
+    "diagram_critique" — see the taxonomy used across every call site)
+    — kept separate from `service`/tier, which only ever identifies the
+    MODEL, not what it was used for. Optional/backward-compatible so any
+    caller that doesn't pass it keeps working unchanged, but every call
+    site should pass it going forward — see
+    app.services.analytics.get_ai_cost_breakdown for why this exists: model
+    tier alone can't tell you which feature is actually driving spend.
+    """
+    tier, raw_cost = _claude_raw_cost(model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
+    return _deduct(db, tier, raw_cost, student_id, feature=feature)
+
+
+def record_platform_claude_usage(
+    db: Session,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    student_id: int,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    feature: str | None = None,
+    batch: bool = False,
+) -> None:
+    """
+    Same pricing math as record_claude_usage, but for a Claude call whose
+    cost Qlass itself absorbs rather than billing the student's wallet —
+    e.g. a proactive re-engagement nudge (see app.services.nudges), sent
+    unprompted, which the recipient never asked for and shouldn't pay for
+    out of their own credits. Always writes amount=0 (mirrors
+    record_free_call), but — unlike record_free_call — still records the
+    REAL raw_cost and `feature`, so this spend still shows up correctly in
+    get_ai_cost_breakdown instead of silently vanishing from Qlass's own
+    COGS visibility just because no one is billed for it.
+
+    `batch=True` for a call made via the Message Batches API (see
+    scripts/fetch_nudge_funfact_batch.py) — halves the recorded raw_cost so
+    this genuinely-cheaper call doesn't overstate COGS at the standard
+    synchronous rate.
+    """
+    tier, raw_cost = _claude_raw_cost(model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, batch=batch)
+    if raw_cost <= 0:
+        return
+    db.add(CreditEvent(
+        amount=0, service=tier, raw_cost=raw_cost, student_id=student_id, feature=feature,
+        note="platform-absorbed — not billed to student",
+    ))
+    db.commit()
 
 
 def record_char_usage(db: Session, service: str, char_count: int, student_id: int) -> float:

@@ -16,6 +16,16 @@ why: only a "fun_fact" nudge's "Know More" button actually goes anywhere).
 Until both templates are approved, this script runs but every send attempt
 fails cleanly (send_template_message returns {"sent": False, ...}) and is
 logged, not silently swallowed.
+
+Only picks from ["feature_highlight", "social_proof"] — "fun_fact" is
+handled by a separate submit/fetch pair (scripts/
+submit_nudge_funfact_batch.py + fetch_nudge_funfact_batch.py) that
+generates it via Anthropic's Message Batches API instead of a synchronous
+per-student call, since it's cheap, non-urgent work well suited to batch's
+~50%-cheaper async pricing. Excluding it here (rather than just leaving
+pick_next_nudge's default) keeps this script and the batch fetch script
+from racing to send the same student two nudges on one day — see
+pick_next_nudge's docstring.
 """
 import asyncio
 import sys
@@ -86,7 +96,7 @@ async def run() -> None:
                 skipped_gate += 1
                 continue
 
-            picked = await pick_next_nudge(db, student)
+            picked = await pick_next_nudge(db, student, nudge_types=["feature_highlight", "social_proof"])
             if picked is None:
                 skipped_no_content += 1
                 continue

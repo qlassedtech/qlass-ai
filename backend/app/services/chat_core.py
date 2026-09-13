@@ -386,6 +386,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         classification.llm_result.output_tokens, student.id,
         cache_write_tokens=classification.llm_result.cache_write_tokens,
         cache_read_tokens=classification.llm_result.cache_read_tokens,
+        feature="intent_classify",
     )
     if classification.relevance_llm_result is not None:
         cost_tracker.record_claude_usage(
@@ -393,6 +394,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             classification.relevance_llm_result.output_tokens, student.id,
             cache_write_tokens=classification.relevance_llm_result.cache_write_tokens,
             cache_read_tokens=classification.relevance_llm_result.cache_read_tokens,
+            feature="retrieval_relevance_classify",
         )
     intent = CANONICAL_COMMAND_INTENT.get(message_text.strip().lower(), classification.intent)
     # Confirmed live: classify_intent occasionally misclassifies a genuine
@@ -729,6 +731,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                     higher_relevance_result.output_tokens, student.id,
                     cache_write_tokens=higher_relevance_result.cache_write_tokens,
                     cache_read_tokens=higher_relevance_result.cache_read_tokens,
+                    feature="retrieval_relevance_classify",
                 )
                 relevant_chunks = [
                     higher_class_candidates[i - 1] for i in higher_excerpts if 1 <= i <= len(higher_class_candidates)
@@ -799,10 +802,12 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         cost_tracker.record_claude_usage(
             db, usage["main_model"], usage["main_input_tokens"], usage["main_output_tokens"], student.id,
             cache_write_tokens=usage["main_cache_write_tokens"], cache_read_tokens=usage["main_cache_read_tokens"],
+            feature="tutor_reply",
         )
         cost_tracker.record_claude_usage(
             db, usage["classify_model"], usage["classify_input_tokens"], usage["classify_output_tokens"], student.id,
             cache_write_tokens=usage["classify_cache_write_tokens"], cache_read_tokens=usage["classify_cache_read_tokens"],
+            feature="tutor_lang_classify",
         )
 
         # Soft weekly caps: voice/image/video are supplements, not the core
@@ -968,7 +973,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             cost_tracker.record_claude_usage(
                 db, translated_result.model, translated_result.input_tokens, translated_result.output_tokens,
                 student.id, cache_write_tokens=translated_result.cache_write_tokens,
-                cache_read_tokens=translated_result.cache_read_tokens,
+                cache_read_tokens=translated_result.cache_read_tokens, feature="translation",
             )
         else:
             translated = await translate_text(reply_text, "en-IN", detected_lang)
@@ -1049,6 +1054,7 @@ async def _generate_notes(db: Session, student: Student) -> str:
     cost_tracker.record_claude_usage(
         db, result.model, result.input_tokens, result.output_tokens, student.id,
         cache_write_tokens=result.cache_write_tokens, cache_read_tokens=result.cache_read_tokens,
+        feature="notes",
     )
     return f"📝 *Notes on what we've covered:*\n\n{result.text.strip()}"
 
@@ -1071,6 +1077,7 @@ async def _generate_worksheet(db: Session, student: Student, topic: str) -> str:
     cost_tracker.record_claude_usage(
         db, llm_result.model, llm_result.input_tokens, llm_result.output_tokens, student.id,
         cache_write_tokens=llm_result.cache_write_tokens, cache_read_tokens=llm_result.cache_read_tokens,
+        feature="worksheet_generate",
     )
     if not questions:
         return f"Sorry, I couldn't put together a worksheet on {topic} right now — try again in a bit?"

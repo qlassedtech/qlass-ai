@@ -653,6 +653,35 @@ class ProcessedWebhookMessage(Base):
     processed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
+class NudgeFunFactBatch(Base):
+    """
+    Tracks one Anthropic Message Batches API submission for "fun_fact"
+    re-engagement nudges (see app.services.nudges + scripts/
+    submit_nudge_funfact_batch.py / fetch_nudge_funfact_batch.py). Batches
+    are submit-then-fetch — this row is the reconciliation state between
+    those two separate cron runs, same idea as ProcessedWebhookMessage
+    above but for an outbound async job instead of an inbound webhook.
+
+    `requests` is [{"custom_id": ..., "student_id": ..., "chapter": ...}, ...]
+    — everything the fetch phase needs to map each batch result back to a
+    student and to what should be recorded as this nudge's "detail" (see
+    record_nudge_sent), without a second DB round trip. `status` starts
+    "submitted" and moves to "processed" once the fetch script has sent
+    (or skipped) every result — fetch only ever looks at status="submitted"
+    rows, so a batch is processed at most once no matter how many times the
+    fetch script re-runs while waiting on a still-in-progress batch.
+    """
+
+    __tablename__ = "nudge_funfact_batches"
+
+    id = Column(Integer, primary_key=True)
+    batch_id = Column(Text, nullable=False, unique=True)  # Anthropic Batch.id
+    status = Column(Text, nullable=False, default="submitted")  # submitted | processed
+    requests = Column(JSONType, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    processed_at = Column(TIMESTAMP(timezone=True))
+
+
 class CreditEvent(Base):
     __tablename__ = "credit_events"
 
@@ -660,6 +689,15 @@ class CreditEvent(Base):
     amount = Column(Numeric, nullable=False)  # positive = top-up, negative = deduction (INR)
     service = Column(Text)  # e.g. "claude_sonnet", "sarvam_tts" — null for top-ups
     raw_cost = Column(Numeric)  # actual provider cost before the markup multiplier
+    # Which product feature actually drove this Claude call (e.g.
+    # "tutor_reply", "quiz_generate", "diagram_critique") — see
+    # app.services.cost_tracker.record_claude_usage and
+    # app.services.analytics.get_ai_cost_breakdown. `service` above only
+    # ever captured the model TIER, not which feature spent it, so there
+    # was previously no way to see which feature actually drives spend.
+    # Nullable/backfill-safe — every pre-existing row has no feature label,
+    # same convention as tutor_style/phone_verified before it.
+    feature = Column(Text)
     student_id = Column(Integer, ForeignKey("students.id"))
     note = Column(Text)
     # A Razorpay payment_id (or other external transaction id) — set only
@@ -682,6 +720,9 @@ class SchoolCreditEvent(Base):
     amount = Column(Numeric, nullable=False)
     service = Column(Text)  # e.g. "workbook_pdf", "gamma_presentation" — null for top-ups
     raw_cost = Column(Numeric)
+    # Same purpose as CreditEvent.feature — which product feature drove
+    # this school-billed Claude call (e.g. "workbook", "roster_extraction").
+    feature = Column(Text)
     centre_id = Column(Integer, ForeignKey("centres.id"), nullable=False)
     note = Column(Text)
     # Same idempotency purpose as CreditEvent.external_ref — a Razorpay

@@ -22,7 +22,7 @@ from app.models.core import AuditLog, Centre, Chapter, ChatHistory, Classroom, C
 from app.services import audit_log, cost_tracker, school_billing
 from app.services.escalation import SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
-from app.services.analytics import get_school_analytics
+from app.services.analytics import get_ai_cost_breakdown, get_school_analytics
 from app.services.deletion import fulfill_deletion_request
 from app.services.otp import generate_and_store_otp, verify_otp, mark_otp_optional, consume_otp_optional, LOGIN_OTP_TEMPLATE_NAME
 from app.services.google_auth import GoogleAuthError, verify_google_id_token
@@ -911,6 +911,7 @@ async def _rows_from_roster_upload(
         if bill_centre_id is not None:
             school_billing.record_claude_usage(
                 db, bill_centre_id, "roster_extraction", llm_result.input_tokens, llm_result.output_tokens,
+                feature="roster_extraction",
             )
         return rows
 
@@ -928,6 +929,7 @@ async def _rows_from_roster_upload(
     if bill_centre_id is not None:
         school_billing.record_claude_usage(
             db, bill_centre_id, "roster_extraction", llm_result.input_tokens, llm_result.output_tokens,
+            feature="roster_extraction",
         )
     return rows
 
@@ -2180,7 +2182,8 @@ async def generate_workbook(
 
     questions, llm_result = await generate_workbook_questions(topic, body.class_, body.num_questions, board=body.board)
     school_billing.record_claude_usage(
-        db, teacher.centre_id, "workbook_pdf", llm_result.input_tokens, llm_result.output_tokens
+        db, teacher.centre_id, "workbook_pdf", llm_result.input_tokens, llm_result.output_tokens,
+        feature="workbook",
     )
     if not questions:
         raise HTTPException(status_code=502, detail="Couldn't generate questions for that topic — try again")
@@ -2295,7 +2298,8 @@ async def assign_quiz(
 
     questions_data, gen_result = await generate_quiz_questions(topic, effective_class, board=effective_board)
     school_billing.record_claude_usage(
-        db, teacher.centre_id, "quiz_assignment", gen_result.input_tokens, gen_result.output_tokens
+        db, teacher.centre_id, "quiz_assignment", gen_result.input_tokens, gen_result.output_tokens,
+        feature="quiz_generate",
     )
     if not questions_data:
         raise HTTPException(status_code=502, detail="Couldn't generate questions for that topic — try again")
@@ -2916,6 +2920,23 @@ def get_audit_log(
         }
         for r in rows
     ]
+
+
+@router.get("/admin/analytics/ai-costs")
+def get_ai_costs(
+    days: int = 30, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Per-feature (and per-model-tier) Claude spend breakdown — business-
+    sensitive billing/COGS data, not a per-school teaching-analytics view,
+    so this is gated the same as /admin/schools (the sales pipeline) rather
+    than /admin/analytics (which any school's own "admin" can see for their
+    own school): only Qlass staff or an organization admin should see what
+    Qlass itself is spending on AI, across every school.
+    """
+    if teacher.role not in ("super_admin", "org_admin"):
+        raise HTTPException(status_code=403, detail="Only Qlass staff or an organization admin can view AI cost analytics")
+    return get_ai_cost_breakdown(db, days=days)
 
 
 @router.get("/admin/schools")

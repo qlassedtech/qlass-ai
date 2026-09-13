@@ -8,7 +8,15 @@ app.services.chat_core). Three rotating types:
   textbook chunk (see app.services.retrieval) — never an ungrounded LLM
   guess, so it can't invent something wrong. Skipped for a class/board with
   no ingested content yet (see scripts/bulk_ingest_pdfs.py): thin coverage
-  should silently drop this nudge type, not send a made-up "fact".
+  should silently drop this nudge type, not send a made-up "fact". Its LLM
+  call is cheap, per-student, and non-urgent (no one is waiting on a fun
+  fact in real time), so it runs through Anthropic's Message Batches API
+  instead of a synchronous call in this daily script — see
+  scripts/submit_nudge_funfact_batch.py (submit) and
+  scripts/fetch_nudge_funfact_batch.py (fetch + send, on a later cron slot)
+  for that pipeline, and NudgeFunFactBatch (app.models.core) for the
+  reconciliation state between them. pick_next_nudge below therefore
+  excludes "fun_fact" when called from send_engagement_nudges.py.
 - "feature_highlight": a rotating call-out of a feature this student has
   access to but hasn't actually used yet (voice notes, photo homework,
   documents, video explanations) — the point is discovery, so a feature
@@ -31,6 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.core import Student
+from app.services import cost_tracker
 from app.services.llm_client import call_llm
 
 FUN_FACT_MODEL = "claude-haiku-4-5-20251001"  # short, narrow task — cheap tier is enough
@@ -154,37 +163,84 @@ NO_FACT_SENTINEL = "NO_FACT"
 # what produced the odd age-gap "fact" sent to a real student).
 FUN_FACT_MAX_ATTEMPTS = 4
 
+# Shared by both the synchronous path below (_generate_fun_fact) and the
+# Message Batches API submit path (scripts/submit_nudge_funfact_batch.py +
+# fetch_nudge_funfact_batch.py) — kept as one constant so both paths ask
+# the LLM the exact same question.
+FUN_FACT_SYSTEM_PROMPT = (
+    "You write a single, short, exciting WhatsApp message (max 2 sentences, one relevant emoji) "
+    "starting with \"Did you know?\" that shares one genuinely interesting, standalone fact drawn ONLY "
+    "from the textbook excerpt given. Never add any fact, number, or claim not present in the excerpt. "
+    "Write for a curious school student, not a textbook.\n\n"
+    "Many excerpts are just word-problem setups, exercise instructions, or answer keys — these have "
+    "NO real fact in them, just incidental numbers or names (e.g. a word problem naming two people's "
+    "ages to set up a subtraction question is NOT an interesting fact about age). If the excerpt has "
+    f"no genuinely interesting, standalone fact worth sharing, respond with exactly \"{NO_FACT_SENTINEL}\" "
+    "and nothing else — do not force a fact out of it."
+)
 
-async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] | None:
-    """Returns (message, chapter) so the chapter can be recorded as this
-    nudge's detail — see get_know_more_reply."""
-    if not student.class_:
-        return None
-    rows = db.execute(
+
+def _fun_fact_candidate_chunks(db: Session, student: Student, limit: int = FUN_FACT_MAX_ATTEMPTS):
+    """Up to `limit` random textbook chunks for this student's class/board,
+    as (content, subject, chapter) rows — the same retrieval used by both
+    the synchronous and batch fun_fact paths. Empty when nothing's been
+    ingested yet for this class/board (see the module docstring)."""
+    return db.execute(
         text(
             "SELECT dc.content, d.subject, d.chapter FROM document_chunks dc "
             "JOIN documents d ON d.id = dc.document_id "
             "WHERE d.class = :class_ AND (:board IS NULL OR d.board = :board) "
             "ORDER BY random() LIMIT :limit"
         ),
-        {"class_": student.class_, "board": student.board, "limit": FUN_FACT_MAX_ATTEMPTS},
+        {"class_": student.class_, "board": student.board, "limit": limit},
     ).all()
-    system_prompt = (
-        "You write a single, short, exciting WhatsApp message (max 2 sentences, one relevant emoji) "
-        "starting with \"Did you know?\" that shares one genuinely interesting, standalone fact drawn ONLY "
-        "from the textbook excerpt given. Never add any fact, number, or claim not present in the excerpt. "
-        "Write for a curious school student, not a textbook.\n\n"
-        "Many excerpts are just word-problem setups, exercise instructions, or answer keys — these have "
-        "NO real fact in them, just incidental numbers or names (e.g. a word problem naming two people's "
-        "ages to set up a subtraction question is NOT an interesting fact about age). If the excerpt has "
-        f"no genuinely interesting, standalone fact worth sharing, respond with exactly \"{NO_FACT_SENTINEL}\" "
-        "and nothing else — do not force a fact out of it."
-    )
+
+
+def _fun_fact_user_message(subject: str, chapter: str, content: str) -> str:
+    return f"Subject: {subject}\nChapter: {chapter}\n\nExcerpt:\n{content[:1200]}"
+
+
+def eligible_for_fun_fact(student: Student) -> bool:
+    """Whether this student is due a "fun_fact" nudge today — same cooldown
+    check pick_next_nudge uses, exposed standalone so
+    scripts/submit_nudge_funfact_batch.py can filter candidates before
+    building the batch, without duplicating _eligible_types."""
+    return bool(student.class_) and "fun_fact" in _eligible_types(student)
+
+
+async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] | None:
+    """Returns (message, chapter) so the chapter can be recorded as this
+    nudge's detail — see get_know_more_reply.
+
+    This is the synchronous, one-student-at-a-time path, still used by
+    pick_next_nudge for callers that want an immediate answer. The daily
+    cron (scripts/send_engagement_nudges.py) no longer calls this for
+    fun_fact — that type moved to the Message Batches API (see
+    scripts/submit_nudge_funfact_batch.py / fetch_nudge_funfact_batch.py)
+    since it's cheap, non-urgent, per-student LLM work exactly suited to
+    batch's ~50%-cheaper async pricing. Kept here as the reference
+    implementation the batch path's prompt-building mirrors, and in case
+    anything else ever wants a one-off synchronous fun fact.
+    """
+    if not student.class_:
+        return None
+    rows = _fun_fact_candidate_chunks(db, student)
     for content, subject, chapter in rows:
         result = await call_llm(
-            system_prompt,
-            [{"role": "user", "content": f"Subject: {subject}\nChapter: {chapter}\n\nExcerpt:\n{content[:1200]}"}],
+            FUN_FACT_SYSTEM_PROMPT,
+            [{"role": "user", "content": _fun_fact_user_message(subject, chapter, content)}],
             model=FUN_FACT_MODEL,
+        )
+        # Billed as platform-absorbed (amount=0), not to the student's own
+        # wallet — this is an unprompted, proactive marketing message, not
+        # something the student asked for, so Qlass eats the real cost
+        # rather than charging the recipient's credits for it. Still
+        # recorded with the real raw_cost/feature so it shows up correctly
+        # in get_ai_cost_breakdown instead of being invisible COGS.
+        cost_tracker.record_platform_claude_usage(
+            db, result.model, result.input_tokens, result.output_tokens, student.id,
+            cache_write_tokens=result.cache_write_tokens, cache_read_tokens=result.cache_read_tokens,
+            feature="nudge_funfact",
         )
         message = result.text.strip()
         if message and NO_FACT_SENTINEL not in message:
@@ -192,7 +248,9 @@ async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] |
     return None
 
 
-async def pick_next_nudge(db: Session, student: Student) -> tuple[str, str, str | None] | None:
+async def pick_next_nudge(
+    db: Session, student: Student, nudge_types: list[str] = NUDGE_TYPES,
+) -> tuple[str, str, str | None] | None:
     """
     Returns (nudge_type, message_text, detail) for the next nudge this
     student should get, or None if nothing is eligible right now (every
@@ -201,8 +259,18 @@ async def pick_next_nudge(db: Session, student: Student) -> tuple[str, str, str 
     or feature_highlight when every enabled feature is already in active
     use). `detail` is what record_nudge_sent should store alongside the
     timestamp, so a later "Know More" tap knows what was actually sent.
+
+    `nudge_types` restricts which types this call considers — defaults to
+    all of them (NUDGE_TYPES). scripts/send_engagement_nudges.py passes
+    ["feature_highlight", "social_proof"] since "fun_fact" is generated
+    asynchronously via the Message Batches API on its own schedule now
+    (see scripts/submit_nudge_funfact_batch.py / fetch_nudge_funfact_batch.py)
+    — this keeps the two pipelines from racing to send a student two nudges
+    on the same day (each type still respects its own NUDGE_COOLDOWN_DAYS
+    independently either way; this only controls which types THIS call
+    site's random pick draws from).
     """
-    eligible = _eligible_types(student)
+    eligible = [t for t in _eligible_types(student) if t in nudge_types]
     random.shuffle(eligible)  # don't always try the same type first when several are eligible
     for nudge_type in eligible:
         if nudge_type == "feature_highlight":

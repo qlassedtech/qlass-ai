@@ -24,6 +24,11 @@ PRICING = {
     # app.services.roster_extraction) is a narrow structured-parsing task,
     # not creative generation, so it deliberately uses the cheap tier.
     "roster_extraction": {"input_per_1k_tokens": 0.07, "output_per_1k_tokens": 0.35},
+    # Haiku rates — see QUIZ_MODEL in app.services.quiz_service. Was missing
+    # entirely (the call site passed "quiz_assignment" as `service` with no
+    # matching PRICING key), so every teacher "assign quiz to class" request
+    # crashed with a KeyError right after generating the questions.
+    "quiz_assignment": {"input_per_1k_tokens": 0.07, "output_per_1k_tokens": 0.35},
 }
 
 # Confirmed from the real Qlass Gamma account: Pro plan, ₹1300/month for
@@ -67,14 +72,23 @@ def add_trial_credits(db: Session, centre_id: int) -> float:
 
 
 def record_claude_usage(
-    db: Session, centre_id: int, service: str, input_tokens: int, output_tokens: int
+    db: Session, centre_id: int, service: str, input_tokens: int, output_tokens: int,
+    feature: str | None = None,
 ) -> float:
+    """
+    `feature` is an optional short label (e.g. "workbook", "roster_extraction",
+    "quiz_generate") for per-feature spend visibility — see
+    app.services.cost_tracker.record_claude_usage's docstring (same idea,
+    just on the school ledger) and app.services.analytics.get_ai_cost_breakdown.
+    Kept separate from `service`, which is this ledger's model-tier/PRICING
+    key, not a feature name.
+    """
     rates = PRICING[service]
     raw_cost = (input_tokens / 1000) * rates["input_per_1k_tokens"] + (output_tokens / 1000) * rates["output_per_1k_tokens"]
     if raw_cost <= 0:
         return get_balance(db, centre_id)
     db.add(SchoolCreditEvent(
-        amount=-raw_cost * MARKUP_MULTIPLIER, service=service, raw_cost=raw_cost, centre_id=centre_id,
+        amount=-raw_cost * MARKUP_MULTIPLIER, service=service, raw_cost=raw_cost, centre_id=centre_id, feature=feature,
     ))
     db.commit()
     return get_balance(db, centre_id)

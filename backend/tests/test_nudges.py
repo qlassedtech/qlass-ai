@@ -115,6 +115,11 @@ async def test_fun_fact_is_grounded_in_a_real_retrieved_chunk(pg_db_session, mon
 
     class FakeResult:
         text = "Did you know? Ice floats because it's less dense than liquid water! 🧊"
+        model = "claude-haiku-4-5-20251001"
+        input_tokens = 50
+        output_tokens = 20
+        cache_write_tokens = 0
+        cache_read_tokens = 0
 
     async def fake_call_llm(system_prompt, messages, model):
         assert "Water expands" in messages[0]["content"]

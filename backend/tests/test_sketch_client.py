@@ -13,7 +13,7 @@ def _result(scene, *, model="claude-sonnet-4-6", input_tokens=10, output_tokens=
 
 def _ok_critique(input_tokens=3, output_tokens=1) -> LLMResult:
     return LLMResult(
-        text="OK", model="claude-sonnet-4-6",
+        text="OK", model="claude-haiku-4-5-20251001",
         input_tokens=input_tokens, output_tokens=output_tokens, cache_write_tokens=0, cache_read_tokens=0,
     )
 
@@ -49,12 +49,31 @@ async def test_valid_json_scene_parses_correctly_and_critique_ok_keeps_it(monkey
     monkeypatch.setattr(
         sketch_client, "call_llm", _sequenced_call_llm(_result(_VALID_SCENE), _ok_critique()),
     )
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene == _VALID_SCENE
-    # combined usage across both calls
-    assert result.input_tokens == 10 + 3
-    assert result.output_tokens == 10 + 1
+    # each pass's usage returned separately now (not combined)
+    assert generation_result.input_tokens == 10
+    assert critique_result.input_tokens == 3
+    assert critique_result.output_tokens == 1
+
+
+async def test_generation_uses_sonnet_and_critique_uses_haiku(monkeypatch):
+    # The critique pass is a narrower, rubric-driven check (not open-ended
+    # diagram design), so it runs on the cheap Haiku tier while generation
+    # stays on Sonnet — this is what actually halves per-diagram cost.
+    models_seen = []
+
+    async def fake_call_llm(system_prompt, messages, model):
+        models_seen.append(model)
+        return (_result(_VALID_SCENE) if len(models_seen) == 1 else _ok_critique())
+
+    monkeypatch.setattr(sketch_client, "call_llm", fake_call_llm)
+    await sketch_client.generate_sketch_scene("a plant cell")
+
+    assert models_seen == [sketch_client.SKETCH_MODEL, sketch_client.SKETCH_CRITIQUE_MODEL]
+    assert sketch_client.SKETCH_CRITIQUE_MODEL == "claude-haiku-4-5-20251001"
+    assert sketch_client.SKETCH_MODEL == "claude-sonnet-4-6"
 
 
 async def test_markdown_fenced_json_is_stripped_and_parses(monkeypatch):
@@ -67,10 +86,11 @@ async def test_markdown_fenced_json_is_stripped_and_parses(monkeypatch):
             _ok_critique(),
         ),
     )
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene == _VALID_SCENE
-    assert result.input_tokens == 8 + 3
+    assert generation_result.input_tokens == 8
+    assert critique_result.input_tokens == 3
 
 
 async def test_malformed_non_json_response_returns_none_none(monkeypatch):
@@ -78,10 +98,11 @@ async def test_malformed_non_json_response_returns_none_none(monkeypatch):
         return LLMResult(text="not json at all, sorry", model="claude-sonnet-4-6", input_tokens=5, output_tokens=5)
 
     monkeypatch.setattr(sketch_client, "call_llm", fake_call_llm)
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene is None
-    assert result is None
+    assert generation_result is None
+    assert critique_result is None
 
 
 async def test_unrecognized_type_element_is_dropped_but_scene_still_usable(monkeypatch):
@@ -98,10 +119,11 @@ async def test_unrecognized_type_element_is_dropped_but_scene_still_usable(monke
         "call_llm",
         _sequenced_call_llm(_result(scene_with_one_bad_element), _ok_critique()),
     )
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene == _VALID_SCENE  # the bad "sparkle" element was dropped
-    assert result is not None
+    assert generation_result is not None
+    assert critique_result is not None
 
 
 async def test_scene_with_only_invalid_elements_returns_none_none(monkeypatch):
@@ -109,10 +131,11 @@ async def test_scene_with_only_invalid_elements_returns_none_none(monkeypatch):
         return _result([{"type": "sparkle", "x": 1, "y": 2}, {"type": "rect", "x": "not-a-number"}])
 
     monkeypatch.setattr(sketch_client, "call_llm", fake_call_llm)
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene is None
-    assert result is None
+    assert generation_result is None
+    assert critique_result is None
     # First-pass parse failure short-circuits before any critique call is
     # attempted — nothing left in `calls` to pop means a second call would
     # have raised IndexError, so this also implicitly asserts that.
@@ -132,11 +155,11 @@ async def test_critique_returns_ok_keeps_collision_repaired_scene_unchanged(monk
     monkeypatch.setattr(
         sketch_client, "call_llm", _sequenced_call_llm(_result(colliding_scene), _ok_critique()),
     )
-    scene, result = await sketch_client.generate_sketch_scene("two things")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("two things")
 
     assert scene[0]["y"] == 100  # first label untouched
     assert scene[1]["y"] != 101  # second label moved to clear the collision
-    assert result is not None
+    assert critique_result is not None
 
 
 async def test_critique_returns_valid_correction_replaces_scene(monkeypatch):
@@ -151,28 +174,34 @@ async def test_critique_returns_valid_correction_replaces_scene(monkeypatch):
     monkeypatch.setattr(
         sketch_client,
         "call_llm",
-        _sequenced_call_llm(_result(original_scene), _result(corrected_scene, input_tokens=15, output_tokens=15)),
+        _sequenced_call_llm(
+            _result(original_scene),
+            _result(corrected_scene, model="claude-haiku-4-5-20251001", input_tokens=15, output_tokens=15),
+        ),
     )
-    scene, result = await sketch_client.generate_sketch_scene("projectile at peak")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("projectile at peak")
 
     assert scene == corrected_scene
-    assert result.input_tokens == 10 + 15
-    assert result.output_tokens == 10 + 15
+    assert generation_result.input_tokens == 10
+    assert critique_result.input_tokens == 15
+    assert critique_result.output_tokens == 15
 
 
 async def test_critique_returns_invalid_correction_falls_back_to_original(monkeypatch, caplog):
     original_scene = _VALID_SCENE
     garbage_critique = LLMResult(
-        text="not JSON and not the literal OK either", model="claude-sonnet-4-6",
+        text="not JSON and not the literal OK either", model="claude-haiku-4-5-20251001",
         input_tokens=4, output_tokens=4,
     )
     monkeypatch.setattr(
         sketch_client, "call_llm", _sequenced_call_llm(_result(original_scene), garbage_critique),
     )
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene == original_scene
-    assert result.input_tokens == 10 + 4  # critique call is still billed even though its output was discarded
+    # critique call is still billed even though its output was discarded
+    assert generation_result.input_tokens == 10
+    assert critique_result.input_tokens == 4
 
 
 async def test_critique_call_raising_falls_back_to_original_without_billing_the_failed_call(monkeypatch):
@@ -188,10 +217,11 @@ async def test_critique_call_raising_falls_back_to_original_without_billing_the_
         raise RuntimeError("transient network blip")
 
     monkeypatch.setattr(sketch_client, "call_llm", fake_call_llm_seq)
-    scene, result = await sketch_client.generate_sketch_scene("a plant cell")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("a plant cell")
 
     assert scene == _VALID_SCENE
-    assert result.input_tokens == 10  # only the (successful) first call's usage
+    assert generation_result.input_tokens == 10  # only the (successful) first call's usage
+    assert critique_result is None  # the failed second call was never billed
 
 
 # --- _resolve_text_collisions in isolation ---------------------------------
@@ -292,10 +322,13 @@ async def test_pipeline_fixes_both_layout_collision_and_domain_inconsistency(mon
     monkeypatch.setattr(
         sketch_client,
         "call_llm",
-        _sequenced_call_llm(_result(buggy_scene), _result(critique_corrected, input_tokens=20, output_tokens=20)),
+        _sequenced_call_llm(
+            _result(buggy_scene),
+            _result(critique_corrected, model="claude-haiku-4-5-20251001", input_tokens=20, output_tokens=20),
+        ),
     )
 
-    scene, result = await sketch_client.generate_sketch_scene("projectile motion peak + chloroplast labels")
+    scene, generation_result, critique_result = await sketch_client.generate_sketch_scene("projectile motion peak + chloroplast labels")
 
     # Domain bug fixed: no vertical arrow left in the scene.
     arrows = [e for e in scene if e["type"] == "arrow"]
@@ -307,4 +340,5 @@ async def test_pipeline_fixes_both_layout_collision_and_domain_inconsistency(mon
     light = next(e for e in text_elements if e["text"] == "Light Reactions")
     assert not sketch_client._boxes_overlap(sketch_client._text_box(stroma), sketch_client._text_box(light))
 
-    assert result.input_tokens == 10 + 20
+    assert generation_result.input_tokens == 10
+    assert critique_result.input_tokens == 20

@@ -163,12 +163,16 @@ def test_image_prompt_reply_sends_diagram_frame_before_reply_text(db_session, mo
 
     async def fake_generate_sketch_scene(prompt):
         assert prompt == "a plant cell"
-        # generate_sketch_scene now bills two Claude calls (generation +
-        # critique) combined into one LLMResult — see sketch_client's
-        # _combine_llm_results — but that's an internal detail this
-        # router-level test doesn't need to exercise; it just mocks the
-        # already-combined result the same way it always mocked one call.
-        return scene, LLMResult(text="...", model="claude-sonnet-4-6", input_tokens=5, output_tokens=5)
+        # generate_sketch_scene makes two Claude calls (generation +
+        # critique) and returns each pass's usage separately so the
+        # caller can bill — and tag — them individually; this router-level
+        # test just mocks both passes rather than exercising the real
+        # sketch_client pipeline.
+        return (
+            scene,
+            LLMResult(text="...", model="claude-sonnet-4-6", input_tokens=5, output_tokens=5),
+            LLMResult(text="OK", model="claude-haiku-4-5-20251001", input_tokens=2, output_tokens=1),
+        )
 
     async def fake_synthesize(text, language_code=None, speaker=None):
         return b"fake-opus-bytes"
@@ -244,7 +248,7 @@ def test_failed_sketch_generation_does_not_send_diagram_or_fail_the_turn(db_sess
         return ChatTurnResult(reply_text="Here's the plant cell.", image_prompt="a plant cell")
 
     async def fake_generate_sketch_scene_fails(prompt):
-        return None, None
+        return None, None, None
 
     async def fake_synthesize(text, language_code=None, speaker=None):
         return b"fake-opus-bytes"
