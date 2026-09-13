@@ -53,6 +53,7 @@ from app.services.progress_report import (
 from app.services.quiz_flow import handle_quiz_answer, start_mock_test, start_quiz, stop_quiz
 from app.services.quiz_service import generate_quiz_questions
 from app.services.rate_limit import clear_pending_worksheet_answers, get_pending_worksheet_answers, set_pending_worksheet_answers
+from app.services import revision_scheduler
 from app.services.referral import (
     generate_referral_code, evaluate_referral_milestones, is_worth_asking_to_refer,
     REFERRAL_SIGNUP_BONUS, REFERRAL_LIFETIME_CAP,
@@ -857,6 +858,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
                 question_text=last_assistant_turn, given_answer=message_text, is_correct=result["correct"],
             ))
             db.commit()
+            if result["topic"]:
+                revision_scheduler.on_topic_result(db, student.id, result["topic"], is_correct=bool(result["correct"]))
 
         # Track a run of consecutive off-level questions (e.g. registered as
         # class 8 but repeatedly asking Class 12 content) and, after a real

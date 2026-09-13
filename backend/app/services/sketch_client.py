@@ -81,6 +81,18 @@ a vertical velocity arrow there — the correct diagram shows NO vertical arrow 
 only the horizontal one). Every arrow and every label must agree with each other and with the \
 real physical/scientific facts of what's being illustrated, not just look plausible in isolation.
 
+MIND MAP / CONCEPT MAP layout: if the requested prompt describes a mind map, concept map, or \
+summary map (e.g. it says "mind map", "concept map", "summary map", or "central topic node with \
+branching sub-topic nodes"), lay it out radially rather than as a labeled-parts diagram: one \
+central node (a "rect" or "ellipse") roughly in the middle of the canvas holding or labeled with \
+the main topic, and 3-6 branch nodes (also "rect" or "ellipse") arranged around it — spread \
+roughly evenly in a circle so they don't cluster on one side. Connect every branch node to the \
+central node with its own "line" or "arrow" element. Give every node (central and branch) a \
+short "text" label placed near it, following the same collision-avoidance spacing rules above. \
+Stay within the {_MAX_ELEMENTS}-element budget — with a central node plus up to 6 branches each \
+needing a shape, a connector, and a label, keep branch count near the middle of the 3-6 range \
+(e.g. 4-5) unless the topic clearly calls for more/fewer.
+
 Example 1 — prompt "the water cycle":
 [
   {{"type": "ellipse", "x": 80, "y": 220, "rx": 60, "ry": 30}},

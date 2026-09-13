@@ -18,7 +18,7 @@ from sqlalchemy.orm.query import Query
 from app.business_rules import TUTOR_LEVEL_MODELS
 from app.config import settings
 from app.database import get_db
-from app.models.core import AuditLog, Centre, Chapter, ChatHistory, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
+from app.models.core import AuditLog, Centre, Chapter, ChatHistory, Classroom, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
 from app.services import audit_log, cost_tracker, school_billing
 from app.services.escalation import SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
@@ -1233,6 +1233,198 @@ def student_progress(
     activity = get_activity_stats(db, student.id)
     coverage = get_chapter_coverage(db, student)
     return {"stats": stats, "activity": activity, "coverage": coverage}
+
+
+def _classroom_to_dict(classroom: Classroom, student_count: int | None = None) -> dict:
+    return {
+        "id": classroom.id,
+        "centre_id": classroom.centre_id,
+        "teacher_id": classroom.teacher_id,
+        "name": classroom.name,
+        "board": classroom.board,
+        "class": classroom.class_,
+        "subject": classroom.subject,
+        "created_at": classroom.created_at,
+        "student_count": student_count,
+    }
+
+
+def _scoped_classrooms(db: Session, teacher: Teacher) -> Query:
+    """
+    Same tenancy shape as _scoped_students above, just for classrooms
+    instead of students — a school's own teacher/admin sees only their own
+    school's classrooms (not just the ones they personally created, so a
+    colleague's classroom is still visible), org_admin sees every
+    classroom across their organization's schools, and only super_admin
+    sees across the whole platform.
+    """
+    query = db.query(Classroom)
+    if teacher.role == "super_admin":
+        return query
+    if teacher.role == "org_admin":
+        return query.filter(Classroom.centre_id.in_(_org_centre_ids(db, teacher.organization_id)))
+    return query.filter(Classroom.centre_id == teacher.centre_id)
+
+
+def _get_scoped_classroom_or_404(db: Session, teacher: Teacher, classroom_id: int) -> Classroom:
+    classroom = _scoped_classrooms(db, teacher).filter(Classroom.id == classroom_id).first()
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom not found")
+    return classroom
+
+
+class ClassroomCreateRequest(BaseModel):
+    name: str
+    board: str | None = None
+    class_: str | None = None
+    subject: str | None = None
+    # Only used (and required) for org_admin/super_admin, who have no
+    # single centre of their own to default to — mirrors
+    # _resolve_centre_for_read's own resolution rule.
+    centre_id: int | None = None
+
+
+@router.post("/admin/classrooms")
+def create_classroom(
+    body: ClassroomCreateRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    centre = _resolve_centre_for_read(db, teacher, body.centre_id)
+    classroom = Classroom(
+        centre_id=centre.id, teacher_id=teacher.id, name=body.name, board=body.board,
+        class_=body.class_, subject=body.subject,
+    )
+    db.add(classroom)
+    db.commit()
+    db.refresh(classroom)
+    audit_log.record(db, teacher.id, "create_classroom", "classroom", classroom.id, detail=classroom.name)
+    return _classroom_to_dict(classroom, student_count=0)
+
+
+@router.get("/admin/classrooms")
+def list_classrooms(db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)):
+    classrooms = _scoped_classrooms(db, teacher).order_by(Classroom.id).all()
+    classroom_ids = [c.id for c in classrooms]
+    counts = dict(
+        db.query(Student.classroom_id, func.count(Student.id))
+        .filter(Student.classroom_id.in_(classroom_ids), Student.is_staff_profile.is_(False), Student.is_deleted.is_(False))
+        .group_by(Student.classroom_id)
+        .all()
+    )
+    return [_classroom_to_dict(c, student_count=counts.get(c.id, 0)) for c in classrooms]
+
+
+@router.get("/admin/classrooms/{classroom_id}")
+def get_classroom(
+    classroom_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    """
+    Roster + cohort-level "who needs help" view — reuses
+    get_school_analytics (the same aggregation the whole-school Analytics
+    page already uses) against just this classroom's own student_ids,
+    instead of building a second, parallel aggregation for a narrower
+    group of students.
+    """
+    classroom = _get_scoped_classroom_or_404(db, teacher, classroom_id)
+    roster = _scoped_students(db, teacher).filter(Student.classroom_id == classroom.id).order_by(Student.id).all()
+    student_ids = [s.id for s in roster]
+    analytics = get_school_analytics(db, student_ids, centre_id=None)
+    return {
+        "classroom": _classroom_to_dict(classroom, student_count=len(roster)),
+        "students": [_student_to_dict(db, s) for s in roster],
+        "analytics": analytics,
+    }
+
+
+class ClassroomUpdateRequest(BaseModel):
+    name: str | None = None
+    board: str | None = None
+    class_: str | None = None
+    subject: str | None = None
+
+
+@router.patch("/admin/classrooms/{classroom_id}")
+def update_classroom(
+    classroom_id: int, body: ClassroomUpdateRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    classroom = _get_scoped_classroom_or_404(db, teacher, classroom_id)
+    if body.name is not None:
+        classroom.name = body.name
+    if body.board is not None:
+        classroom.board = body.board
+    if body.class_ is not None:
+        classroom.class_ = body.class_
+    if body.subject is not None:
+        classroom.subject = body.subject
+    db.commit()
+    student_count = (
+        _scoped_students(db, teacher).filter(Student.classroom_id == classroom.id).with_entities(Student.id).count()
+    )
+    return _classroom_to_dict(classroom, student_count=student_count)
+
+
+@router.delete("/admin/classrooms/{classroom_id}")
+def delete_classroom(
+    classroom_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    classroom = _get_scoped_classroom_or_404(db, teacher, classroom_id)
+    # Unassign every student first — deleting the classroom row out from
+    # under them would otherwise either leave a dangling FK or (depending
+    # on the DB) orphan them with a reference to a row that no longer
+    # exists; this way they just fall back to "no classroom", same as a
+    # student who was never assigned one.
+    db.query(Student).filter(Student.classroom_id == classroom.id).update({Student.classroom_id: None})
+    db.delete(classroom)
+    db.commit()
+    audit_log.record(db, teacher.id, "delete_classroom", "classroom", classroom_id, detail=classroom.name)
+    return {"deleted": True}
+
+
+class AssignClassroomStudentsRequest(BaseModel):
+    student_ids: list[int]
+
+
+@router.post("/admin/classrooms/{classroom_id}/students")
+def assign_classroom_students(
+    classroom_id: int, body: AssignClassroomStudentsRequest, db: Session = Depends(get_db),
+    teacher: Teacher = Depends(get_current_teacher),
+):
+    classroom = _get_scoped_classroom_or_404(db, teacher, classroom_id)
+    assigned = []
+    for student_id in body.student_ids:
+        # _get_scoped_student_or_404 already 404s on a student outside the
+        # caller's own visibility (e.g. another school entirely); the
+        # explicit centre_id check below additionally rejects a student
+        # from a DIFFERENT school under the SAME organization/platform
+        # scope (e.g. an org_admin who can see both schools) — a classroom
+        # can only ever hold students from its own centre.
+        student = _get_scoped_student_or_404(db, teacher, student_id)
+        if student.centre_id != classroom.centre_id:
+            raise HTTPException(
+                status_code=400, detail=f"Student {student_id} does not belong to this classroom's school",
+            )
+        student.classroom_id = classroom.id
+        assigned.append(student.id)
+    db.commit()
+    audit_log.record(
+        db, teacher.id, "assign_classroom_students", "classroom", classroom.id,
+        detail=f"student_ids={assigned}",
+    )
+    return {"assigned": assigned}
+
+
+@router.delete("/admin/classrooms/{classroom_id}/students/{student_id}")
+def unassign_classroom_student(
+    classroom_id: int, student_id: int, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher),
+):
+    classroom = _get_scoped_classroom_or_404(db, teacher, classroom_id)
+    student = _get_scoped_student_or_404(db, teacher, student_id)
+    if student.classroom_id != classroom.id:
+        raise HTTPException(status_code=404, detail="Student is not in this classroom")
+    student.classroom_id = None
+    db.commit()
+    audit_log.record(db, teacher.id, "unassign_classroom_student", "classroom", classroom.id, detail=str(student_id))
+    return {"unassigned": True}
 
 
 class DigestRequest(BaseModel):

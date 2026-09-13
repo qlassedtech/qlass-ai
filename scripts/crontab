@@ -16,6 +16,9 @@ PY=/usr/share/nginx/aitutor.qlass.in/public_python_aios/venv/bin/python
 # Engagement nudges — daily 18:00 IST
 0 18 * * *   cd $APP && $PY scripts/send_engagement_nudges.py >> logs/cron-engagement.log 2>&1
 
+# Spaced-repetition revision reminders — daily 12:30 IST
+30 12 * * *  cd $APP && $PY scripts/send_revision_reminders.py >> logs/cron-revision.log 2>&1
+
 # Habit nudges — daily 19:00 IST
 0 19 * * *   cd $APP && $PY scripts/send_habit_nudges.py >> logs/cron-habit.log 2>&1
 

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.core import Answer, Question, Quiz, Student, TopicProgress
-from app.services import cost_tracker
+from app.services import cost_tracker, revision_scheduler
 from app.services.quiz_service import MOCK_TEST_QUESTION_COUNT, generate_quiz_questions, grade_answer
 
 """
@@ -183,6 +183,7 @@ async def handle_quiz_answer(db: Session, student: Student, message_text: str, q
                 question_text=missed_question.question_text if missed_question else None,
                 given_answer=answer.given_answer, is_correct=False,
             ))
+            revision_scheduler.on_topic_result(db, student.id, quiz_topic_label, is_correct=False)
     db.commit()
 
     skip_note = f" ({skipped} skipped)" if skipped else ""

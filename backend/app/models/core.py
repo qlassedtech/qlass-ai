@@ -76,6 +76,36 @@ class Centre(Base):
     students = relationship("Student", back_populates="centre")
     teachers = relationship("Teacher", back_populates="centre")
     organization = relationship("Organization", back_populates="centres")
+    classrooms = relationship("Classroom", back_populates="centre")
+
+
+class Classroom(Base):
+    """
+    A teacher-created cohort narrower than a whole Centre (school) — e.g.
+    "Class 10A Physics" — that a subset of the school's students can be
+    assigned to (see Student.classroom_id) so their teacher can view
+    roster-level progress for just that group (see
+    app.services.analytics.get_school_analytics, called with this
+    classroom's own student_ids). teacher_id is the owning/creating
+    teacher; visibility for GET /admin/classrooms still follows the same
+    centre/org/platform scoping as everything else in this file (see
+    admin._scoped_students), not just the owning teacher, so another
+    teacher at the same school can see it too.
+    """
+    __tablename__ = "classrooms"
+
+    id = Column(Integer, primary_key=True)
+    centre_id = Column(Integer, ForeignKey("centres.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    board = Column(Text)
+    class_ = Column("class", Text)
+    subject = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    centre = relationship("Centre", back_populates="classrooms")
+    teacher = relationship("Teacher", back_populates="classrooms")
+    students = relationship("Student", back_populates="classroom")
 
 
 class Student(Base):
@@ -125,6 +155,11 @@ class Student(Base):
     school = Column(Text)
     preferred_language = Column(Text, default="en-IN")
     centre_id = Column(Integer, ForeignKey("centres.id"))
+    # Optional finer-grained cohort within this student's own centre — see
+    # the Classroom model. Null for a student not (yet) assigned to one;
+    # assignment is only ever allowed within the student's own centre_id
+    # (see admin.assign_classroom_students).
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"))
     pending_profile_field = Column(Text)
     state = Column(Text, default="Bihar")
     features = Column(
@@ -252,6 +287,7 @@ class Student(Base):
         return bool((self.features or {}).get(name))
 
     centre = relationship("Centre", back_populates="students")
+    classroom = relationship("Classroom", back_populates="students")
     chat_history = relationship("ChatHistory", back_populates="student")
     parent = relationship("Parent", back_populates="student", uselist=False)
 
@@ -339,6 +375,7 @@ class Teacher(Base):
 
     centre = relationship("Centre", back_populates="teachers")
     organization = relationship("Organization")
+    classrooms = relationship("Classroom", back_populates="teacher")
 
 
 class Subject(Base):
@@ -555,15 +592,6 @@ class Notification(Base):
     sent_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
-class StudyPlan(Base):
-    __tablename__ = "study_plans"
-
-    id = Column(Integer, primary_key=True)
-    student_id = Column(Integer, ForeignKey("students.id"))
-    plan_json = Column(JSONType)
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-
-
 class Payment(Base):
     __tablename__ = "payments"
 
@@ -592,6 +620,24 @@ class TopicProgress(Base):
     question_text = Column(Text)
     given_answer = Column(Text)
     is_correct = Column(Boolean)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class RevisionSchedule(Base):
+    """
+    One spaced-repetition entry per (student, topic) — see
+    app.services.revision_scheduler for the fixed interval ladder that
+    drives due_at/interval_stage, and scripts/send_revision_reminders.py for
+    the daily cron job that nudges students once a row is due.
+    """
+    __tablename__ = "revision_schedule"
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    topic = Column(Text, nullable=False)
+    due_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    interval_stage = Column(Integer, nullable=False, default=0)
+    last_reviewed_at = Column(TIMESTAMP(timezone=True))
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 

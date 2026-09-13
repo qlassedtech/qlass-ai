@@ -98,6 +98,9 @@ export default function Layout() {
           <NavLink to="/students" className={({ isActive }) => (isActive ? "active" : "")}>
             Student Roster
           </NavLink>
+          <NavLink to="/classrooms" className={({ isActive }) => (isActive ? "active" : "")}>
+            Classrooms
+          </NavLink>
           <NavLink to="/bulk-upload" className={({ isActive }) => (isActive ? "active" : "")}>
             Bulk Enrollment
           </NavLink>

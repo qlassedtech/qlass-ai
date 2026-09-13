@@ -272,6 +272,24 @@ export interface Analytics {
   }[];
 }
 
+export interface Classroom {
+  id: number;
+  centre_id: number;
+  teacher_id: number;
+  name: string;
+  board: string | null;
+  class: string | null;
+  subject: string | null;
+  created_at: string;
+  student_count: number | null;
+}
+
+export interface ClassroomDetail {
+  classroom: Classroom;
+  students: Student[];
+  analytics: Analytics;
+}
+
 export interface DeletionRequest {
   id: number;
   name: string;
@@ -524,6 +542,24 @@ export const api = {
   fulfillDeletion: (id: number) =>
     request(`/admin/students/${id}/fulfill-deletion`, { method: "POST" }) as Promise<{ deleted: boolean }>,
   getSchoolsOverview: () => request("/admin/schools") as Promise<SchoolOverview[]>,
+  // Classroom/cohort grouping — a teacher groups a subset of their
+  // school's students into a class to view roster-level progress for
+  // just that group (see backend app.routers.admin's /admin/classrooms
+  // endpoints and app.models.core.Classroom).
+  listClassrooms: () => request("/admin/classrooms") as Promise<Classroom[]>,
+  createClassroom: (data: { name: string; board?: string; class_?: string; subject?: string; centre_id?: number }) =>
+    request("/admin/classrooms", { method: "POST", body: JSON.stringify(data) }) as Promise<Classroom>,
+  getClassroom: (id: number) => request(`/admin/classrooms/${id}`) as Promise<ClassroomDetail>,
+  updateClassroom: (id: number, data: { name?: string; board?: string; class_?: string; subject?: string }) =>
+    request(`/admin/classrooms/${id}`, { method: "PATCH", body: JSON.stringify(data) }) as Promise<Classroom>,
+  deleteClassroom: (id: number) =>
+    request(`/admin/classrooms/${id}`, { method: "DELETE" }) as Promise<{ deleted: boolean }>,
+  assignClassroomStudents: (id: number, studentIds: number[]) =>
+    request(`/admin/classrooms/${id}/students`, {
+      method: "POST", body: JSON.stringify({ student_ids: studentIds }),
+    }) as Promise<{ assigned: number[] }>,
+  unassignClassroomStudent: (id: number, studentId: number) =>
+    request(`/admin/classrooms/${id}/students/${studentId}`, { method: "DELETE" }) as Promise<{ unassigned: boolean }>,
   updateSchoolSales: (
     id: number,
     data: { sales_status?: string; sales_notes?: string; contract_notes?: string },

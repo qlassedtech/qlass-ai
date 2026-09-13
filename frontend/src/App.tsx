@@ -6,6 +6,8 @@ import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
 import StudentList from "./pages/StudentList";
 import StudentDetail from "./pages/StudentDetail";
+import Classrooms from "./pages/Classrooms";
+import ClassroomDetail from "./pages/ClassroomDetail";
 import BulkUpload from "./pages/BulkUpload";
 import Credits from "./pages/Credits";
 import Teachers from "./pages/Teachers";
@@ -80,6 +82,8 @@ export default function App() {
         >
           <Route path="/students" element={<StudentList />} />
           <Route path="/students/:id" element={<StudentDetail />} />
+          <Route path="/classrooms" element={<Classrooms />} />
+          <Route path="/classrooms/:id" element={<ClassroomDetail />} />
           <Route path="/bulk-upload" element={<BulkUpload />} />
           <Route path="/credits" element={<Credits />} />
           <Route path="/teachers" element={<Teachers />} />
