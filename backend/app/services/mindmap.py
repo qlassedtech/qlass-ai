@@ -97,9 +97,9 @@ MAX_CHILD_CHARS = 14
 # Label rendering rules (also documented in the module docstring — the
 # frontend renderer implements the same numbers).
 LEVEL1_LABEL_SIZE = 13
-LEVEL1_LABEL_LIFT = 8
+LEVEL1_LABEL_LIFT = 18
 LEVEL2_LABEL_SIZE = 11
-LEVEL2_LABEL_LIFT = 6
+LEVEL2_LABEL_LIFT = 13
 LEVEL2_LABEL_COLOR = "#333333"
 
 _SYSTEM_PROMPT = (
@@ -124,7 +124,16 @@ def _clean_label(value, max_chars: int) -> str | None:
     cleaned = " ".join(value.split())
     if not cleaned:
         return None
-    return cleaned[:max_chars].rstrip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    # Cut at the last whole word rather than mid-word — a hard character
+    # slice produced garbled labels like "Cloud formatio" / "Falls to
+    # groun" (confirmed on a real generated map), which is worse than a
+    # shorter-but-clean label.
+    truncated = cleaned[:max_chars].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated
 
 
 def parse_mindmap_tree(raw_text: str) -> dict | None:
@@ -272,12 +281,22 @@ def quadratic_point(points: list, t: float) -> tuple[float, float]:
 
 def branch_label_anchor(element: dict) -> tuple[float, float, int, str, str]:
     """(x, y_baseline, size, weight, color) of a branch label per the rules
-    in the module docstring — shared by the PNG renderer and the tests."""
+    in the module docstring — shared by the PNG renderer and the tests.
+
+    The y is clamped so the label's own box (baseline - size .. baseline)
+    never runs off the top of the canvas — the worst case (a steep-angle
+    branch with a max-length label, see test_worst_case_labels_...) lifts
+    the label further than there's headroom for; clamping trades a touch
+    less clearance from the branch curve in that rare case for a label
+    that's still fully on-canvas, which is strictly better."""
     if element["level"] == 1:
         mx, my = quadratic_point(element["points"], 0.5)
-        return mx, my - LEVEL1_LABEL_LIFT, LEVEL1_LABEL_SIZE, "bold", element["color"]
-    ex, ey = element["points"][2]
-    return ex, ey - LEVEL2_LABEL_LIFT, LEVEL2_LABEL_SIZE, "normal", LEVEL2_LABEL_COLOR
+        x, y, size, weight, color = mx, my - LEVEL1_LABEL_LIFT, LEVEL1_LABEL_SIZE, "bold", element["color"]
+    else:
+        ex, ey = element["points"][2]
+        x, y, size, weight, color = ex, ey - LEVEL2_LABEL_LIFT, LEVEL2_LABEL_SIZE, "normal", LEVEL2_LABEL_COLOR
+    y = max(y, size)
+    return x, y, size, weight, color
 
 
 async def generate_mindmap_scene(topic: str) -> tuple[list[dict] | None, LLMResult | None]:
