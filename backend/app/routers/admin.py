@@ -18,7 +18,10 @@ from sqlalchemy.orm.query import Query
 from app.business_rules import TUTOR_LEVEL_MODELS
 from app.config import settings
 from app.database import get_db
-from app.models.core import AuditLog, Centre, Chapter, ChatHistory, Classroom, CreditEvent, Parent, Question, Quiz, Student, Subject, Teacher
+from app.models.core import (
+    AuditLog, Centre, Chapter, ChatHistory, Classroom, CreditEvent, Parent, PresentationJob, Question, Quiz, Student,
+    Subject, Teacher,
+)
 from app.services import audit_log, cost_tracker, school_billing
 from app.services.escalation import SUPPORT_PHONE, SCHOOL_REVIEW_STAFF_PHONES, get_escalation_recipients
 from app.services.school_pilot import PILOT_STUDENT_FEATURES, MAX_PILOT_STUDENTS, launch_pilot, pilot_outcome_report
@@ -99,6 +102,10 @@ class StudentCreateRequest(BaseModel):
     class_: str | None = None
     board: str | None = None
     school: str | None = None
+    # Required for org_admin/super_admin (who have no single school of
+    # their own), ignored for a school's own teacher/admin — same shape as
+    # ConfirmStudentBulkUploadRequest.centre_id. See create_student.
+    centre_id: int | None = None
 
 
 class StudentUpdateRequest(BaseModel):
@@ -834,27 +841,41 @@ async def approve_student(
 def create_student(
     body: StudentCreateRequest, db: Session = Depends(get_db), teacher: Teacher = Depends(get_current_teacher)
 ):
+    """
+    The student always lands in a real school: a school's own teacher/admin
+    creates into their own centre; org_admin/super_admin (centre_id null)
+    must name one via body.centre_id, validated to be inside their own
+    organization — the same resolution bulk-upload/confirm uses. Confirmed
+    live that before this, an org_admin creating a student here got a
+    row with centre_id=NULL (invisible on every school-scoped list, since
+    _scoped_students filters by centre) that had still been granted the
+    ₹50 trial credit. _resolve_centre_for_read rather than _for_write
+    because a plain "teacher" is (and was) allowed to add a student.
+    """
+    centre = _resolve_centre_for_read(db, teacher, body.centre_id)
     phone = normalize_phone(body.phone)
     if not phone:
         raise HTTPException(status_code=400, detail="phone cannot be empty")
     existing = (
         db.query(Student.id)
-        .filter(Student.phone == phone, Student.centre_id == teacher.centre_id, Student.is_deleted.is_(False))
+        .filter(Student.phone == phone, Student.centre_id == centre.id, Student.is_deleted.is_(False))
         .first()
     )
     if existing:
         raise HTTPException(status_code=409, detail="A student with this phone number already exists in your school")
     student = Student(
         name=body.name, phone=phone, class_=body.class_,
-        board=body.board or tenancy.default_board_for_centre(db, teacher.centre_id),
-        school=body.school or tenancy.default_school_for_centre(db, teacher.centre_id),
-        features=dict(DEFAULT_FEATURES), centre_id=teacher.centre_id,
+        board=body.board or tenancy.default_board_for_centre(db, centre.id),
+        school=body.school or tenancy.default_school_for_centre(db, centre.id),
+        features=dict(DEFAULT_FEATURES), centre_id=centre.id,
     )
     db.add(student)
     db.commit()
     db.refresh(student)
     cost_tracker.add_trial_credits(db, student.id)
-    audit_log.record(db, teacher.id, "create_student", "student", student.id, detail=f"phone ****{phone[-4:]}")
+    audit_log.record(
+        db, teacher.id, "create_student", "student", student.id, detail=f"phone ****{phone[-4:]} centre_id={centre.id}",
+    )
     return _student_to_dict(db, student)
 
 
@@ -1433,19 +1454,44 @@ class DigestRequest(BaseModel):
     to_phone: str
 
 
+def _resolve_student_notification_phone(db: Session, student: Student, to_phone: str | None) -> str:
+    """
+    A per-student outbound message (weekly digest, payment link) may only
+    go to a number that actually belongs to that student's household: their
+    own `phone`, their alternate `whatsapp_phone`, or the linked Parent's
+    phone. Previously `to_phone` was free-form, so a signed-in teacher
+    could push a student's progress digest (real academic data about a
+    minor) or a payment link to ANY WhatsApp number. Defaults to the
+    student's own phone when none is given.
+    """
+    if not to_phone:
+        return student.phone
+    requested = normalize_phone(to_phone)
+    allowed = {p for p in (student.phone, student.whatsapp_phone) if p}
+    parent = db.query(Parent).filter(Parent.student_id == student.id).first()
+    if parent and parent.phone:
+        allowed.add(parent.phone)
+    if requested not in allowed:
+        raise HTTPException(
+            status_code=400, detail="to_phone must be the student's own number, their WhatsApp number, or a linked parent's",
+        )
+    return requested
+
+
 @router.post("/admin/students/{student_id}/digest")
 async def send_digest(
     student_id: int, body: DigestRequest, db: Session = Depends(get_db),
     teacher: Teacher = Depends(get_current_teacher),
 ):
     student = _get_scoped_student_or_404(db, teacher, student_id)
+    to_phone = _resolve_student_notification_phone(db, student, body.to_phone)
     stats = get_student_stats(db, student.id, days=7)
     message = format_teacher_digest(
         student.name, stats,
         hints_given=student.hints_given_count or 0,
         direct_solutions=student.direct_solutions_count or 0,
     )
-    result = await send_whatsapp_message(body.to_phone, f"📋 *Weekly Digest*\n\n{message}")
+    result = await send_whatsapp_message(to_phone, f"📋 *Weekly Digest*\n\n{message}")
     if not result.get("sent"):
         raise HTTPException(status_code=502, detail=f"Failed to send: {result}")
     return {"sent": True}
@@ -1461,7 +1507,7 @@ async def send_payment_link(
     teacher: Teacher = Depends(get_current_teacher),
 ):
     student = _get_scoped_student_or_404(db, teacher, student_id)
-    to_phone = body.to_phone or student.phone
+    to_phone = _resolve_student_notification_phone(db, student, body.to_phone)
     # student_id disambiguates a shared family phone with more than one
     # child enrolled on it — without it, a payment could silently land in
     # a sibling's wallet instead of this specific student's.
@@ -2439,6 +2485,31 @@ class PresentationGenerateRequest(BaseModel):
     class_: str | None = None
     board: str | None = None
     num_cards: int = 8
+    # Which school to bill — required for org_admin (no centre of their
+    # own), ignored for a school's own teacher/admin. See generate_presentation.
+    centre_id: int | None = None
+
+
+def _presentation_job_or_404(db: Session, teacher: Teacher, generation_id: str) -> PresentationJob:
+    """
+    Same centre/org/platform visibility rule as _scoped_students, applied
+    to a presentation job: a school's own teacher/admin sees only their
+    school's jobs, org_admin any school in their organization, super_admin
+    everything. An id outside the caller's scope is a plain 404 (not 403)
+    so the endpoint doesn't confirm that someone else's id exists.
+    """
+    job = db.query(PresentationJob).filter(PresentationJob.generation_id == generation_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Presentation not found")
+    if teacher.role == "super_admin":
+        return job
+    if teacher.role == "org_admin":
+        if job.centre_id in {row[0] for row in _org_centre_ids(db, teacher.organization_id).all()}:
+            return job
+        raise HTTPException(status_code=404, detail="Presentation not found")
+    if job.centre_id != teacher.centre_id:
+        raise HTTPException(status_code=404, detail="Presentation not found")
+    return job
 
 
 @router.post("/admin/presentation/generate")
@@ -2456,12 +2527,17 @@ async def generate_presentation(
     — without this, a request like "Real Numbers" produces a generic deck
     with no sense of grade level or board-specific depth/terminology,
     exactly like the same gap AssignQuiz's chapter picker exists to close.
+
+    Every started job is recorded as a PresentationJob against the school
+    it was started for, so presentation_status below can scope and bill
+    the RIGHT school regardless of who polls.
     """
     if teacher.role == "super_admin":
         raise HTTPException(status_code=400, detail="Sign in as a school's own teacher/admin to generate a presentation")
     if not settings.gamma_api_key:
         raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Skoolgpt support")
-    if not school_billing.has_credits(db, teacher.centre_id):
+    centre = _resolve_centre_for_read(db, teacher, body.centre_id)
+    if not school_billing.has_credits(db, centre.id):
         raise HTTPException(status_code=402, detail="Your school is out of credits for presentation generation")
 
     if body.chapter_ids:
@@ -2482,6 +2558,12 @@ async def generate_presentation(
         generation_id = await create_presentation_generation(input_text, body.num_cards)
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Presentation service is temporarily unavailable — please try again shortly")
+    db.add(PresentationJob(generation_id=generation_id, centre_id=centre.id, teacher_id=teacher.id))
+    db.commit()
+    audit_log.record(
+        db, teacher.id, "generate_presentation", "centre", centre.id,
+        detail=f"generation_id={generation_id} topic={topic[:80]} num_cards={body.num_cards}",
+    )
     return {"generation_id": generation_id}
 
 
@@ -2491,6 +2573,7 @@ async def presentation_status(
 ):
     if not settings.gamma_api_key:
         raise HTTPException(status_code=503, detail="Presentation generation isn't configured yet — contact Skoolgpt support")
+    job = _presentation_job_or_404(db, teacher, generation_id)
     try:
         result = await get_generation_status(generation_id)
     except httpx.HTTPError:
@@ -2498,14 +2581,22 @@ async def presentation_status(
 
     # Billed here (from Gamma's own reported credit cost) rather than a
     # flat guess at creation time — real cost varies a lot by slide count
-    # and image options. Guarded against double-billing across the
-    # frontend's repeated polls by has_billed_gamma_generation.
+    # and image options. Billed to the school that STARTED the job (not
+    # the poller's centre — an org_admin poller has none), and only once
+    # across the frontend's repeated polls: job.billed is the primary
+    # guard, has_billed_gamma_generation the belt-and-braces one for a job
+    # billed before this flag existed.
+    status = result.get("status")
     credits_deducted = result.get("credits_deducted")
-    if result.get("status") == "completed" and credits_deducted is not None:
+    if status == "completed" and credits_deducted is not None and not job.billed:
         if not school_billing.has_billed_gamma_generation(db, generation_id):
-            school_billing.record_gamma_usage(db, teacher.centre_id, generation_id, credits_deducted)
+            school_billing.record_gamma_usage(db, job.centre_id, generation_id, credits_deducted)
+        job.billed = True
+    if status and status != job.status:
+        job.status = status
+    db.commit()
 
-    return {"status": result.get("status"), "url": result.get("url")}
+    return {"status": status, "url": result.get("url")}
 
 
 def _my_tutor_student(db: Session, teacher: Teacher) -> Student:

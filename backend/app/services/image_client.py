@@ -2,12 +2,15 @@ import base64
 
 import httpx
 from app.config import settings
+from app.services.branding import stamp_logo
 
 
 async def generate_image(prompt: str) -> bytes | None:
     """
     Generate an image via Azure AI Foundry's unified inference endpoint
-    (gpt-image series — DALL-E 3 was retired March 2026). Returns PNG bytes,
+    (gpt-image series — DALL-E 3 was retired March 2026). Returns PNG bytes
+    with the Skoolgpt logo stamped bottom-right (see
+    app.services.branding.stamp_logo — done here so every caller gets it),
     or None if not configured or the call fails. gpt-image models always
     return base64 — there's no URL mode.
 
@@ -35,6 +38,6 @@ async def generate_image(prompt: str) -> bytes | None:
             data = resp.json().get("data") or []
             if not data or "b64_json" not in data[0]:
                 return None
-            return base64.b64decode(data[0]["b64_json"])
+            return stamp_logo(base64.b64decode(data[0]["b64_json"]))
     except httpx.HTTPError:
         return None

@@ -13,6 +13,7 @@ librosa
 soundfile
 numpy
 reportlab
+pillow
 firebase-admin
 redis
 python-multipart

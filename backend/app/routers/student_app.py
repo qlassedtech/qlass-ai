@@ -1,7 +1,8 @@
+import asyncio
 import uuid
 
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,14 +16,19 @@ from app.services.document_client import extract_text_from_document
 from app.services.escalation import SUPPORT_PHONE, get_escalation_recipients
 from app.services.google_auth import GoogleAuthError, verify_google_id_token
 from app.services.image_client import generate_image
+from app.services.mindmap import build_mindmap_image
 from app.services.ocr_client import extract_text_from_image
 from app.services.otp import generate_and_store_otp, verify_otp, LOGIN_OTP_TEMPLATE_NAME
 from app.services.phone import normalize_phone
 from app.services.progress_report import get_activity_stats, get_chapter_coverage, get_student_stats
-from app.services.rate_limit import is_otp_rate_limited, student_lock
+from app.services.rate_limit import (
+    client_ip, is_login_blocked, is_otp_rate_limited, record_login_failure, student_turn_lock,
+)
 from app.services.referral import apply_referral_at_signup
 from app.services.sarvam_client import transcribe_audio
-from app.services.student_auth import create_student_access_token, get_current_student
+from app.services.student_auth import (
+    VOICE_TICKET_TTL_SECONDS, create_student_access_token, create_voice_call_ticket, get_current_student,
+)
 from app.services.teacher_auth import verify_password
 from app.services.chat_core import PENDING_APPROVAL_REPLY
 from app.services.tenancy import create_student_profile, get_qlass_direct_centre_id
@@ -102,15 +108,23 @@ class StudentLoginRequest(BaseModel):
 
 
 @router.post("/student-app/auth/login")
-def student_login(body: StudentLoginRequest, db: Session = Depends(get_db)):
+async def student_login(body: StudentLoginRequest, request: Request, db: Session = Depends(get_db)):
     """
     Password login for a student with no WhatsApp access — sits alongside
     OTP login (see verify_student_otp below), never a replacement; a
     student who does have WhatsApp still uses OTP as normal, since only a
     school admin/teacher can set a password for a student in the first
     place (see POST /admin/students/{id}/set-password).
+
+    Same failed-attempt lockout the teacher/admin login applies (see
+    app.routers.admin.login / rate_limit.is_login_blocked) — this endpoint
+    had none (audit, Sept 2026: H3), so a student password could be
+    brute-forced without limit.
     """
     phone = normalize_phone(body.phone)
+    ip = client_ip(request)
+    if await is_login_blocked(phone, ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts — please wait a few minutes and try again")
     student = (
         db.query(Student)
         .filter(Student.phone == phone, Student.is_staff_profile.is_(False))
@@ -118,9 +132,23 @@ def student_login(body: StudentLoginRequest, db: Session = Depends(get_db)):
         .first()
     )
     if not student or not student.password_hash or not verify_password(body.password, student.password_hash):
+        await record_login_failure(phone, ip)
         raise HTTPException(status_code=401, detail="Invalid phone or password")
     token = create_student_access_token(student.id, student.token_version or 0)
     return {"access_token": token, "student": student_summary(db, student)}
+
+
+@router.post("/student-app/voice-call/ticket")
+def voice_call_ticket(student: Student = Depends(get_current_student)):
+    """
+    Mints the short-lived, single-use ticket the voice-call WebSocket
+    (app.routers.voice_call) accepts as `?ticket=` — the only credential
+    that endpoint takes, since a browser can't send a header on a
+    WebSocket handshake and the long-lived student JWT must never appear
+    in a URL (see app.services.student_auth.create_voice_call_ticket).
+    The client should call this immediately before connecting.
+    """
+    return {"ticket": create_voice_call_ticket(student), "expires_in": VOICE_TICKET_TTL_SECONDS}
 
 
 class StudentGoogleLoginRequest(BaseModel):
@@ -400,7 +428,7 @@ async def _reply_to(db: Session, student: Student, message_text: str) -> dict:
     WhatsApp effectively goes through, so a student sees identical behavior
     regardless of which endpoint got them here.
     """
-    async with student_lock(student.phone):
+    async with student_turn_lock(student.phone):
         return await _reply_to_locked(db, student, message_text)
 
 
@@ -477,6 +505,14 @@ async def _reply_to_locked(db: Session, student: Student, message_text: str) -> 
         if image_bytes:
             cost_tracker.record_flat_usage(db, "azure_image", student.id)
             image_url = _save_generated_image(image_bytes)
+    if result.mindmap_topic:
+        # Mind maps are delivered exactly like a generated diagram (saved
+        # under the static mount, returned as image_url); the Claude call
+        # is billed inside build_mindmap_image and a failure just means no
+        # image this turn — see app.routers.whatsapp for the same flow.
+        mindmap_bytes = await build_mindmap_image(db, student.id, result.mindmap_topic)
+        if mindmap_bytes:
+            image_url = _save_generated_image(mindmap_bytes)
     return {
         "reply": reply_text, "image_url": image_url, "credit_balance": cost_tracker.get_balance(db, student.id),
     }
@@ -524,9 +560,12 @@ async def send_voice_message(
     message_text = await transcribe_audio(audio_bytes, filename=file.filename or "voice_note.m4a")
     if not message_text:
         raise HTTPException(status_code=422, detail="Couldn't understand that voice note — please try again")
-    cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
+    # librosa decode/pitch tracking is CPU-bound — off the event loop so
+    # one upload can't stall every other in-flight request.
+    duration_seconds = await asyncio.to_thread(get_duration_seconds, audio_bytes)
+    cost_tracker.record_minute_usage(db, "sarvam_stt", duration_seconds / 60, student.id)
     if student.gender is None:
-        detected_gender = detect_gender_from_pitch(audio_bytes)
+        detected_gender = await asyncio.to_thread(detect_gender_from_pitch, audio_bytes)
         if detected_gender:
             student.gender = detected_gender
             db.commit()
@@ -550,7 +589,7 @@ async def send_document_message(
     if (pending := _pending_approval_response(db, student)) is not None:
         return pending
     document_bytes = await file.read()
-    message_text = extract_text_from_document(document_bytes, file.filename or "")
+    message_text = await asyncio.to_thread(extract_text_from_document, document_bytes, file.filename or "")
     if not message_text:
         raise HTTPException(status_code=422, detail="Couldn't read any text in that file — try a different file")
     return await _reply_to(db, student, message_text)

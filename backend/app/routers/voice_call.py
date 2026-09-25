@@ -48,6 +48,21 @@ one binary audio frame:
     single combined LLMResult at this router's own call site below, so
     that billing code didn't need to change shape even though the actual
     Claude spend per diagram roughly doubled.
+    The same frame also carries a MIND MAP when the tutor's reply carried
+    a mindmap_topic instead of an image_prompt (never both): the scene
+    then comes from app.services.mindmap (one Claude call for the
+    content, deterministic code for the geometry) and, on top of the
+    plain sketch primitives, uses these element types/fields the client
+    must render — see mindmap.py's module docstring for the exact rules:
+      {"type": "branch", "points": [[sx,sy],[cx,cy],[ex,ey]], "color",
+       "width", "label", "level": 1|2, "label_at": "mid"|"end"}
+          a quadratic Bezier (start, control, end) stroked in `color` at
+          `width`; level-1 labels are drawn centred at the curve's t=0.5
+          point, baseline 8px above, bold 13px in the branch colour;
+          level-2 labels centred at the END point, baseline 6px above,
+          normal 11px #333333.
+      "ellipse" may carry "color"/"width"/"fill"; "text" may carry
+      "size"/"weight"/"align" ("center" = centred on x,y)/"color".
   - {"type": "video", "title": "...", "url": "..."}  — sent only if the
     tutor's reply carried a video suggestion (same mechanism as WhatsApp's
     own "📺 <title>\n<url>" follow-up message — see routers.whatsapp).
@@ -74,22 +89,40 @@ one binary audio frame:
     of 1008 as "don't bother retrying without fixing something first".
 
 Auth: a browser WebSocket handshake cannot set a custom Authorization
-header, so the student JWT travels as a `?token=` query param instead
-(`wss://.../ws/voice-call?token=...`) and is validated with the exact same
-decode/lookup the REST student endpoints use (see
-app.services.student_auth.get_student_by_token) — just read from a query
-param instead of a bearer header. Anything wrong with the token, or the
+header, so the credential has to travel in the URL — and URLs are logged
+(nginx access log, browser history). It is therefore NOT the 7-day student
+JWT (which is what used to go here — audit, Sept 2026: H1) but a
+short-lived, single-use ticket: the client first calls
+POST /student-app/voice-call/ticket with its normal bearer auth, then
+connects to `wss://.../ws/voice-call?ticket=...` within 60 seconds. The
+ticket is validated (signature, type, expiry, single-use jti) and the
+student loaded with the same lookup/token_version check every REST student
+endpoint applies — see app.services.student_auth.consume_voice_call_ticket.
+`?token=` is no longer accepted. Anything wrong with the ticket, or the
 account lacking the "voice" feature flag, closes the socket with code 1008
 right after connecting.
+
+Per-turn gates: every turn takes the same per-student lock WhatsApp and
+the web app take (so a voice turn and a WhatsApp message from the same
+student can't overdraft one wallet in parallel — see
+app.services.rate_limit.student_turn_lock) and applies the same gates
+those channels apply before spending anything: churned school, expired
+pilot, the platform-wide daily spend cap, the per-student message rate
+limit, and the wallet balance. The weekly voice-reply soft cap
+(app.business_rules.FEATURE_LIMITS["voice"]) applies to the reply audio
+exactly as it does to a WhatsApp voice reply: past the cap the turn
+degrades to text-only (a tts_failed frame) instead of synthesizing.
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.services import audio_qa, cost_tracker, chat_core, sarvam_client, sketch_client
-from app.services.student_auth import get_student_by_token
+from app.services import audio_qa, cost_tracker, chat_core, mindmap, sarvam_client, school_billing, sketch_client
+from app.services.rate_limit import is_rate_limited, platform_spend_cap_exceeded, student_turn_lock
+from app.services.student_auth import consume_voice_call_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +146,44 @@ _OUT_OF_CREDITS_MESSAGE = (
     "WhatsApp instead, to keep learning."
 )
 _COULD_NOT_HEAR_MESSAGE = "Sorry, I couldn't hear that clearly — please try again."
+# Same wording the WhatsApp and web/app channels use for these gates (see
+# app.routers.whatsapp / app.routers.student_app._reply_to_locked).
+_CHURNED_MESSAGE = (
+    "Your school's Skoolgpt account is currently on hold — ask your school to contact Skoolgpt, "
+    "or top up your own AI credits directly to keep chatting with me!"
+)
+_PILOT_EXPIRED_MESSAGE = (
+    "Your school's Skoolgpt pilot has ended. Ask your school to continue the programme, "
+    "or top up your own AI credits to keep learning!"
+)
+_PLATFORM_BUSY_MESSAGE = "We're busy right now, please try again in a bit."
+_RATE_LIMITED_MESSAGE = "You're sending messages a bit fast — please wait a moment before sending more."
+
+
+async def _terminal_gate_message(db: Session, student) -> str | None:
+    """
+    The "this call is over" gates every spending channel applies, in the
+    same order WhatsApp applies them: churned school, expired pilot,
+    platform daily spend cap, wallet balance. Returns the message to send
+    before closing with 1008, or None when the turn may proceed.
+    """
+    if school_billing.is_centre_churned(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
+        return _CHURNED_MESSAGE
+    if school_billing.is_centre_pilot_expired(db, student.centre_id) and not cost_tracker.has_independent_payment(db, student.id):
+        return _PILOT_EXPIRED_MESSAGE
+    if await platform_spend_cap_exceeded(db):
+        return _PLATFORM_BUSY_MESSAGE
+    if not cost_tracker.has_credits(db, student.id):
+        return _OUT_OF_CREDITS_MESSAGE
+    return None
 
 
 @router.websocket("/ws/voice-call")
 async def voice_call_ws(websocket: WebSocket, db: Session = Depends(get_db)):
     await websocket.accept()
 
-    token = websocket.query_params.get("token")
-    student = get_student_by_token(token, db) if token else None
+    ticket = websocket.query_params.get("ticket")
+    student = await consume_voice_call_ticket(ticket, db) if ticket else None
     if student is None:
         await websocket.send_json({"type": "error", "message": "Your session has expired — please log in again."})
         await websocket.close(code=_POLICY_VIOLATION)
@@ -138,13 +201,27 @@ async def voice_call_ws(websocket: WebSocket, db: Session = Depends(get_db)):
         while True:
             audio_bytes = await websocket.receive_bytes()
 
-            if not cost_tracker.has_credits(db, student.id):
-                await websocket.send_json({"type": "error", "message": _OUT_OF_CREDITS_MESSAGE})
-                await websocket.close(code=_POLICY_VIOLATION)
-                return
+            # Per-student rate limit, same as WhatsApp — a turn over the
+            # limit is simply not processed (no STT spend); the connection
+            # stays open, it's not a failed turn.
+            if await is_rate_limited(student.phone):
+                await websocket.send_json({"type": "error", "message": _RATE_LIMITED_MESSAGE})
+                continue
 
             try:
-                turn_ok = await _handle_turn(websocket, db, student, audio_bytes)
+                # Same per-student lock as WhatsApp/web — the credit check
+                # through the deductions inside _handle_turn is one
+                # critical section, so a concurrent WhatsApp message from
+                # this student can't pass has_credits() in parallel.
+                async with student_turn_lock(student.phone):
+                    gate_message = await _terminal_gate_message(db, student)
+                    if gate_message is not None:
+                        await websocket.send_json({"type": "error", "message": gate_message})
+                        await websocket.close(code=_POLICY_VIOLATION)
+                        return
+                    turn_ok = await _handle_turn(websocket, db, student, audio_bytes)
+            except WebSocketDisconnect:
+                raise
             except Exception:
                 # A single turn's own bug/transient failure (e.g. Sarvam
                 # blipping, an unexpected exception in process_message)
@@ -152,6 +229,16 @@ async def voice_call_ws(websocket: WebSocket, db: Session = Depends(get_db)):
                 # helpers' own None-return failure paths are the "normal"
                 # failure case; this except is the backstop for anything
                 # unexpected so it degrades to a retryable error frame too.
+                #
+                # rollback() is essential: a turn that died mid-flush
+                # leaves the session in a "must roll back" state, and
+                # without this every later turn on this same call failed
+                # too (PendingRollbackError) — one bad turn poisoned the
+                # rest of the call (audit, Sept 2026).
+                # rollback() FIRST — even reading student.id below can
+                # trigger an attribute refresh on a session that is
+                # mid-failed-flush, which itself raises.
+                db.rollback()
                 logger.exception("voice_call turn failed for student_id=%s", student.id)
                 await websocket.send_json(
                     {"type": "error", "message": "Something went wrong on our end — please try again."}
@@ -190,7 +277,10 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
     # duration, applied even though the reply hasn't been generated yet, so
     # a turn that fails downstream (e.g. process_message erroring) still
     # accounts for the real STT spend that already happened.
-    cost_tracker.record_minute_usage(db, "sarvam_stt", audio_qa.get_duration_seconds(audio_bytes) / 60, student.id)
+    # Decoding runs in a worker thread — librosa is CPU-bound and would
+    # otherwise stall every other call/request on this event loop.
+    duration_seconds = await asyncio.to_thread(audio_qa.get_duration_seconds, audio_bytes)
+    cost_tracker.record_minute_usage(db, "sarvam_stt", duration_seconds / 60, student.id)
 
     await websocket.send_json({"type": "transcript", "text": transcript})
 
@@ -249,7 +339,38 @@ async def _handle_turn(websocket: WebSocket, db: Session, student, audio_bytes: 
                 student.id, result.image_prompt,
             )
 
+    if result.mindmap_topic:
+        # Same "diagram" frame as above, but the scene comes from
+        # app.services.mindmap (one Claude call for the content, code for
+        # the geometry) and uses the coloured "branch"/styled elements the
+        # client renderer understands — see the module docstring. Failure
+        # degrades exactly like a failed sketch: no frame, turn continues.
+        scene, generation_result = await mindmap.generate_mindmap_scene(result.mindmap_topic)
+        if scene:
+            if generation_result is not None:
+                cost_tracker.record_claude_usage(
+                    db, generation_result.model, generation_result.input_tokens, generation_result.output_tokens,
+                    student.id, cache_write_tokens=generation_result.cache_write_tokens,
+                    cache_read_tokens=generation_result.cache_read_tokens, feature="mindmap_generate",
+                )
+            await websocket.send_json({"type": "diagram", "scene": scene})
+        else:
+            logger.info(
+                "voice_call: mind map generation failed/unusable for student_id=%s, topic=%r",
+                student.id, result.mindmap_topic,
+            )
+
     await websocket.send_json({"type": "reply_text", "text": result.reply_text})
+
+    # Weekly voice-reply soft cap (FEATURE_LIMITS["voice"]) — the same
+    # check chat_core applies before it lets a WhatsApp voice reply
+    # through. Past it, the reply is text-only rather than synthesized:
+    # reply_text is already sent, so tts_failed is exactly the frame the
+    # client expects for "no audio this time, not an error".
+    if chat_core.is_voice_reply_over_weekly_cap(db, student):
+        logger.info("voice_call: weekly voice cap reached for student_id=%s — text-only reply", student.id)
+        await websocket.send_json({"type": "tts_failed"})
+        return True
 
     audio_reply = await sarvam_client.synthesize_speech(result.reply_text, result.detected_lang)
     if not audio_reply:

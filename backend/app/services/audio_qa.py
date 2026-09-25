@@ -1,7 +1,12 @@
 import io
+import logging
+import shutil
+import subprocess
 
 import librosa
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 FRAME_SECONDS = 0.05
 ENERGY_SPIKE_RATIO = 3.0
@@ -11,14 +16,68 @@ ENERGY_SPIKE_MIN = 0.05
 # (flatness near 0 = harmonic/tonal, near 1 = pure noise).
 FLATNESS_NOISE_THRESHOLD = 0.02
 
+# Last-resort duration estimate when nothing can decode the bytes (see
+# get_duration_seconds): seconds = bytes * 8 / bitrate. Opus voice from a
+# browser MediaRecorder / WhatsApp voice note typically encodes at
+# 24-32 kbps; using the LOW end of that range deliberately over-estimates
+# the duration slightly (a 30 kB clip reads as 10 s rather than 7.5 s), so
+# an undecodable clip is billed conservatively against the student rather
+# than under-billed — the failure mode this replaces was billing ZERO.
+ESTIMATED_VOICE_BITRATE_BPS = 24_000
+FFPROBE_TIMEOUT_SECONDS = 10
+
+
+def _ffprobe_duration_seconds(audio_bytes: bytes) -> float | None:
+    """Container-level duration via ffprobe (stdin), or None if unavailable/undecodable."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", "pipe:0"],
+            input=audio_bytes, capture_output=True, timeout=FFPROBE_TIMEOUT_SECONDS, check=False,
+        )
+        value = float(completed.stdout.decode("ascii", "ignore").strip().splitlines()[0])
+        return value if value > 0 else None
+    except Exception:
+        return None
+
 
 def get_duration_seconds(audio_bytes: bytes) -> float:
-    """Audio length in seconds, used to bill Sarvam STT (billed per minute). Returns 0.0 if undecodable."""
+    """
+    Audio length in seconds, used to bill Sarvam STT (billed per minute).
+
+    Never returns 0 for non-empty bytes. librosa/soundfile decode covers
+    WAV/OGG/MP3/FLAC, but NOT the audio/webm;codecs=opus a browser
+    MediaRecorder produces (the voice call and the web app's voice notes)
+    — confirmed live (audit, Sept 2026) that every one of those returned
+    0.0 here, so record_minute_usage deducted nothing and STT for those
+    channels was never billed. Fallback chain: librosa -> ffprobe (if the
+    binary is installed) -> a conservative byte-length estimate (see
+    ESTIMATED_VOICE_BITRATE_BPS). Which one was used is logged at INFO so
+    a deployment missing ffprobe is visible in the logs, not just in the
+    margins.
+    """
+    if not audio_bytes:
+        return 0.0
     try:
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None)
-        return len(y) / sr if sr else 0.0
+        if sr and len(y):
+            duration = len(y) / sr
+            logger.info("audio duration %.2fs via librosa (%d bytes)", duration, len(audio_bytes))
+            return duration
     except Exception:
-        return 0.0
+        pass
+    duration = _ffprobe_duration_seconds(audio_bytes)
+    if duration is not None:
+        logger.info("audio duration %.2fs via ffprobe (%d bytes)", duration, len(audio_bytes))
+        return duration
+    duration = len(audio_bytes) * 8 / ESTIMATED_VOICE_BITRATE_BPS
+    logger.info(
+        "audio duration %.2fs ESTIMATED from %d bytes at %d bps (undecodable by librosa/ffprobe)",
+        duration, len(audio_bytes), ESTIMATED_VOICE_BITRATE_BPS,
+    )
+    return duration
 
 
 # Rough male/female fundamental-frequency (F0) crossover — typical adult male

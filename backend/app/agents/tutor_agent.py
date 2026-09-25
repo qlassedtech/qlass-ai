@@ -19,6 +19,9 @@ from app.services.retrieval import RetrievedChunk, build_citation_footer
 # instead, so their order and presence no longer matter.
 _TRACK_TAG = re.compile(r"\n?\[\[TRACK\s+(.*?)\]\]", re.DOTALL)
 _IMAGE_PROMPT_TAG = re.compile(r"\n?\[\[IMAGE_PROMPT: (.*?)\]\]")
+# Mind maps are routed structurally (their own tag -> app.services.mindmap)
+# rather than by sniffing "mind map" out of an IMAGE_PROMPT string.
+_MINDMAP_TAG = re.compile(r"\n?\[\[MINDMAP: (.*?)\]\]")
 _OFF_LEVEL_CLASS_TAG = re.compile(r"\n?\[\[OFF_LEVEL_CLASS: (.*?)\]\]")
 _VIDEO_QUERY_TAG = re.compile(r"\n?\[\[VIDEO_QUERY: (.*?)\]\]")
 
@@ -82,6 +85,7 @@ def parse_track_reply(raw_reply: str) -> dict:
         # stray IMAGE_PROMPT/OFF_LEVEL_CLASS tags so they don't leak into
         # the visible reply even without a TRACK match.
         cleaned = _IMAGE_PROMPT_TAG.sub("", raw_reply)
+        cleaned = _MINDMAP_TAG.sub("", cleaned)
         cleaned = _OFF_LEVEL_CLASS_TAG.sub("", cleaned)
         cleaned = _VIDEO_QUERY_TAG.sub("", cleaned).rstrip()
         return {
@@ -90,6 +94,7 @@ def parse_track_reply(raw_reply: str) -> dict:
             "evaluated": False,
             "correct": None,
             "image_prompt": None,
+            "mindmap_topic": None,
             "wants_audio_reply": False,
             "off_level_class": None,
             "video_query": None,
@@ -115,9 +120,18 @@ def parse_track_reply(raw_reply: str) -> dict:
     profile_answer = profile_answer_raw.strip() if profile_answer_raw and profile_answer_raw.upper() != "NONE" else None
     closing = _track_field(block, "closing") == "true"
 
+    # A MINDMAP tag wins over an IMAGE_PROMPT one — the prompt tells the
+    # model to emit exactly one of them, but if it ever emits both, the
+    # explicit mind-map intent is the more specific signal and a turn must
+    # never produce two images.
+    mindmap_topic = None
+    mindmap_match = _MINDMAP_TAG.search(raw_reply)
+    if wants_image and mindmap_match and mindmap_match.group(1).strip():
+        mindmap_topic = mindmap_match.group(1).strip()
+
     image_prompt = None
     image_match = _IMAGE_PROMPT_TAG.search(raw_reply)
-    if wants_image and image_match:
+    if wants_image and image_match and not mindmap_topic:
         image_prompt = image_match.group(1).strip()
 
     off_level_class = None
@@ -134,6 +148,7 @@ def parse_track_reply(raw_reply: str) -> dict:
     # only the actual student-facing content.
     reply_text = _TRACK_TAG.sub("", raw_reply)
     reply_text = _IMAGE_PROMPT_TAG.sub("", reply_text)
+    reply_text = _MINDMAP_TAG.sub("", reply_text)
     reply_text = _OFF_LEVEL_CLASS_TAG.sub("", reply_text)
     reply_text = _VIDEO_QUERY_TAG.sub("", reply_text).rstrip()
 
@@ -144,6 +159,7 @@ def parse_track_reply(raw_reply: str) -> dict:
         "wants_audio_reply": wants_audio,
         "correct": {"true": True, "false": False, "null": None}.get(correct_raw),
         "image_prompt": image_prompt,
+        "mindmap_topic": mindmap_topic,
         "off_level_class": off_level_class,
         "video_query": video_query,
         "solved_directly": {"true": True, "false": False, "na": None}.get(solved),
@@ -386,15 +402,17 @@ class TutorAgent(BaseAgent):
                 "background) — never a generic decorative illustration or realistic art style, which "
                 "isn't actually useful for learning. SPECIAL CASE — mind map/concept map/summary map: "
                 "if the student explicitly asks for a \"mind map\", \"concept map\", or \"summary "
-                "map\" of a topic, phrase the IMAGE_PROMPT itself as a mind-map description, not a "
-                "generic diagram description — e.g. \"mind map of photosynthesis: central topic node "
-                "with branching labeled sub-topic nodes\" rather than just \"photosynthesis\" or \"a "
-                "diagram of photosynthesis\". This phrasing matters because the exact same prompt "
-                "text is what the downstream image generator receives, and it needs the explicit "
-                "\"mind map\" framing to actually lay it out as one central node with branching "
-                "sub-topic nodes rather than an illustration. Your visible reply text must still "
-                "stand on its own with real explanation — the image is a supplement, never a "
-                "replacement for actually teaching in words.\n"
+                "map\" of a topic, still set image=true but do NOT write an IMAGE_PROMPT line at all "
+                "— write this ONE line directly BEFORE the TRACK line instead, in this exact format: "
+                "[[MINDMAP: <the topic as a short noun phrase, e.g. \"photosynthesis\" or \"the "
+                "French Revolution\">]]. The topic must be a plain noun phrase naming the subject — "
+                "not a sentence, not a description of a picture — because a separate mind-map "
+                "builder turns just that topic into a proper mind map (central topic, coloured "
+                "branches, keywords). Never emit both an IMAGE_PROMPT line and a MINDMAP line in the "
+                "same reply: mind/concept/summary maps get MINDMAP only; every other picture/diagram "
+                "gets IMAGE_PROMPT only. Your visible reply text must still stand on its own with "
+                "real explanation — the image is a supplement, never a replacement for actually "
+                "teaching in words.\n"
                 if image_generation_enabled
                 else "- image: always false — image generation isn't available for this student.\n"
             )

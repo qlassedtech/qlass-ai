@@ -6,6 +6,7 @@ import anthropic
 import httpx
 from google import genai as google_genai
 from app.config import settings
+from app.services.alerts import report_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,28 @@ class LLMResult:
     output_tokens: int = 0
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
+    # False when `text` is NOT a model output but a stand-in — the
+    # "having trouble reaching the AI service" apology, a classifier's
+    # fallback label, or the "[LLM not configured]" dev placeholder. The
+    # text is kept for callers that legitimately relay it to the student
+    # (the tutor reply path), but anything that ships the text as CONTENT
+    # — a fun-fact nudge, a quiz grade, a note — must check this first:
+    # confirmed live (audit, Sept 2026) that a provider outage was being
+    # graded as "no" on every quiz answer and was a candidate for being
+    # sent out as a "Did you know?" fact.
+    ok: bool = True
+
+
+def _report_anthropic_error(exc: anthropic.APIError, where: str, model: str) -> None:
+    # The raw exception (often the provider's full JSON error body) goes
+    # to server logs only — a student should never see internal API
+    # error payloads in their chat, confirmed live: a 400/500 from
+    # Anthropic was showing up verbatim as the tutor's "reply". The hourly
+    # error counter + immediate alert for 401/402/429/5xx is what gets a
+    # human to notice (see app.services.alerts).
+    status = getattr(exc, "status_code", None)
+    logger.error("Anthropic API error in %s (model=%s, status=%s): %s", where, model, status, exc)
+    report_provider_error("anthropic", status)
 
 
 def _cached_system(system_prompt: str | list[dict]) -> list[dict]:
@@ -86,7 +109,7 @@ async def _call_gemini(system_prompt: str | list[dict], messages: list[dict], mo
     """
     if _gemini_client is None:
         last_message = messages[-1]["content"] if messages else ""
-        return LLMResult(text=f"[LLM not configured] Set GOOGLE_API_KEY in .env. Would have answered: {last_message}", model=model)
+        return LLMResult(text=f"[LLM not configured] Set GOOGLE_API_KEY in .env. Would have answered: {last_message}", model=model, ok=False)
 
     system_text = _flatten_system(system_prompt)
     convo = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
@@ -108,13 +131,13 @@ async def _call_gemini(system_prompt: str | list[dict], messages: list[dict], mo
         )
     except Exception as exc:
         logger.error("Gemini API error in call_llm (model=%s): %s", model, exc)
-        return LLMResult(text=_UNREACHABLE_REPLY, model=model)
+        return LLMResult(text=_UNREACHABLE_REPLY, model=model, ok=False)
 
 
 async def _call_openai(system_prompt: str | list[dict], messages: list[dict], model: str) -> LLMResult:
     if not settings.openai_api_key:
         last_message = messages[-1]["content"] if messages else ""
-        return LLMResult(text=f"[LLM not configured] Set OPENAI_API_KEY in .env. Would have answered: {last_message}", model=model)
+        return LLMResult(text=f"[LLM not configured] Set OPENAI_API_KEY in .env. Would have answered: {last_message}", model=model, ok=False)
 
     system_text = _flatten_system(system_prompt)
     oai_messages = [{"role": "system", "content": system_text}] + messages
@@ -136,7 +159,7 @@ async def _call_openai(system_prompt: str | list[dict], messages: list[dict], mo
         )
     except (httpx.HTTPError, KeyError, IndexError) as exc:
         logger.error("OpenAI API error in call_llm (model=%s): %s", model, exc)
-        return LLMResult(text=_UNREACHABLE_REPLY, model=model)
+        return LLMResult(text=_UNREACHABLE_REPLY, model=model, ok=False)
 
 
 async def call_llm(system_prompt: str | list[dict], messages: list[dict], model: str = "claude-sonnet-4-6") -> LLMResult:
@@ -168,6 +191,7 @@ async def call_llm(system_prompt: str | list[dict], messages: list[dict], model:
                 f"Would have answered: {last_message}"
             ),
             model=model,
+            ok=False,
         )
 
     try:
@@ -187,15 +211,8 @@ async def call_llm(system_prompt: str | list[dict], messages: list[dict], model:
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError as exc:
-        # The raw exception (often the provider's full JSON error body) goes
-        # to server logs only — a student should never see internal API
-        # error payloads in their chat, confirmed live: a 400/500 from
-        # Anthropic was showing up verbatim as the tutor's "reply".
-        logger.error("Anthropic API error in call_llm (model=%s): %s", model, exc)
-        return LLMResult(
-            text="Sorry, I'm having trouble reaching the AI service right now. Please try again in a bit.",
-            model=model,
-        )
+        _report_anthropic_error(exc, "call_llm", model)
+        return LLMResult(text=_UNREACHABLE_REPLY, model=model, ok=False)
 
 
 async def classify(
@@ -214,7 +231,7 @@ async def classify(
     value or the response gets truncated mid-tag.
     """
     if _client is None:
-        return LLMResult(text=fallback, model=model)
+        return LLMResult(text=fallback, model=model, ok=False)
 
     try:
         response = await _client.messages.create(
@@ -234,8 +251,8 @@ async def classify(
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError as exc:
-        logger.error("Anthropic API error in classify (model=%s): %s", model, exc)
-        return LLMResult(text=fallback, model=model)
+        _report_anthropic_error(exc, "classify", model)
+        return LLMResult(text=fallback, model=model, ok=False)
 
 
 async def translate_with_claude(
@@ -317,5 +334,5 @@ async def translate_with_claude(
             cache_read_tokens=response.usage.cache_read_input_tokens or 0,
         )
     except anthropic.APIError as exc:
-        logger.error("Anthropic API error in translate_with_claude (model=%s): %s", model, exc)
+        _report_anthropic_error(exc, "translate_with_claude", model)
         return None

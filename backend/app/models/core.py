@@ -731,6 +731,29 @@ class SchoolCreditEvent(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
+class PresentationJob(Base):
+    """
+    One row per Gamma presentation generation started from
+    POST /admin/presentation/generate — records WHICH school (and which
+    teacher) started the job, so the status endpoint can (a) refuse to show
+    a generation_id to a caller outside that school's scope and (b) bill
+    the SCHOOL THAT STARTED IT rather than whoever happens to poll. Before
+    this table existed nothing tied a generation_id to a centre at all:
+    any signed-in teacher could poll any id, and the poller's own
+    centre_id was billed (crashing on NOT NULL for an org_admin, who has
+    none). `billed` is set the first time Gamma reports a completed cost,
+    belt-and-braces alongside school_billing.has_billed_gamma_generation.
+    """
+    __tablename__ = "presentation_jobs"
+
+    generation_id = Column(Text, primary_key=True)  # Gamma's generationId
+    centre_id = Column(Integer, ForeignKey("centres.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # pending | completed | failed (mirrors Gamma's)
+    billed = Column(Boolean, nullable=False, default=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
 class SchoolPilotGrant(Base):
     __tablename__ = "school_pilot_grants"
     __table_args__ = (CheckConstraint("amount > 0", name="ck_school_pilot_grant_amount"),)

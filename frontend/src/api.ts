@@ -41,11 +41,9 @@ export function setToken(token: string | null) {
 // A separate key/session from the teacher token above — the unified login
 // page can issue either kind depending on the phone number entered (see
 // api.checkPhone), and both can coexist since they're stored separately.
-// Exported (unlike the teacher getToken above) because pages/Call.tsx
-// needs it directly to build its WebSocket URL — a browser WebSocket
-// handshake can't set a custom Authorization header, so the token has to
-// go in the URL as a `?token=` query param instead of through
-// requestStudent's normal header-based auth.
+// Never put this token in a URL: the voice-call WebSocket (pages/Call.tsx)
+// used to, and URLs get logged — it now uses a short-lived single-use
+// ticket from studentApi.voiceCallTicket() instead.
 export function getStudentToken(): string | null {
   return localStorage.getItem("student_token");
 }
@@ -793,6 +791,13 @@ export const studentApi = {
   // app.routers.student_app's set_tutor_style).
   setTutorStyle: (style: "balanced" | "hint_first") =>
     requestStudent("/student-app/tutor-style", { method: "POST", body: JSON.stringify({ style }) }) as Promise<StudentProfile>,
+  // Short-lived (60s), single-use credential for the voice-call WebSocket
+  // — the only thing backend app.routers.voice_call accepts (`?ticket=`).
+  // A browser WebSocket handshake can't carry an Authorization header, so
+  // something has to go in the URL; this ticket is what does, never the
+  // week-long student token. Call it immediately before connecting.
+  voiceCallTicket: () =>
+    requestStudent("/student-app/voice-call/ticket", { method: "POST" }) as Promise<{ ticket: string; expires_in: number }>,
 };
 
 export interface CreateOrderResponse {

@@ -15,6 +15,10 @@ scripts/send_reengagement_nudges.py:
 
     0 12 * * * cd /path/to/qlass-ai && venv/bin/python3 scripts/send_revision_reminders.py >> logs/cron-revision.log 2>&1
 
+Idempotent per (student, topic, day): a Redis marker (scripts/job_markers.py)
+is set BEFORE each send, so re-running after a crash — or a cron overlap —
+never reminds the same student about the same topic twice in one day.
+
 Usage:
     python scripts/send_revision_reminders.py [--dry-run]
 """
@@ -24,11 +28,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.database import SessionLocal  # noqa: E402
 from app.models.core import Student  # noqa: E402
 from app.services import revision_scheduler  # noqa: E402
 from app.services.whatsapp_client import send_whatsapp_message  # noqa: E402
+from job_markers import JobMarker  # noqa: E402
+
+JOB_NAME = "revision_reminders"
 
 
 def _format_reminder(student: Student, topic: str) -> str:
@@ -41,7 +49,9 @@ def _format_reminder(student: Student, topic: str) -> str:
 
 async def send_reminders(dry_run: bool) -> None:
     db = SessionLocal()
+    marker = JobMarker(JOB_NAME)
     sent = 0
+    skipped = 0
     try:
         due_rows = revision_scheduler.get_due_reviews(db)
         if not due_rows:
@@ -62,17 +72,22 @@ async def send_reminders(dry_run: bool) -> None:
             student = students_by_id.get(row.student_id)
             if student is None:
                 continue
+            if await marker.already_sent(student.id, row.topic):
+                skipped += 1
+                continue  # already reminded today (earlier/crashed run)
             message = _format_reminder(student, row.topic)
 
             if dry_run:
                 print(f"[DRY RUN] Would remind {student.phone} ({student.name}) to revise *{row.topic}*: {message}")
             else:
+                await marker.mark_sent(student.id, row.topic)  # before the send, never after
                 result = await send_whatsapp_message(student.phone, message)
                 print(f"{'Sent' if result.get('sent') else 'FAILED'} revision reminder to {student.phone} ({student.name}) on '{row.topic}'")
             sent += 1
-        print(f"\n{sent} revision reminder(s) {'would be ' if dry_run else ''}sent.")
+        print(f"\n{sent} revision reminder(s) {'would be ' if dry_run else ''}sent, {skipped} already sent today.")
     finally:
         db.close()
+        await marker.close()
 
 
 def main() -> None:

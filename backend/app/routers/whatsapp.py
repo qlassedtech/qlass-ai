@@ -4,7 +4,7 @@ import re
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Response
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,12 +27,15 @@ from app.services.whatsapp_client import (
     send_whatsapp_image,
     send_whatsapp_buttons,
     verify_webhook_auth,
+    note_webhook_auth_rejected,
+    WEBHOOK_AUTH_HEADER,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech
 from app.services.llm_client import translate_with_claude
 from app.services.audio_qa import get_duration_seconds
 from app.services.ocr_client import extract_text_from_image
 from app.services.image_client import generate_image
+from app.services.mindmap import build_mindmap_image
 from app.services.document_client import extract_text_from_document
 from app.services import audit_log, cost_tracker, nudges, school_billing
 from app.services.escalation import (
@@ -44,7 +47,9 @@ from app.services.escalation import (
 )
 from app.services.profile_builder import next_missing_field
 from app.services import rate_limit
-from app.services.rate_limit import is_rate_limited, is_signup_rate_limited, student_lock
+from app.services.rate_limit import (
+    is_rate_limited, is_signup_rate_limited, platform_spend_cap_exceeded, student_turn_lock,
+)
 from app.services import tenancy
 from app.services.tenancy import get_qlass_direct_centre_id
 from app.services.referral import generate_referral_code, apply_referral_at_signup, try_claim_late_referral
@@ -62,11 +67,33 @@ router = APIRouter()
 
 WEBHOOK_LEASE_SECONDS = 5 * 60
 WEBHOOK_RETRY_INTERVAL_SECONDS = 30
+# Backoff after the retry worker's own iteration blows up (a DB blip) —
+# short enough to recover quickly, long enough not to hammer a DB that's
+# already struggling.
+WEBHOOK_RETRY_ERROR_BACKOFF_SECONDS = 10
 WEBHOOK_RETRY_BATCH_SIZE = 100
-WEBHOOK_PROCESSING_TIMEOUT_SECONDS = 240  # under the lease, so a hung job can't be re-claimed mid-flight
+# Under the lease, so a hung job can't be re-claimed mid-flight, and
+# strictly under the per-student lock TTL (defined next to it in
+# app.services.rate_limit, which explains the double-billing that
+# happened when the two drifted apart).
+WEBHOOK_PROCESSING_TIMEOUT_SECONDS = rate_limit.STUDENT_TURN_TIMEOUT_SECONDS
 WEBHOOK_MAX_ATTEMPTS = 3
 SLOW_REPLY_NOTICE = "This is taking longer than expected — please send your question again in a moment."
 PLATFORM_BUSY_NOTICE = "We're busy right now, please try again in a bit."
+# Sent exactly once, when a job has burned through WEBHOOK_MAX_ATTEMPTS —
+# before this the student's message just silently vanished (audit, Sept
+# 2026): every attempt failed, nothing was ever sent back.
+FAILED_JOB_NOTICE = "Sorry, something went wrong on our side and I couldn't answer that — please send it again."
+
+# Inbound Wati payload `type` values a real customer can send that this
+# bot can't handle (see _handle_message's unsupported-content branch).
+# Anything else with no recognisable content — our own outgoing messages
+# echoed back (owner=true), delivery/read status events, template events
+# — is acknowledged silently rather than answered: confirmed live (audit,
+# Sept 2026) that every one of those was getting a "Sorry, I can only
+# handle text, voice notes, photos, and documents" reply, i.e. the bot
+# replied to its own messages.
+UNSUPPORTED_CUSTOMER_MESSAGE_TYPES = {"sticker", "video", "location", "contacts", "contact"}
 
 # asyncio only keeps a weak reference to a task — without this set a
 # fire-and-forget task can be garbage-collected mid-run.
@@ -469,13 +496,17 @@ async def receive_message(request: Request):
     separate outbound call to Wati's API, not dependent on this response.
 
     Unlike Meta's Cloud API, Wati has no GET verification handshake — you just
-    point Wati's dashboard webhook setting at this URL. The secret can be
-    supplied either as a custom Authorization header (see Wati's Webhook
-    settings) or as a `?secret=...` query parameter baked directly into the
-    URL registered with Wati — see verify_webhook_auth for why both exist.
+    point Wati's dashboard webhook setting at this URL. The secret is
+    supplied ONLY as the custom Authorization header configured in Wati's
+    Webhook settings (see whatsapp_client.WEBHOOK_AUTH_HEADER); a `?secret=`
+    query parameter is ignored, so it can never appear in an access log.
+    A rejection is an empty 403 — no detail that would tell a scanner which
+    part of the credential was wrong.
     """
-    if not verify_webhook_auth(request.headers.get("authorization"), request.query_params.get("secret")):
-        raise HTTPException(status_code=403, detail="Invalid webhook auth")
+    auth_header = request.headers.get(WEBHOOK_AUTH_HEADER)
+    if not verify_webhook_auth(auth_header):
+        note_webhook_auth_rejected(had_header=bool(auth_header), had_query_secret="secret" in request.query_params)
+        return Response(status_code=403)
 
     try:
         payload = await request.json()
@@ -558,30 +589,11 @@ def _claim_webhook_job(db: Session, message_id: str, now: datetime) -> bool:
     return claimed > 0
 
 
-async def _platform_spend_cap_exceeded(db: Session) -> bool:
-    """Daily platform-wide raw-spend ceiling — alerts (logger.error) once per IST day."""
-    spend = cost_tracker.platform_spend_today(db)
-    if spend < settings.daily_platform_spend_cap_inr:
-        return False
-    alert_key = f"platform_spend_alerted:{datetime.now(cost_tracker.IST).date().isoformat()}"
-    already_alerted = True
-    try:
-        if rate_limit._redis is not None:
-            already_alerted = not await rate_limit._redis.set(alert_key, "1", ex=24 * 3600, nx=True)
-        else:
-            already_alerted = alert_key in _fallback_alert_keys
-            _fallback_alert_keys.add(alert_key)
-    except Exception:
-        pass
-    if not already_alerted:
-        logger.error(
-            "DAILY PLATFORM SPEND CAP HIT: raw spend ₹%.2f >= cap ₹%.2f — WhatsApp tutoring paused until IST midnight",
-            spend, settings.daily_platform_spend_cap_inr,
-        )
-    return True
-
-
-_fallback_alert_keys: set[str] = set()
+# Daily platform-wide raw-spend ceiling — now shared with the voice call
+# and web/app channels; see app.services.rate_limit.platform_spend_cap_
+# exceeded. Kept under its old private name so existing call sites and
+# tests keep working.
+_platform_spend_cap_exceeded = platform_spend_cap_exceeded
 
 
 def _canonical_lock_phone(db: Session, from_phone: str) -> str:
@@ -634,10 +646,29 @@ async def _process_queued_webhook(message_id: str) -> None:
 
         phone = payload.get("waId")
         lock_phone = _canonical_lock_phone(db, phone) if phone else None
-        try:
-            async with (student_lock(lock_phone) if lock_phone else nullcontext()):
+        # student_turn_lock (not the raw student_lock) on purpose: its
+        # release swallows LockNotOwnedError — a lock whose TTL elapsed
+        # while the turn was still running. That exception used to escape
+        # `async with` AFTER _handle_message had already sent and billed the
+        # reply, land in the generic handler below, re-queue the job, and
+        # the retry worker re-ran the whole turn: second reply, second
+        # bill (confirmed live, audit Sept 2026). The TTL itself is now
+        # also pinned above WEBHOOK_PROCESSING_TIMEOUT_SECONDS (see
+        # rate_limit.STUDENT_LOCK_TIMEOUT_SECONDS) so it shouldn't happen
+        # at all; this makes it harmless if it somehow still does.
+        #
+        # asyncio.TimeoutError is handled HERE, inside the lock's `async
+        # with`, so nothing raised by the lock release (which runs on the
+        # way out) can ever shadow it — the SLOW_REPLY_NOTICE below must
+        # actually reach the student.
+        timed_out = False
+        async with (student_turn_lock(lock_phone) if lock_phone else nullcontext()):
+            try:
                 await asyncio.wait_for(_handle_message(db, payload), timeout=WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+            except asyncio.TimeoutError:
+                timed_out = True
+
+        if timed_out:
             db.rollback()
             job = db.query(ProcessedWebhookMessage).filter(ProcessedWebhookMessage.message_id == message_id).first()
             if job:
@@ -666,6 +697,15 @@ async def _process_queued_webhook(message_id: str) -> None:
             db.commit()
             if exhausted:
                 logger.error("Webhook job %s failed %s times — giving up", message_id, job.attempts)
+                # Reached once per job (the pending -> failed transition
+                # happens exactly once), so the student gets exactly one
+                # apology rather than silence.
+                from_phone = (payload or {}).get("waId") if isinstance(payload, dict) else None
+                if from_phone:
+                    try:
+                        await send_whatsapp_message(from_phone, FAILED_JOB_NOTICE)
+                    except Exception:
+                        logger.exception("Could not send the failed-job notice for webhook job %s", message_id)
                 return
         logger.exception("Webhook job %s failed and will be retried", message_id)
     finally:
@@ -673,31 +713,88 @@ async def _process_queued_webhook(message_id: str) -> None:
 
 
 async def retry_pending_webhooks() -> None:
-    """Continuously recover persisted jobs left pending by failed workers."""
+    """
+    Continuously recover persisted jobs left pending by failed workers.
+
+    Every iteration is fully guarded: the loop only ever exits on
+    cancellation (app shutdown). Confirmed live (audit, Sept 2026) that a
+    single DB hiccup in the query below propagated out of the loop and
+    silently killed the recovery worker for the rest of the process's
+    lifetime — every job that later needed recovery just sat there.
+    """
     while True:
-        db = SessionLocal()
         try:
-            now = datetime.now(timezone.utc)
-            jobs = (
-                db.query(ProcessedWebhookMessage.message_id)
-                .filter(
-                    (ProcessedWebhookMessage.status == "pending")
-                    | ((ProcessedWebhookMessage.status == "processing") & (ProcessedWebhookMessage.lease_expires_at < now))
-                )
-                .order_by(ProcessedWebhookMessage.processed_at)
-                .limit(WEBHOOK_RETRY_BATCH_SIZE)
-                .all()
-            )
-        finally:
-            db.close()
-        for (message_id,) in jobs:
-            await _process_queued_webhook(message_id)
+            await _retry_pending_webhooks_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("retry_pending_webhooks iteration failed — backing off and continuing")
+            await asyncio.sleep(WEBHOOK_RETRY_ERROR_BACKOFF_SECONDS)
+            continue
         await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
+
+
+async def _retry_pending_webhooks_once() -> None:
+    """One pass of the recovery worker: find recoverable jobs, process them."""
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        jobs = (
+            db.query(ProcessedWebhookMessage.message_id)
+            .filter(
+                (ProcessedWebhookMessage.status == "pending")
+                | ((ProcessedWebhookMessage.status == "processing") & (ProcessedWebhookMessage.lease_expires_at < now))
+            )
+            .order_by(ProcessedWebhookMessage.processed_at)
+            .limit(WEBHOOK_RETRY_BATCH_SIZE)
+            .all()
+        )
+    finally:
+        db.close()
+    for (message_id,) in jobs:
+        await _process_queued_webhook(message_id)
+
+
+def _has_recognisable_content(payload: dict) -> bool:
+    """True if this is something a student actually sent that _handle_message can act or reply on."""
+    return bool(
+        parse_incoming_button_reply(payload)
+        or parse_incoming_message(payload)
+        or parse_incoming_audio(payload)
+        or parse_incoming_image(payload)
+        or parse_incoming_document(payload)
+        or payload.get("type") in UNSUPPORTED_CUSTOMER_MESSAGE_TYPES
+    )
 
 
 async def _handle_message(db: Session, payload: dict) -> None:
     from_phone = payload.get("waId")
     if not from_phone:
+        return
+
+    # Our own outgoing messages echoed back by Wati (owner=true) and non-
+    # message events (delivery/read status, template events) are not
+    # something to answer — see UNSUPPORTED_CUSTOMER_MESSAGE_TYPES. Checked
+    # before the rate limit so an echo of our own reply never counts
+    # against the student's message budget either.
+    if payload.get("owner") is True:
+        logger.debug("Ignoring owner echo for ****%s", from_phone[-4:])
+        return
+    event_type = payload.get("eventType")
+    if event_type is not None and event_type != "message":
+        logger.debug("Ignoring non-message webhook event %r for ****%s", event_type, from_phone[-4:])
+        return
+    # No recognisable content at all (a system event that slipped past the
+    # eventType check, an empty text, an unknown payload shape): acknowledge
+    # silently — and BEFORE the rate limit / student resolution / credit
+    # gates below, so a stray event can't spend the student's message
+    # budget, create a profile for an unknown number, or trigger an
+    # "out of credits" notice in reply to nothing.
+    if not _has_recognisable_content(payload):
+        logger.debug(
+            "Ignoring webhook payload with no recognisable content for ****%s (type=%r)",
+            from_phone[-4:], payload.get("type"),
+        )
         return
 
     # Handled before rate limiting / student resolution — Qlass staff
@@ -999,7 +1096,10 @@ async def _handle_message(db: Session, payload: dict) -> None:
                     "Sorry, I couldn't process that voice note right now — please type your question and I'll answer straight away.",
                 )
                 return
-            cost_tracker.record_minute_usage(db, "sarvam_stt", get_duration_seconds(audio_bytes) / 60, student.id)
+            # librosa decode is CPU-bound — off the event loop so one
+            # long voice note can't stall every other in-flight turn.
+            duration_seconds = await asyncio.to_thread(get_duration_seconds, audio_bytes)
+            cost_tracker.record_minute_usage(db, "sarvam_stt", duration_seconds / 60, student.id)
         elif image_parsed:
             _, media_url = image_parsed
             if not student.has_feature("ocr"):
@@ -1033,16 +1133,27 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 return
 
             filename = guess_filename_from_media_url(media_url)
-            message_text = extract_text_from_document(document_bytes, filename)
+            # PDF/DOCX parsing is CPU-bound — off the event loop.
+            message_text = await asyncio.to_thread(extract_text_from_document, document_bytes, filename)
             if not message_text:
                 await send_whatsapp_message(from_phone, "Sorry, I couldn't read any text in that file — could you try a different file or type your question?")
                 return
-        else:
-            # Unsupported message type (sticker, location, contact card,
-            # button/list reply, etc.) — let the student know rather than
-            # going silent.
+        elif payload.get("type") in UNSUPPORTED_CUSTOMER_MESSAGE_TYPES:
+            # A real message from the student of a kind this bot can't
+            # handle (sticker, location, contact card, video) — let them
+            # know rather than going silent.
             await send_whatsapp_message(
                 from_phone, "Sorry, I can only handle text, voice notes, photos, and documents right now."
+            )
+            return
+        else:
+            # No recognisable content at all (a status/system event that
+            # slipped past the eventType check above, an empty text, an
+            # unknown payload shape) — acknowledge silently; replying to
+            # something the student didn't send only confuses them.
+            logger.debug(
+                "Ignoring webhook payload with no recognisable content for ****%s (type=%r)",
+                from_phone[-4:], payload.get("type"),
             )
             return
 
@@ -1116,6 +1227,20 @@ async def _handle_message(db: Session, payload: dict) -> None:
                 # so only treat this as the "send_result" when there wasn't
                 # already a successful voice send above.
                 send_result = image_result
+    if result.mindmap_topic:
+        # Same delivery path as a generated diagram (an image with the
+        # explanation as its caption) — only the pixels come from
+        # app.services.mindmap instead of the image generator. Billing for
+        # the Claude call happens inside build_mindmap_image; a failure
+        # returns None and the turn degrades to text exactly like a failed
+        # generate_image above.
+        mindmap_bytes = await build_mindmap_image(db, student.id, result.mindmap_topic)
+        if mindmap_bytes:
+            mindmap_result = await send_whatsapp_image(from_phone, mindmap_bytes, caption=result.reply_text)
+            if not mindmap_result.get("sent"):
+                logger.error("send_whatsapp_image (mind map) failed for ****%s: %s", from_phone[-4:], mindmap_result)
+            elif not send_result:
+                send_result = mindmap_result
     if not send_result or not send_result.get("sent"):
         fallback_result = await send_whatsapp_message(from_phone, result.reply_text)
         if not fallback_result.get("sent"):

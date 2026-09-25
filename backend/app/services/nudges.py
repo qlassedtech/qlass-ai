@@ -242,6 +242,12 @@ async def _generate_fun_fact(db: Session, student: Student) -> tuple[str, str] |
             cache_write_tokens=result.cache_write_tokens, cache_read_tokens=result.cache_read_tokens,
             feature="nudge_funfact",
         )
+        if not getattr(result, "ok", True):
+            # A failed call's `text` is the "having trouble reaching the AI
+            # service" apology, not a fact — that must never go out as a
+            # "Did you know?" message. No point trying the other chunks
+            # either while the provider is down; skip this nudge type.
+            return None
         message = result.text.strip()
         if message and NO_FACT_SENTINEL not in message:
             return message, chapter

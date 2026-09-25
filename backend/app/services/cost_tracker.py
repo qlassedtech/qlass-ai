@@ -201,7 +201,29 @@ def get_spend_since(db: Session, student_id: int, since: datetime) -> float:
     return float(total)
 
 
-def has_credits(db: Session, student_id: int) -> bool:
+# The wallet must hold at least this much (₹, post-markup) before a turn is
+# allowed to start. A single has_credits() check precedes 5-9 unconditional
+# deductions per turn (STT, tutor reply, translation, TTS, sometimes OCR/a
+# diagram), none of which re-check — so a "balance > 0" gate let a wallet
+# holding ₹0.10 run a full voice turn and end up at −₹8.32 (confirmed
+# live, audit Sept 2026). ₹3 is roughly one typical voice turn at
+# MARKUP_MULTIPLIER (1.2x) on the PRICING table above: ~0.5 min STT
+# (₹0.25) + a Sonnet reply of ~3k cached input / 300 output tokens (~₹0.55)
+# + a Haiku translation (~₹0.15) + a ~600-char TTS reply (₹1.80) ≈ ₹2.75
+# raw, ≈ ₹3.30 billed — so at ₹3 the worst case is a small, bounded dip
+# below zero rather than several rupees of overdraft.
+MIN_TURN_BALANCE_INR = 3.0
+
+
+def has_credits(db: Session, student_id: int, allow_low: bool = False) -> bool:
+    """
+    Whether this student may start another (billable) turn.
+
+    `allow_low=True` relaxes the gate to any positive balance — for a
+    caller that only ever bills a single cheap call (not a full multi-
+    deduction turn) and would rather let a student spend their last few
+    paise than block them. Default is the MIN_TURN_BALANCE_INR floor.
+    """
     student = db.query(Student).filter(Student.id == student_id).first()
     if student is not None and _is_unlimited_active(student):
         # Still within their flat-fee allotment for this day/week/month —
@@ -213,8 +235,10 @@ def has_credits(db: Session, student_id: int) -> bool:
         # normally untouched for an unlimited-plan student — see _deduct),
         # so the gate becomes the same wallet-balance check everyone else
         # gets, not an outright block until the period resets.
-        return get_balance(db, student_id) > 0
-    return get_balance(db, student_id) > 0
+    balance = get_balance(db, student_id)
+    if allow_low:
+        return balance > 0
+    return balance >= MIN_TURN_BALANCE_INR
 
 
 def get_usage_fraction(db: Session, student: Student) -> float | None:
@@ -453,6 +477,17 @@ def record_platform_claude_usage(
 
 
 def record_char_usage(db: Session, service: str, char_count: int, student_id: int) -> float:
+    if service == "sarvam_tts":
+        # Callers bill len(reply_text), but sarvam_client._call_tts_api only
+        # ever sends the first TTS_CHAR_LIMIT chars (bulbul:v3's hard cap) —
+        # so a 4,000-char reply was being charged for 4,000 chars of TTS
+        # that Sarvam never synthesised or billed us for (audit, Sept 2026).
+        # Clamped here, at the one place every TTS caller funnels through.
+        # Lazy import: sarvam_client pulls in audio_qa (librosa/numpy) and
+        # this module is imported by nearly everything.
+        from app.services.sarvam_client import TTS_CHAR_LIMIT
+
+        char_count = min(char_count, TTS_CHAR_LIMIT)
     raw_cost = char_count * PRICING[service]["per_char"]
     return _deduct(db, service, raw_cost, student_id)
 

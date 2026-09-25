@@ -133,6 +133,11 @@ class Settings(BaseSettings):
     support_phone: str = "9031003985"
     school_review_staff_phones: str = "919031003985,918460184666"
 
+    # Where operational alerts (provider 401/402/5xx, inbound silence, disk,
+    # missing backups — see app.services.alerts + scripts/ops_heartbeat.py)
+    # are sent over WhatsApp. Falls back to support_phone when unset.
+    ops_alert_phone: str | None = None
+
     # Wati utility-template names for cold-contact notifications — blank
     # until each template is approved, at which point the send switches
     # from a session message (silently undelivered outside a 24h window)

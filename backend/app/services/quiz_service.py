@@ -59,6 +59,7 @@ def _combine_usage(results: list[LLMResult]) -> LLMResult:
         output_tokens=sum(r.output_tokens for r in results),
         cache_write_tokens=sum(r.cache_write_tokens for r in results),
         cache_read_tokens=sum(r.cache_read_tokens for r in results),
+        ok=all(r.ok for r in results),
     )
 
 
@@ -121,7 +122,7 @@ async def generate_quiz_questions(
     return questions, _combine_usage(results)
 
 
-async def grade_answer(question: str, correct_answer: str, given_answer: str) -> tuple[bool, object]:
+async def grade_answer(question: str, correct_answer: str, given_answer: str) -> tuple[bool | None, LLMResult]:
     """
     Loose equivalence check (via a cheap deterministic Haiku call) rather
     than exact string matching — a student answering "0.8" vs "0.8 N" vs
@@ -130,6 +131,14 @@ async def grade_answer(question: str, correct_answer: str, given_answer: str) ->
     "B"), and a student may reply with the letter, the option's full text,
     or both (e.g. "B" / "B) Face recognition" / "face recognition") — the
     question text itself carries the A)/B)/C)/D) options for this case.
+
+    Returns (None, result) when the grading call itself failed (provider
+    outage, no API key) — NOT (False, result): the classifier's "no"
+    fallback used to be indistinguishable from a real wrong answer, so an
+    Anthropic outage marked every quiz answer wrong and wrote it into the
+    student's weak topics (audit, Sept 2026). The caller
+    (app.services.quiz_flow.handle_quiz_answer) treats None as "couldn't
+    grade — try again" and records nothing.
     """
     system_prompt = (
         "You are grading a student's quiz answer. Given the question, the expected correct answer, "
@@ -142,4 +151,6 @@ async def grade_answer(question: str, correct_answer: str, given_answer: str) ->
     )
     message = f"Question: {question}\nExpected answer: {correct_answer}\nStudent's answer: {given_answer}"
     result = await classify(system_prompt, [{"role": "user", "content": message}], fallback="no", model=QUIZ_MODEL)
+    if not result.ok:
+        return None, result
     return result.text.strip().lower().startswith("y"), result

@@ -1,40 +1,64 @@
 # Versioned crontab fragment for the Skoolgpt backend host.
-# Install with:  crontab scripts/crontab   (server timezone assumed to be IST)
+# Install/merge with:  bash scripts/install_crontab.sh   (deploy.sh and
+# server_hardening.sh both do this; server timezone assumed to be IST).
+#
+# Every job is wrapped in `flock -n /tmp/skoolgpt-<job>.lock` so a run that
+# overlaps a still-running previous one (slow WhatsApp API, stuck backup)
+# exits immediately instead of double-sending — same convention the other
+# apps on this host use (`flock -n /tmp/tq-*.lock`). Each send_* job is
+# additionally idempotent per student/day via scripts/job_markers.py, so a
+# crashed run can be re-run by hand without re-sending to everyone.
 MAILTO=""
 APP=/usr/share/nginx/aitutor.qlass.in/public_python_aios
 PY=/usr/share/nginx/aitutor.qlass.in/public_python_aios/venv/bin/python
 
-# Nightly DB backup — 02:30 IST
-30 2 * * *   cd $APP && bash scripts/backup_db.sh >> logs/cron-backup.log 2>&1
+# Nightly DB + uploads backup — 02:30 IST (encrypted/off-box when
+# BACKUP_PASSPHRASE / BACKUP_RCLONE_REMOTE are set in .env — see README)
+30 2 * * *   cd $APP && flock -n /tmp/skoolgpt-backup.lock bash scripts/backup_db.sh >> logs/cron-backup.log 2>&1
+
+# Monthly restore drill — 04:00 IST on the 1st: restores the newest dump
+# into a scratch database and counts students, so we find out a backup is
+# unrestorable long before we need it
+0 4 1 * *    cd $APP && flock -n /tmp/skoolgpt-restore-check.lock bash scripts/backup_db.sh --restore-check >> logs/cron-backup.log 2>&1
 
 # Subscription expiry reminders — daily 08:00 IST
-0 8 * * *    cd $APP && $PY scripts/send_subscription_expiry_reminders.py >> logs/cron-subscription-expiry.log 2>&1
+0 8 * * *    cd $APP && flock -n /tmp/skoolgpt-subscription-expiry.lock $PY scripts/send_subscription_expiry_reminders.py >> logs/cron-subscription-expiry.log 2>&1
 
 # Re-engagement nudges — daily 11:00 IST
-0 11 * * *   cd $APP && $PY scripts/send_reengagement_nudges.py >> logs/cron-reengagement.log 2>&1
+0 11 * * *   cd $APP && flock -n /tmp/skoolgpt-reengagement.lock $PY scripts/send_reengagement_nudges.py >> logs/cron-reengagement.log 2>&1
 
 # Engagement nudges — daily 18:00 IST (feature_highlight/social_proof only
 # — "fun_fact" is submitted/fetched by the two batch jobs below instead)
-0 18 * * *   cd $APP && $PY scripts/send_engagement_nudges.py >> logs/cron-engagement.log 2>&1
+0 18 * * *   cd $APP && flock -n /tmp/skoolgpt-engagement.lock $PY scripts/send_engagement_nudges.py >> logs/cron-engagement.log 2>&1
 
 # Fun-fact nudge batch — submit daily 16:00 IST (Anthropic Message Batches
 # API, ~50% cheaper than a synchronous call; see app.services.nudges)
-0 16 * * *   cd $APP && $PY scripts/submit_nudge_funfact_batch.py >> logs/cron-nudge-funfact-submit.log 2>&1
+0 16 * * *   cd $APP && flock -n /tmp/skoolgpt-nudge-funfact-submit.lock $PY scripts/submit_nudge_funfact_batch.py >> logs/cron-nudge-funfact-submit.log 2>&1
 
 # Fun-fact nudge batch — fetch + send 17:15 IST (~75min after submit; most
 # batches finish well under an hour, SLA up to 24h) and again 22:00 IST as
-# a cheap retry for anything not yet ready
-15 17 * * *  cd $APP && $PY scripts/fetch_nudge_funfact_batch.py >> logs/cron-nudge-funfact-fetch.log 2>&1
-0 22 * * *   cd $APP && $PY scripts/fetch_nudge_funfact_batch.py >> logs/cron-nudge-funfact-fetch-retry.log 2>&1
+# a cheap retry for anything not yet ready (same lock: the two must never
+# overlap, they'd process the same batch twice)
+15 17 * * *  cd $APP && flock -n /tmp/skoolgpt-nudge-funfact-fetch.lock $PY scripts/fetch_nudge_funfact_batch.py >> logs/cron-nudge-funfact-fetch.log 2>&1
+0 22 * * *   cd $APP && flock -n /tmp/skoolgpt-nudge-funfact-fetch.lock $PY scripts/fetch_nudge_funfact_batch.py >> logs/cron-nudge-funfact-fetch-retry.log 2>&1
 
 # Spaced-repetition revision reminders — daily 12:30 IST
-30 12 * * *  cd $APP && $PY scripts/send_revision_reminders.py >> logs/cron-revision.log 2>&1
+30 12 * * *  cd $APP && flock -n /tmp/skoolgpt-revision.lock $PY scripts/send_revision_reminders.py >> logs/cron-revision.log 2>&1
 
 # Habit nudges — daily 19:00 IST
-0 19 * * *   cd $APP && $PY scripts/send_habit_nudges.py >> logs/cron-habit.log 2>&1
+0 19 * * *   cd $APP && flock -n /tmp/skoolgpt-habit.lock $PY scripts/send_habit_nudges.py >> logs/cron-habit.log 2>&1
 
 # Parent digests — Sunday 09:00 IST
-0 9 * * 0    cd $APP && $PY scripts/send_parent_digests.py >> logs/cron-parent-digests.log 2>&1
+0 9 * * 0    cd $APP && flock -n /tmp/skoolgpt-parent-digests.lock $PY scripts/send_parent_digests.py >> logs/cron-parent-digests.log 2>&1
 
 # Referral nudges — Sunday 10:00 IST
-0 10 * * 0   cd $APP && $PY scripts/send_referral_nudges.py >> logs/cron-referral.log 2>&1
+0 10 * * 0   cd $APP && flock -n /tmp/skoolgpt-referral.lock $PY scripts/send_referral_nudges.py >> logs/cron-referral.log 2>&1
+
+# Webhook payload retention — daily 03:45 IST (stub payloads on completed
+# rows >30d, hard-delete rows >180d; see scripts/purge_webhook_payloads.py)
+45 3 * * *   cd $APP && flock -n /tmp/skoolgpt-purge-webhook-payloads.lock $PY scripts/purge_webhook_payloads.py >> logs/cron-purge-webhook-payloads.log 2>&1
+
+# Ops heartbeat — hourly at :15 (inbound silence, provider error counters,
+# disk, backup freshness, /ready — alerts a human over WhatsApp on failure;
+# see scripts/ops_heartbeat.py + app.services.alerts)
+15 * * * *   cd $APP && flock -n /tmp/skoolgpt-ops-heartbeat.lock $PY scripts/ops_heartbeat.py >> logs/cron-ops-heartbeat.log 2>&1

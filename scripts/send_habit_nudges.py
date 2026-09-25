@@ -12,6 +12,10 @@ be run once a day via an external cron
 (e.g. `0 9 * * * python scripts/send_habit_nudges.py`), the same pattern as
 scripts/send_teacher_digest.py.
 
+Idempotent per (student, day): a Redis marker (scripts/job_markers.py) is
+set BEFORE each send, so re-running after a crash — or a cron overlap —
+never nudges the same student twice in one day.
+
 Usage:
     python scripts/send_habit_nudges.py [--dry-run]
 """
@@ -22,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
@@ -29,6 +34,9 @@ from app.models.core import ChatHistory, Student  # noqa: E402
 from app.services.habit import HABIT_MILESTONES  # noqa: E402
 from app.services.push_client import send_push  # noqa: E402
 from app.services.whatsapp_client import send_notification  # noqa: E402
+from job_markers import JobMarker  # noqa: E402
+
+JOB_NAME = "habit_nudges"
 
 
 def _has_engaged_in_window(db, student_id: int, window_start: datetime, window_end: datetime) -> bool:
@@ -45,7 +53,9 @@ def _has_engaged_in_window(db, student_id: int, window_start: datetime, window_e
 
 async def send_nudges(dry_run: bool) -> None:
     db = SessionLocal()
+    marker = JobMarker(JOB_NAME)
     sent = 0
+    skipped = 0
     try:
         students = db.query(Student).all()
         now = datetime.now(timezone.utc)
@@ -66,6 +76,9 @@ async def send_nudges(dry_run: bool) -> None:
                 window_end = created_at + timedelta(days=end)
                 if _has_engaged_in_window(db, student.id, window_start, window_end):
                     continue  # already earning it today via a real message
+                if await marker.already_sent(student.id):
+                    skipped += 1
+                    break  # already nudged today (earlier/crashed run)
 
                 day_label = name.replace("day", "Day ")
                 message = (
@@ -76,6 +89,7 @@ async def send_nudges(dry_run: bool) -> None:
                     print(f"[DRY RUN] Would nudge {student.phone} ({student.name}) — {name}: {message}")
                 else:
                     first_name = (student.name or "").split()[0] if student.name else "there"
+                    await marker.mark_sent(student.id)  # before the send, never after
                     result = await send_notification(
                         student.phone, settings.habit_bonus_template,
                         [first_name, f"{bonus:.0f}", str(elapsed_days)], message,
@@ -92,9 +106,10 @@ async def send_nudges(dry_run: bool) -> None:
                             print(f"Sent push nudge to student {student.id} ({name})")
                 sent += 1
                 break  # one nudge per student per run, even if multiple windows somehow overlap
-        print(f"\n{sent} nudge(s) {'would be ' if dry_run else ''}sent.")
+        print(f"\n{sent} nudge(s) {'would be ' if dry_run else ''}sent, {skipped} already sent today.")
     finally:
         db.close()
+        await marker.close()
 
 
 def main() -> None:

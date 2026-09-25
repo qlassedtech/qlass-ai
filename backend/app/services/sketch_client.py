@@ -23,7 +23,17 @@ SKETCH_MODEL = "claude-sonnet-4-6"
 # pipeline's per-diagram cost since it's the second of exactly two calls.
 SKETCH_CRITIQUE_MODEL = "claude-haiku-4-5-20251001"
 
-_VALID_TYPES = {"rect", "ellipse", "line", "arrow", "text"}
+# "branch" (a coloured, labelled quadratic curve) is never produced by the
+# diagram prompt below — it's emitted by app.services.mindmap's code layout
+# and shares this validator/renderer schema. Mind maps are NOT generated
+# here any more (they used to be a paragraph in _SYSTEM_PROMPT and came out
+# as concept diagrams); see that module.
+_VALID_TYPES = {"rect", "ellipse", "line", "arrow", "text", "branch"}
+
+# Optional per-element style fields (see mindmap.py's schema notes): every
+# element may carry any of these and they're passed through to the
+# renderer untouched — validation below never inspects or strips them.
+_OPTIONAL_STYLE_FIELDS = ("color", "width", "fill", "size", "weight", "align")
 
 _MAX_ELEMENTS = 20
 _CANVAS_W = 400
@@ -85,18 +95,6 @@ label says that quantity is zero or absent (e.g. if you label a point "vy = 0", 
 a vertical velocity arrow there — the correct diagram shows NO vertical arrow at that point, \
 only the horizontal one). Every arrow and every label must agree with each other and with the \
 real physical/scientific facts of what's being illustrated, not just look plausible in isolation.
-
-MIND MAP / CONCEPT MAP layout: if the requested prompt describes a mind map, concept map, or \
-summary map (e.g. it says "mind map", "concept map", "summary map", or "central topic node with \
-branching sub-topic nodes"), lay it out radially rather than as a labeled-parts diagram: one \
-central node (a "rect" or "ellipse") roughly in the middle of the canvas holding or labeled with \
-the main topic, and 3-6 branch nodes (also "rect" or "ellipse") arranged around it — spread \
-roughly evenly in a circle so they don't cluster on one side. Connect every branch node to the \
-central node with its own "line" or "arrow" element. Give every node (central and branch) a \
-short "text" label placed near it, following the same collision-avoidance spacing rules above. \
-Stay within the {_MAX_ELEMENTS}-element budget — with a central node plus up to 6 branches each \
-needing a shape, a connector, and a label, keep branch count near the middle of the 3-6 range \
-(e.g. 4-5) unless the topic clearly calls for more/fewer.
 
 Example 1 — prompt "the water cycle":
 [
@@ -164,6 +162,20 @@ def _is_valid_element(element: dict) -> bool:
             and isinstance(element.get("y"), (int, float))
             and isinstance(element.get("text"), str)
             and bool(element.get("text").strip())
+        )
+    if element_type == "branch":
+        points = element.get("points")
+        label = element.get("label")
+        return (
+            isinstance(points, list) and len(points) == 3
+            and all(
+                isinstance(p, list) and len(p) == 2 and all(isinstance(c, (int, float)) for c in p) for p in points
+            )
+            and isinstance(element.get("color"), str)
+            and isinstance(element.get("width"), (int, float))
+            and (label is None or isinstance(label, str))
+            and element.get("level") in (1, 2)
+            and element.get("label_at") in ("mid", "end")
         )
     return False
 

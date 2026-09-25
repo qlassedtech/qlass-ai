@@ -104,3 +104,64 @@ def test_profile_answer_missing_entirely_falls_back_to_none():
     raw = "Just a plain reply with no tag at all."
     result = _parsed(raw)
     assert result["profile_answer"] is None
+
+
+def test_mindmap_tag_extracted_and_stripped_without_image_prompt():
+    raw = (
+        "Here's a mind map of photosynthesis: it needs sunlight, water and CO2...\n"
+        "[[MINDMAP: photosynthesis]]\n"
+        '[[TRACK topic="photosynthesis" evaluated=false correct=null image=true audio=false '
+        "off_level=false video=false solved=na class_confirm=na profile_answer=NONE closing=false]]"
+    )
+    result = _parsed(raw)
+    assert result["mindmap_topic"] == "photosynthesis"
+    assert result["image_prompt"] is None
+    assert "[[MINDMAP" not in result["reply"] and "[[TRACK" not in result["reply"]
+    assert result["reply"].startswith("Here's a mind map")
+
+
+def test_mindmap_tag_wins_if_model_emits_both_tags():
+    raw = (
+        "Sure!\n[[IMAGE_PROMPT: a diagram of photosynthesis]]\n[[MINDMAP: photosynthesis]]\n"
+        '[[TRACK topic="photosynthesis" evaluated=false correct=null image=true audio=false video=false solved=na]]'
+    )
+    result = _parsed(raw)
+    assert result["mindmap_topic"] == "photosynthesis"
+    assert result["image_prompt"] is None  # never both
+    assert "[[IMAGE_PROMPT" not in result["reply"] and "[[MINDMAP" not in result["reply"]
+
+
+def test_mindmap_tag_ignored_when_image_is_false():
+    raw = (
+        "Sure!\n[[MINDMAP: photosynthesis]]\n"
+        '[[TRACK topic="photosynthesis" evaluated=false correct=null image=false audio=false video=false solved=na]]'
+    )
+    result = _parsed(raw)
+    assert result["mindmap_topic"] is None
+    assert "[[MINDMAP" not in result["reply"]
+
+
+def test_image_prompt_still_works_without_mindmap_tag():
+    raw = (
+        "Here's a plant cell.\n[[IMAGE_PROMPT: a labeled diagram of a plant cell]]\n"
+        '[[TRACK topic="plant cell" evaluated=false correct=null image=true audio=false video=false solved=na]]'
+    )
+    result = _parsed(raw)
+    assert result["image_prompt"] == "a labeled diagram of a plant cell"
+    assert result["mindmap_topic"] is None
+
+
+def test_mindmap_tag_stripped_even_without_track_tag():
+    result = _parsed("Reply text.\n[[MINDMAP: gravity]]")
+    assert result["reply"] == "Reply text."
+    assert result["mindmap_topic"] is None
+
+
+def test_prompt_routes_mind_maps_to_mindmap_tag_not_image_prompt():
+    from app.agents.tutor_agent import TutorAgent
+
+    static, _dynamic = TutorAgent().build_context({"class": "8", "board": "CBSE"}, [], [], image_generation_enabled=True)
+    assert "[[MINDMAP:" in static
+    assert "Never emit both an IMAGE_PROMPT line and a MINDMAP line" in static
+    # diagrams/pictures still go through IMAGE_PROMPT
+    assert "[[IMAGE_PROMPT:" in static

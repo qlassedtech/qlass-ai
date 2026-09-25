@@ -107,6 +107,8 @@ npm run dev
 cd backend && pytest              # some tests need the pg_db_session fixture — see tests/conftest.py
 cd frontend && npm run test
 ```
+Redis-backed tests run against database index 15 of whatever `REDIS_URL`
+points at (conftest.py forces it and flushes that index), never index 0.
 
 ## Populating the RAG corpus
 
@@ -264,7 +266,7 @@ doing anything else.
 ### 6. Register the real webhooks
 
 Only now — once you have a real public HTTPS URL — register:
-- **Wati**: point the WhatsApp webhook at `https://<your-domain>/whatsapp/webhook`, then set `WATI_WEBHOOK_SECRET` from what Wati gives you.
+- **Wati**: generate a 32+ character secret (`python -c "import secrets; print(secrets.token_urlsafe(48))"`), set it as `WATI_WEBHOOK_SECRET`, then in the Wati dashboard point the WhatsApp webhook at `https://<your-domain>/whatsapp/webhook` and enter the **same value in the webhook's custom `Authorization` header field**. That header is the only accepted credential — a `?secret=` in the webhook URL is ignored (it would land in the proxy's access log) and gets an empty 403.
 - **Razorpay**: point the subscriptions webhook at `https://<your-domain>/webhook/razorpay/subscriptions`, then set `RAZORPAY_WEBHOOK_SECRET`.
 
 Restart the backend after adding either secret so it picks them up.
@@ -310,9 +312,147 @@ backend replicas now) and several unbounded queries. Still true:
   constraint at high message-per-second throughput.
 - No centralized logging/error tracking (Sentry or similar) or uptime
   monitoring configured — you're relying on container logs alone.
-- Postgres backup/restore should be tested (see step 6) but there's no
-  automated backup job — set one up on the OVH volume or via a managed
-  Postgres offering.
+- Backups are only as good as their off-box copy and their last restore
+  drill — see "Backups" below; the nightly job warns on every run until
+  `BACKUP_PASSPHRASE` and `BACKUP_RCLONE_REMOTE` are set.
+
+## Deploying a release to the VPS (`scripts/deploy.sh`)
+
+The live host runs the backend as a systemd unit (`aitutor`, see
+`scripts/server_hardening.sh`) from a plain git checkout, not the compose
+file above. Every release goes through one script, run from the checkout
+as the app user:
+
+```bash
+cd /usr/share/nginx/aitutor.qlass.in/public_python_aios && bash scripts/deploy.sh
+```
+
+It is strictly ordered and stops at the first failure, before anything
+user-visible changes:
+
+1. `git pull --ff-only`
+2. `pip install` (`backend/requirements.lock` when present, else `requirements.txt`)
+3. the test suite (`pytest backend/tests`, minus the five files that need
+   the Postgres test DB — `test_habit/nudges/referral/retrieval/sales.py`);
+   a red suite aborts the deploy with nothing migrated or restarted.
+   The suite is safe to run on the live box with no extra env: the
+   database is in-memory SQLite, and `backend/tests/conftest.py` rewrites
+   `REDIS_URL` to database index `15` of the same Redis server (flushed at
+   session start and end) before the app is imported, so rate-limit/OTP/
+   alert state from tests never touches the production index `0`.
+4. `scripts/migrate.py`
+5. `scripts/check_schema_drift.py` — a **warning**, not a gate (see below)
+6. frontend build into `frontend/dist.next`, then an atomic `mv` swap into
+   `dist/` — a failed `vite build` leaves the previous site being served
+   (the old in-place build emptied `dist/` first, i.e. a blank site)
+7. `systemctl restart aitutor`, then `/ready` polled up to 30 s
+8. `scripts/install_crontab.sh` — merges `scripts/crontab` into the app
+   user's crontab, replacing our own stale lines (a changed schedule
+   applies) and leaving other apps' entries alone
+9. a one-screen summary
+
+`SKIP_TESTS=1` / `SKIP_FRONTEND=1` exist for emergencies and backend-only
+hotfixes; say why in the commit if you use them. The same crontab merge and
+a logrotate policy for `logs/*.log` (daily, 14 kept, compressed —
+`scripts/logrotate-skoolgpt.conf` → `/etc/logrotate.d/skoolgpt`) are
+installed by `sudo bash scripts/server_hardening.sh`, which is idempotent.
+
+### Schema drift check
+
+`python scripts/check_schema_drift.py` reflects the live database
+(`DATABASE_URL` from `.env`) and compares it column-by-column against the
+SQLAlchemy models, printing one row per table and exiting non-zero on any
+table/column that exists on one side only. It exists because production
+had accumulated hand-added columns (`students.email`, `tutor_level`, …,
+the whole `audit_logs` table) with no migration file, so the repo could no
+longer rebuild production — migration
+`0054_backfill_untracked_columns.sql` closes that gap idempotently. The
+check runs on every deploy (warning) and in CI against a database built
+purely from `database/schema.sql` + `database/migrations/` (gate), so the
+next hand-edit shows up in the deploy log the same day.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push/PR: Postgres 16 with pgvector
+(migration 0041 needs the extension), `schema.sql` + the full migration
+chain applied from scratch (a second `migrate.py` run must report nothing
+pending), the drift check against that rebuilt database, the whole backend
+suite including the Postgres-only files, `bash -n`/`py_compile` on
+`scripts/`, and `npm ci && npm run build` for the frontend. No secrets are
+needed — the workflow's only credentials are the throwaway CI database's.
+
+## Backups
+
+`scripts/backup_db.sh` runs nightly at 02:30 IST (see `scripts/crontab`)
+and writes to `/var/backups/skoolgpt` (`BACKUP_DIR`), 14 days kept locally:
+
+| artefact | what |
+|---|---|
+| `skoolgpt-YYYY-MM-DD.dump.gz` | `pg_dump -Fc` of the database, gzipped |
+| `skoolgpt-uploads-YYYY-MM-DD.tar.gz` | `backend/static/uploads` — student photos, generated diagrams, school logos; not in Postgres |
+| `*.sha256` | checksum next to each artefact (`sha256sum -c FILE.sha256` in the backup dir) |
+
+Two optional settings, read from the repo-root `.env` (the same file the
+script already takes `DATABASE_URL` from) or the environment. **Both are
+unset today** — the script prints a one-line `WARNING:` for each on every
+run until they are:
+
+- `BACKUP_PASSPHRASE` — when set, both artefacts are encrypted with
+  `gpg --symmetric --cipher-algo AES256` (→ `.gpg`) and the plaintext is
+  deleted before anything leaves the box. Pick a long random string, store
+  it in the team password manager: **a backup encrypted with a lost
+  passphrase is gone**. Decrypt with
+  `gpg --batch --passphrase-fd 3 -d FILE.gpg 3<<<"$BACKUP_PASSPHRASE" > FILE`.
+- `BACKUP_RCLONE_REMOTE` — an rclone remote + bucket, e.g.
+  `b2:skoolgpt-backups`. When set, the day's artefacts (and their
+  `.sha256`) are `rclone copy`'d there and the copy is verified with
+  `rclone lsl` — a missing or short remote file fails the run. Configure the
+  remote once as the app user (`rclone config`), give it a write-only key
+  if the provider supports it, and set a lifecycle rule on the bucket for
+  remote retention (the script only prunes locally).
+
+Any failure exits non-zero and appends a `BACKUP FAILED` line to
+`logs/cron-backup.log` (`grep 'BACKUP FAILED\|BACKUP OK\|RESTORE CHECK'
+logs/cron-backup.log` is the quickest health check).
+
+### Restore drill
+
+`bash scripts/backup_db.sh --restore-check` (cron: 04:00 IST on the 1st of
+every month) takes the newest dump, verifies its checksum, decrypts it if
+needed, restores it into a scratch database `skoolgpt_restore_check`
+(created and dropped by the script, same credentials — the app role needs
+`CREATEDB`), and runs `SELECT count(*) FROM students`. Zero rows or any
+step failing counts as a failed backup. `pg_restore` warnings about roles/
+extensions it can't recreate are printed but don't fail the drill; the
+row count is the verdict.
+
+### Restoring for real
+
+```bash
+cd /var/backups/skoolgpt                                   # or rclone copy the day's files down first
+sha256sum -c skoolgpt-YYYY-MM-DD.dump.gz.gpg.sha256
+gpg --batch --passphrase-fd 3 -d skoolgpt-YYYY-MM-DD.dump.gz.gpg 3<<<"$BACKUP_PASSPHRASE" | gunzip > restore.dump
+pg_restore --no-owner --no-privileges --dbname "$DATABASE_URL" restore.dump   # into an EMPTY database
+tar -xzf skoolgpt-uploads-YYYY-MM-DD.tar.gz -C /path/to/app/backend/static/   # (decrypt the same way first if .gpg)
+```
+
+## Log hygiene
+
+- The backend's own `logs/app.log*` files are written through
+  `app/logging_config.py`'s `RedactingFilter` (phone numbers and
+  key/token/secret values masked) since commit `2052fce` (2026-09-11).
+  Files rotated out before that date can still hold raw student phone
+  numbers. `bash scripts/purge_old_logs.sh --dry-run` lists which of
+  `logs/app.log*` were last written before that cutoff; without
+  `--dry-run` it truncates them in place (copytruncate-style, so the
+  running workers and `RotatingFileHandler`'s numbering are unaffected)
+  and prints each file it touched. A file that straddles the cutoff is
+  reported as `MIXED` and left alone. It is a one-off, run by hand — no
+  cron or deploy step calls it. Override `APP_DIR` / `CUTOFF` if needed.
+- nginx access logs for both Skoolgpt vhosts use the `skoolgpt_noquery`
+  format installed by `scripts/server_hardening.sh` (`$uri` instead of
+  `$request`), so query strings — OTP links, voice-call `?ticket=`s, the
+  old webhook `?secret=` — never reach `/var/log/nginx/*.access.log`.
 
 ## Scheduled Jobs
 No Celery/scheduler is wired up as an application-level dependency, but if

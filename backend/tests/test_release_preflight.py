@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
-from release_preflight import check  # noqa: E402
+from release_preflight import check, warnings  # noqa: E402
 
 _VALID = {
     "ENVIRONMENT": "production",
@@ -13,6 +13,7 @@ _VALID = {
     "ANTHROPIC_API_KEY": "sk-ant-real",
     "WHATSAPP_TOKEN": "token",
     "WATI_API_ENDPOINT": "https://live-mt-server.wati.io/tenant",
+    "WATI_WEBHOOK_SECRET": "w" * 40,
     "PORTAL_BASE_URL": "https://portal.example.com",
     "ALLOWED_ORIGINS": "https://portal.example.com",
     "RAZORPAY_KEY_ID": "rzp_live_x",
@@ -64,6 +65,23 @@ def test_mismatched_postgres_credentials_fail():
     failures = check(values)
     assert any("POSTGRES_USER" in f for f in failures)
     assert any("POSTGRES_DB" in f for f in failures)
+
+
+def test_missing_or_short_wati_webhook_secret_fails():
+    values = dict(_VALID)
+    del values["WATI_WEBHOOK_SECRET"]
+    assert any("WATI_WEBHOOK_SECRET" in f for f in check(values))
+    values["WATI_WEBHOOK_SECRET"] = "short"
+    assert any("WATI_WEBHOOK_SECRET" in f and "32" in f for f in check(values))
+
+
+def test_recommended_settings_warn_without_failing():
+    assert check(dict(_VALID)) == []
+    warned = warnings(dict(_VALID))
+    assert any("OPS_ALERT_PHONE" in w for w in warned)
+    assert any("BACKUP_PASSPHRASE" in w for w in warned)
+    assert any("BACKUP_RCLONE_REMOTE" in w for w in warned)
+    assert warnings({**_VALID, "OPS_ALERT_PHONE": "919000000000", "BACKUP_PASSPHRASE": "p", "BACKUP_RCLONE_REMOTE": "b2:x"}) == []
 
 
 def test_leftover_template_placeholder_fails():

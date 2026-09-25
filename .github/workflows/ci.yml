@@ -1,0 +1,118 @@
+# CI for Skoolgpt: backend tests against a real Postgres (with pgvector, which
+# migration 0041 / the document_chunks embedding column needs), a from-scratch
+# rebuild of the production schema (schema.sql + every migration, then the
+# drift check against the models — proves the repo can recreate prod), the
+# frontend build, and syntax checks on the ops shell scripts.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same DSN shape as .env.example / docker/docker-compose.yml (host port
+  # 5433) and backend/tests/conftest.py's PG_TEST_DATABASE_URL, so nothing
+  # in the repo needs a CI-specific override.
+  DATABASE_URL: postgresql://qlass:qlass@localhost:5433/qlass_ai
+  REDIS_URL: redis://localhost:6379/0
+  SECRET_KEY: ci-only-secret-key-not-used-anywhere-real-0123456789
+  ENVIRONMENT: development
+  PGPASSWORD: qlass
+
+jobs:
+  backend:
+    name: Backend tests + schema rebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # postgres:16 + the pgvector extension (CREATE EXTENSION vector in
+        # migration 0041 and app.models.core's DDL hooks).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: qlass
+          POSTGRES_PASSWORD: qlass
+          POSTGRES_DB: qlass_ai
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U qlass -d qlass_ai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        # Same as docker/docker-compose.yml; rate limiting / OTP / nudge
+        # cooldowns fall back to in-process state without it, but the suite
+        # is normally run on a laptop with Redis up, so match that.
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # backend/Dockerfile: python:3.11-slim
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Create the dedicated test database (backend/tests/conftest.py pg_db_session)
+        run: psql -h localhost -p 5433 -U qlass -d qlass_ai -c "CREATE DATABASE qlass_ai_test"
+
+      - name: Rebuild the production schema from the repo (schema.sql, then every migration)
+        # README: `psql -f database/schema.sql` first, then the ordered
+        # migrations. migrate.py applies each file in its own transaction
+        # and prints `applying: NNNN_x.sql` before each one, so if the chain
+        # cannot apply the failing file is the last `applying:` line above
+        # the traceback — fix that migration, do not paper over it here.
+        run: |
+          psql -v ON_ERROR_STOP=1 -h localhost -p 5433 -U qlass -d qlass_ai -f database/schema.sql
+          python scripts/migrate.py --dry-run
+          python scripts/migrate.py
+          python scripts/migrate.py   # second run must be a no-op ("no pending migrations")
+
+      - name: Schema drift check (rebuilt DB vs SQLAlchemy models)
+        run: python scripts/check_schema_drift.py
+
+      - name: Run backend tests
+        run: python -m pytest backend/tests -q -p no:cacheprovider
+
+      - name: Shell + Python syntax checks on ops scripts
+        run: |
+          for f in scripts/*.sh; do bash -n "$f"; done
+          python -m py_compile scripts/*.py
+          bash scripts/install_crontab.sh --dry-run --from /dev/null >/dev/null
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test --if-present

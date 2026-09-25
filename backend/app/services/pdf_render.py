@@ -4,11 +4,13 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, HRFlowable, PageBreak, NextPageTemplate, Table, TableStyle,
 )
 
 from app.config import REPO_ROOT
+from app.services.branding import LOGO_PATH as BRAND_LOGO_PATH
 
 ACCENT = colors.HexColor("#2b3ec4")
 ACCENT_DARK = colors.HexColor("#1c2a8f")
@@ -73,6 +75,22 @@ def _draw_header(canvas, school_name: str, heading: str, subtitle: str, logo_pat
     canvas.restoreState()
 
 
+BRAND_LOGO_W = 16 * mm  # Skoolgpt logo in the footer of every page, next to "Powered by Skoolgpt"
+BRAND_LOGO_GAP = 2.5 * mm
+
+
+def _brand_logo_size() -> tuple[float, float] | None:
+    """(width, height) in points for the footer logo, or None if the brand
+    asset is missing — the footer must never fail a PDF over a logo."""
+    try:
+        if not BRAND_LOGO_PATH.exists():
+            return None
+        px_w, px_h = ImageReader(str(BRAND_LOGO_PATH)).getSize()
+        return BRAND_LOGO_W, BRAND_LOGO_W * px_h / px_w
+    except Exception:
+        return None
+
+
 def _draw_footer(canvas, page_num: int):
     canvas.saveState()
     canvas.setStrokeColor(RULE)
@@ -85,8 +103,18 @@ def _draw_footer(canvas, page_num: int):
 
     label_font, brand_font, size = "Helvetica", "Helvetica-Bold", 8
     label, brand = "Powered by ", "Skoolgpt"
-    total_w = canvas.stringWidth(label, label_font, size) + canvas.stringWidth(brand, brand_font, size)
-    start_x = (PAGE_W - total_w) / 2
+    text_w = canvas.stringWidth(label, label_font, size) + canvas.stringWidth(brand, brand_font, size)
+    logo_size = _brand_logo_size()
+    logo_block_w = (logo_size[0] + BRAND_LOGO_GAP) if logo_size else 0
+    start_x = (PAGE_W - text_w - logo_block_w) / 2
+    if logo_size:
+        logo_w, logo_h = logo_size
+        # Vertically centred in the footer band, under the rule line.
+        canvas.drawImage(
+            str(BRAND_LOGO_PATH), start_x, (FOOTER_H - logo_h) / 2, logo_w, logo_h,
+            preserveAspectRatio=True, mask="auto",
+        )
+        start_x += logo_block_w
     canvas.setFont(label_font, size)
     canvas.setFillColor(FOOTER_MUTED)
     canvas.drawString(start_x, FOOTER_H - 6 * mm, label)

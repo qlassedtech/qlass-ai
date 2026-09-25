@@ -95,6 +95,9 @@ TUTOR_LEVEL_NUDGE_OFFERS = {
 # which covers the core text feature.
 FEATURE_LIMITS = {
     "voice": {"services": ["sarvam_tts"], "period": "week", "max": 5, "label": "voice replies"},
-    "image_generation": {"services": ["azure_image"], "period": "week", "max": 3, "label": "diagrams"},
+    # "mindmap_image" is the $0 event app.services.mindmap.build_mindmap_image
+    # logs per delivered mind map (its Claude cost is billed separately under
+    # feature="mindmap_generate") — a mind map counts as an image here.
+    "image_generation": {"services": ["azure_image", "mindmap_image"], "period": "week", "max": 3, "label": "diagrams"},
     "youtube_videos": {"services": ["youtube_search", "youtube_search_overage"], "period": "week", "max": 5, "label": "videos"},
 }

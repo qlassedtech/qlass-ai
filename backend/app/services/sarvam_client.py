@@ -5,12 +5,24 @@ import re
 
 import httpx
 from app.config import settings
+from app.services.alerts import report_provider_error
 from app.services.audio_qa import has_audio_glitch
 
 logger = logging.getLogger(__name__)
 
 SARVAM_BASE_URL = "https://api.sarvam.ai"
 TTS_CHAR_LIMIT = 2500
+
+
+def billable_tts_chars(text: str) -> int:
+    """
+    How many characters Sarvam actually bills for synthesising `text` —
+    _call_tts_api only ever sends the first TTS_CHAR_LIMIT chars (bulbul:v3's
+    hard limit), so a longer reply must not be charged to the student's
+    wallet at its full length. app.services.cost_tracker.record_char_usage
+    applies this clamp for the "sarvam_tts" service.
+    """
+    return min(len(text), TTS_CHAR_LIMIT)
 
 # Sarvam validates the multipart content-type against its own allowlist
 # (audio/mpeg, audio/wav, audio/ogg, audio/mp4, audio/aac, ...) and 400s on
@@ -96,11 +108,15 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg")
             resp.raise_for_status()
             return resp.json().get("transcript")
     except httpx.HTTPStatusError as exc:
-        # 402 = Sarvam account out of credits — an ops problem, not a bad recording.
+        # 402 = Sarvam account out of credits — an ops problem, not a bad
+        # recording; report_provider_error alerts a human immediately for
+        # that (and 401/429/5xx), and counts everything for the heartbeat.
         logger.error("Sarvam STT failed status=%s body=%s", exc.response.status_code, exc.response.text[:300])
+        report_provider_error("sarvam", exc.response.status_code)
         return None
     except httpx.HTTPError as exc:
         logger.error("Sarvam STT request error: %s", exc)
+        report_provider_error("sarvam", None)
         return None
 
 
@@ -129,9 +145,11 @@ async def _call_tts_api(text: str, language_code: str, speaker: str) -> bytes | 
             return base64.b64decode(audios[0]) if audios else None
     except httpx.HTTPStatusError as exc:
         logger.error("Sarvam TTS failed status=%s body=%s", exc.response.status_code, exc.response.text[:300])
+        report_provider_error("sarvam", exc.response.status_code)
         return None
     except httpx.HTTPError as exc:
         logger.error("Sarvam TTS request error: %s", exc)
+        report_provider_error("sarvam", None)
         return None
 
 

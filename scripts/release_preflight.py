@@ -11,10 +11,23 @@ from pathlib import Path
 
 REQUIRED = {
     "ENVIRONMENT", "SECRET_KEY", "DATABASE_URL", "REDIS_URL", "ANTHROPIC_API_KEY",
-    "WHATSAPP_TOKEN", "WATI_API_ENDPOINT", "PORTAL_BASE_URL", "ALLOWED_ORIGINS",
+    "WHATSAPP_TOKEN", "WATI_API_ENDPOINT", "WATI_WEBHOOK_SECRET", "PORTAL_BASE_URL", "ALLOWED_ORIGINS",
     "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET",
     "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 }
+
+# Not needed to boot, but a production box without them is running with a
+# known gap (alerts to the support line, plaintext same-disk backups) —
+# reported as warnings, never a failed preflight.
+RECOMMENDED = {
+    "OPS_ALERT_PHONE": "ops alerts fall back to SUPPORT_PHONE",
+    "BACKUP_PASSPHRASE": "nightly backups are stored unencrypted",
+    "BACKUP_RCLONE_REMOTE": "nightly backups never leave the server",
+}
+
+# The webhook is authenticated on a single header value; anything shorter
+# is guessable given the endpoint is public.
+WATI_WEBHOOK_SECRET_MIN_LENGTH = 32
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -43,6 +56,12 @@ def check(values: dict[str, str]) -> list[str]:
         failures.append("PORTAL_BASE_URL must be a public HTTPS URL")
     if "*" in values.get("ALLOWED_ORIGINS", ""):
         failures.append("ALLOWED_ORIGINS must not contain a wildcard *")
+    webhook_secret = values.get("WATI_WEBHOOK_SECRET", "")
+    if webhook_secret and len(webhook_secret) < WATI_WEBHOOK_SECRET_MIN_LENGTH:
+        failures.append(
+            f"WATI_WEBHOOK_SECRET must be at least {WATI_WEBHOOK_SECRET_MIN_LENGTH} characters "
+            "(it is the only credential on the public webhook URL)"
+        )
     database_url = values.get("DATABASE_URL", "")
     if "CHANGE_ME" in database_url or values.get("POSTGRES_PASSWORD", "") == "CHANGE_ME_SAME_PASSWORD_AS_DATABASE_URL_BELOW":
         failures.append("DATABASE_URL/POSTGRES_PASSWORD still contain the .env.production.example placeholder")
@@ -53,6 +72,11 @@ def check(values: dict[str, str]) -> list[str]:
     if postgres_db and postgres_db not in database_url:
         failures.append("POSTGRES_DB does not appear in DATABASE_URL — they must reference the same database")
     return failures
+
+
+def warnings(values: dict[str, str]) -> list[str]:
+    """Recommended-but-optional settings that are unset; printed, never a failure."""
+    return [f"{key} is not set — {why}" for key, why in sorted(RECOMMENDED.items()) if not values.get(key)]
 
 
 def check_frontend(values: dict[str, str]) -> list[str]:
@@ -76,7 +100,10 @@ def main() -> int:
     if not path.exists():
         print(f"FAIL: {path} does not exist")
         return 1
-    failures = check(parse_env(path))
+    values = parse_env(path)
+    failures = check(values)
+    for warning in warnings(values):
+        print(f"WARN: {warning}")
 
     frontend_path = Path(args.frontend_env_file)
     if not frontend_path.exists():

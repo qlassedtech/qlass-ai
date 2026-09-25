@@ -219,6 +219,18 @@ def _usage_status(feature: str, weekly_counts: dict[str, int]) -> tuple[int, int
     return used, cfg["max"]
 
 
+def is_voice_reply_over_weekly_cap(db: Session, student: Student) -> bool:
+    """
+    The exact FEATURE_LIMITS["voice"] check process_message applies before
+    it lets wants_audio_reply through (see the soft-cap block there),
+    exposed for channels that synthesize speech OUTSIDE process_message —
+    the voice call (app.routers.voice_call) TTSes every reply and used to
+    do so with no cap at all (audit, Sept 2026).
+    """
+    used, limit = _usage_status("voice", _weekly_usage_snapshot(db, student))
+    return used >= limit
+
+
 # Plain substring match, not an LLM classification — WhatsApp can't do
 # real-time voice calls itself (see app.routers.voice_call's module
 # docstring for the whole reason this feature exists as a separate portal
@@ -276,6 +288,7 @@ class ChatTurnResult:
     detected_lang: str = "en-IN"
     did_answer_via_llm: bool = False
     image_prompt: str | None = None  # set only if the tutor decided a diagram was warranted
+    mindmap_topic: str | None = None  # set only if the student asked for a mind map — see app.services.mindmap; never set together with image_prompt
     wants_audio_reply: bool = False  # set only if the student explicitly asked for a voice reply
     menu_buttons: list[str] | None = None  # present only for the "menu" intent; channels without button UI can ignore
     video: dict | None = None  # {"title", "url"} — kept OUT of reply_text so voice-reply TTS never reads a raw URL aloud
@@ -442,6 +455,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
 
     did_answer_via_llm = False
     image_prompt = None
+    mindmap_topic = None
     video_query = None
     citation = None
     wants_audio_reply = False
@@ -776,6 +790,7 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
         reply_text = result["reply"]
         detected_lang = result["lang"]
         image_prompt = result["image_prompt"]
+        mindmap_topic = result.get("mindmap_topic")
         video_query = result["video_query"]
         citation = result["citation"]
         wants_audio_reply = result["wants_audio_reply"]
@@ -819,10 +834,13 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
             used, limit = _usage_status("voice", weekly_counts)
             if used >= limit:
                 wants_audio_reply = False
-        if image_prompt:
+        if image_prompt or mindmap_topic:
+            # A mind map is an image for quota purposes (see
+            # FEATURE_LIMITS["image_generation"]).
             used, limit = _usage_status("image_generation", weekly_counts)
             if used >= limit:
                 image_prompt = None
+                mindmap_topic = None
         if video_query:
             used, limit = _usage_status("youtube_videos", weekly_counts)
             if used >= limit:
@@ -1013,8 +1031,8 @@ async def process_message(db: Session, student: Student, message_text: str) -> C
 
     return ChatTurnResult(
         reply_text=outgoing_text, detected_lang=detected_lang, did_answer_via_llm=did_answer_via_llm,
-        image_prompt=image_prompt, wants_audio_reply=wants_audio_reply, menu_buttons=menu_buttons,
-        video=video_result, level_offer=level_offer, level_choice=level_choice,
+        image_prompt=image_prompt, mindmap_topic=mindmap_topic, wants_audio_reply=wants_audio_reply,
+        menu_buttons=menu_buttons, video=video_result, level_offer=level_offer, level_choice=level_choice,
     )
 
 
@@ -1051,12 +1069,26 @@ async def _generate_notes(db: Session, student: Student) -> str:
     result = await call_llm(
         system_prompt=system_prompt, messages=[{"role": "user", "content": transcript}], model=NOTES_MODEL,
     )
+    # A provider failure comes back as a stand-in apology (LLMResult.ok is
+    # False, text starts with the "having trouble" line) — confirmed live
+    # (audit, Sept 2026) that it was being wrapped up and delivered as
+    # "📝 Notes: Sorry, I'm having trouble...". Nothing was consumed, so
+    # nothing is billed either.
+    if getattr(result, "ok", True) is False or (result.text or "").lstrip().startswith(NOTES_LLM_FAILURE_PREFIX):
+        return NOTES_UNAVAILABLE_REPLY
     cost_tracker.record_claude_usage(
         db, result.model, result.input_tokens, result.output_tokens, student.id,
         cache_write_tokens=result.cache_write_tokens, cache_read_tokens=result.cache_read_tokens,
         feature="notes",
     )
     return f"📝 *Notes on what we've covered:*\n\n{result.text.strip()}"
+
+
+# Matches app.services.llm_client's stand-in apology (_UNREACHABLE_REPLY)
+# by prefix — belt-and-braces alongside LLMResult.ok for any caller/mocked
+# result that carries the apology text without the flag.
+NOTES_LLM_FAILURE_PREFIX = "Sorry, I'm having trouble"
+NOTES_UNAVAILABLE_REPLY = "I couldn't prepare your notes right now — please try again in a minute."
 
 
 async def _generate_worksheet(db: Session, student: Student, topic: str) -> str:

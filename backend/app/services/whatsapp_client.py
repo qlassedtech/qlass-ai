@@ -1,22 +1,109 @@
 import hmac
+import logging
 import re
+import time
 import uuid
 from urllib.parse import urlparse, parse_qs
 
 import httpx
 from app.config import settings
+from app.services.alerts import note_provider_error, report_provider_error
+
+logger = logging.getLogger(__name__)
+
+# WhatsApp rejects a text message body over 4,096 characters outright (Wati
+# passes the error through as a 4xx and nothing is delivered) — a long
+# tutor reply (a full worksheet, a multi-part explanation) used to vanish
+# silently. Split a little under the hard limit so a translated/emoji-heavy
+# part still has headroom.
+WHATSAPP_TEXT_LIMIT = 4000
+
+_PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+# Sentence end: ., !, ?, or the Devanagari danda (।), followed by whitespace.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?।])\s+")
 
 
-def verify_webhook_auth(auth_header: str | None, query_secret: str | None = None) -> bool:
+def _wati_http_failure(exc: httpx.HTTPStatusError) -> dict:
     """
-    Wati doesn't sign webhook bodies with HMAC like Meta does. Two ways to
-    authenticate a call are accepted, either is enough:
-      1. A custom "Authorization" header value set under Wati's Webhook
-         settings, sent back on every call.
-      2. A `?secret=...` query parameter embedded directly in the webhook
-         URL registered with Wati — added as an alternative for a webhook
-         dashboard (or a person configuring it) that doesn't expose a way
-         to set a custom header, only a plain URL to paste in.
+    Every sender's non-2xx path: counts the error for scripts/ops_heartbeat.py
+    and alerts a human immediately on 401/403 (token expired — nothing is
+    being delivered to any student until someone rotates it), 429 and 5xx.
+    See app.services.alerts.
+    """
+    status = exc.response.status_code
+    report_provider_error("wati", status)
+    return {"sent": False, "reason": f"Wati API error {status}: {exc.response.text}"}
+
+
+def _wati_request_failure(exc: httpx.HTTPError) -> dict:
+    report_provider_error("wati", None)
+    return {"sent": False, "reason": f"Wati request failed: {exc}"}
+
+
+def _pack(pieces: list[str], separator: str, limit: int) -> list[str]:
+    """Greedily join consecutive pieces (in order) into chunks no longer than `limit`."""
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        candidate = f"{current}{separator}{piece}" if current else piece
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def split_message(body: str, limit: int = WHATSAPP_TEXT_LIMIT) -> list[str]:
+    """
+    Split `body` into ordered parts of at most `limit` chars, breaking at
+    paragraph boundaries first, then sentence boundaries within any
+    paragraph that's still too long, then (last resort) a hard cut. A body
+    that already fits comes back as a single part, unchanged.
+    """
+    if len(body) <= limit:
+        return [body]
+    parts: list[str] = []
+    for paragraph in _PARAGRAPH_BREAK.split(body):
+        if len(paragraph) <= limit:
+            parts.append(paragraph)
+            continue
+        for sentence in _SENTENCE_BREAK.split(paragraph):
+            while len(sentence) > limit:  # a single sentence longer than the limit — hard cut
+                parts.append(sentence[:limit])
+                sentence = sentence[limit:]
+            if sentence:
+                parts.append(sentence)
+    # Re-pack: paragraphs/sentences that fit together stay together, so a
+    # 9,000-char reply becomes ~3 messages rather than one per paragraph.
+    return [part for part in _pack(parts, "\n\n", limit) if part.strip()]
+
+
+# The one header the webhook is authenticated on. Wati's Webhook settings
+# let you attach a custom "Authorization" header value to every delivery —
+# that value (with or without a "Bearer " prefix) must equal
+# WATI_WEBHOOK_SECRET. A `?secret=` query-parameter alternative used to be
+# accepted as well and was removed (audit H1/H2): query strings land in the
+# reverse proxy's access log on a shared host, so the secret was being
+# written to disk on every delivery.
+WEBHOOK_AUTH_HEADER = "Authorization"
+
+# Rejected webhook calls are logged at most once a minute per process —
+# same throttle pattern as rate_limit._note_redis_unavailable: a scanner
+# hammering the URL, or a misconfigured dashboard retrying every delivery,
+# would otherwise write one warning per request.
+WEBHOOK_AUTH_LOG_INTERVAL_SECONDS = 60
+_last_auth_reject_log_at: float = 0.0
+
+
+def verify_webhook_auth(auth_header: str | None) -> bool:
+    """
+    Wati doesn't sign webhook bodies with HMAC like Meta does; the only
+    accepted credential is the value of the WEBHOOK_AUTH_HEADER header,
+    configured under Wati's Webhook settings and sent back on every call.
     Fails closed outside development when WATI_WEBHOOK_SECRET isn't
     configured — app.config logs a loud startup warning when that's true.
 
@@ -25,11 +112,25 @@ def verify_webhook_auth(auth_header: str | None, query_secret: str | None = None
     """
     if not settings.wati_webhook_secret:
         return settings.environment.lower() == "development"
-    if query_secret and hmac.compare_digest(query_secret, settings.wati_webhook_secret):
-        return True
     if not auth_header:
         return False
     return hmac.compare_digest(auth_header.removeprefix("Bearer "), settings.wati_webhook_secret)
+
+
+def note_webhook_auth_rejected(*, had_header: bool, had_query_secret: bool) -> None:
+    """Throttled warning for a rejected webhook call. Never logs the values sent."""
+    global _last_auth_reject_log_at
+    now = time.monotonic()
+    if now - _last_auth_reject_log_at < WEBHOOK_AUTH_LOG_INTERVAL_SECONDS:
+        return
+    _last_auth_reject_log_at = now
+    logger.warning(
+        "WhatsApp webhook call rejected (403): %s header %s%s — check that Wati's Webhook settings send "
+        "WATI_WEBHOOK_SECRET as that header; this line is logged at most once a minute",
+        WEBHOOK_AUTH_HEADER,
+        "did not match WATI_WEBHOOK_SECRET" if had_header else "missing",
+        " (a ?secret= query parameter was sent, which is no longer accepted)" if had_query_secret else "",
+    )
 
 
 AUDIO_TYPES = {"audio", "voice", "ptt"}
@@ -180,9 +281,9 @@ async def send_whatsapp_audio(to_phone: str, audio_bytes: bytes, filename: str =
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
 
 
 async def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str, filename: str = "diagram.png") -> dict:
@@ -199,9 +300,9 @@ async def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str, f
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
 
 
 async def send_whatsapp_file(to_phone: str, file_bytes: bytes, content_type: str, filename: str, caption: str | None = None) -> dict:
@@ -227,9 +328,9 @@ async def send_whatsapp_file(to_phone: str, file_bytes: bytes, content_type: str
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
 
 
 # Generous but bounded — WhatsApp itself caps media size well below this
@@ -271,7 +372,8 @@ async def fetch_external_media(url: str) -> tuple[bytes, str] | None:
         return None
 
 
-async def send_whatsapp_message(to_phone: str, body: str) -> dict:
+async def _post_session_message(to_phone: str, body: str) -> dict:
+    """One sendSessionMessage call — `body` must already be within WHATSAPP_TEXT_LIMIT."""
     if not settings.whatsapp_token or not settings.wati_api_endpoint:
         return {"sent": False, "reason": "Wati credentials not configured in .env"}
 
@@ -284,9 +386,28 @@ async def send_whatsapp_message(to_phone: str, body: str) -> dict:
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
+
+
+async def send_whatsapp_message(to_phone: str, body: str) -> dict:
+    """
+    Sends `body` as one session message, or — past WHATSAPP_TEXT_LIMIT — as
+    several sequential ones split at paragraph/sentence boundaries (see
+    split_message), in order. `sent` is True only if EVERY part went out;
+    on a mid-way failure `parts_sent` says how many did, so the caller
+    knows the student saw a truncated reply rather than nothing.
+    """
+    parts = split_message(body)
+    result: dict = {"sent": False, "reason": "empty message"}
+    for index, part in enumerate(parts):
+        result = await _post_session_message(to_phone, part)
+        if not result.get("sent"):
+            return {**result, "parts_sent": index, "parts_total": len(parts)}
+    if len(parts) > 1:
+        return {**result, "parts_sent": len(parts), "parts_total": len(parts)}
+    return result
 
 
 async def send_whatsapp_buttons(to_phone: str, body: str, buttons: list[str], footer: str | None = None) -> dict:
@@ -314,9 +435,9 @@ async def send_whatsapp_buttons(to_phone: str, body: str, buttons: list[str], fo
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
 
 
 def parse_incoming_button_reply(payload: dict) -> tuple[str, str] | None:
@@ -419,12 +540,13 @@ async def send_template_message(to_phone: str, template_name: str, params: list[
             # silently reported as sent (see this function's own callers,
             # which log an error whenever sent is False).
             if data.get("result") is False:
+                note_provider_error("wati", resp.status_code)
                 return {"sent": False, "reason": data.get("info") or "Wati reported result: false", "response": data}
             return {"sent": True, "response": data}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)
 
 
 TEMPLATE_PARAM_MAX_CHARS = 900
@@ -495,6 +617,6 @@ async def send_broadcast_template(
             resp.raise_for_status()
             return {"sent": True, "response": resp.json()}
     except httpx.HTTPStatusError as exc:
-        return {"sent": False, "reason": f"Wati API error {exc.response.status_code}: {exc.response.text}"}
+        return _wati_http_failure(exc)
     except httpx.HTTPError as exc:
-        return {"sent": False, "reason": f"Wati request failed: {exc}"}
+        return _wati_request_failure(exc)

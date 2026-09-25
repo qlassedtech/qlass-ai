@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { WS_BASE, getStudentToken, type StudentProfile } from "../api";
+import { WS_BASE, errorMessage, isStudentAuthenticated, studentApi, type StudentProfile } from "../api";
 
 type Context = { student: StudentProfile | null };
 
@@ -14,12 +14,37 @@ type CallStatus = "connecting" | "open" | "closed" | "error" | "mic_denied";
 // shape. Deliberately loose here (unknown fields just get ignored below)
 // since this is untrusted-ish LLM-generated data passed through a network
 // hop, not a contract either side can fully guarantee at the type level.
+//
+// Every optional field below is additive and backward compatible: an
+// element without them renders exactly as it did before they existed.
+// `color`/`width` are stroke color (hex) and stroke width; `fill` on
+// rect/ellipse is a solid fill color. `branch` is the Buzan-style
+// mind-map curve emitted by the backend's mind-map generator.
 type DiagramElement =
-  | { type: "rect"; x: number; y: number; w: number; h: number }
-  | { type: "ellipse"; x: number; y: number; rx: number; ry: number }
-  | { type: "line"; points: [number, number][] }
-  | { type: "arrow"; x1: number; y1: number; x2: number; y2: number }
-  | { type: "text"; x: number; y: number; text: string };
+  | { type: "rect"; x: number; y: number; w: number; h: number; color?: string; width?: number; fill?: string }
+  | { type: "ellipse"; x: number; y: number; rx: number; ry: number; color?: string; width?: number; fill?: string }
+  | { type: "line"; points: [number, number][]; color?: string; width?: number }
+  | { type: "arrow"; x1: number; y1: number; x2: number; y2: number; color?: string; width?: number }
+  | {
+      type: "text";
+      x: number;
+      y: number;
+      text: string;
+      color?: string;
+      size?: number;
+      weight?: "normal" | "bold";
+      align?: "left" | "center" | "right";
+    }
+  | {
+      type: "branch";
+      // [start, control, end] of a quadratic curve.
+      points: [[number, number], [number, number], [number, number]];
+      color: string;
+      width: number;
+      label?: string;
+      level?: 1 | 2;
+      label_at?: "mid" | "end";
+    };
 
 // Fixed 400x300 coordinate space, matching the backend's canvas assumption
 // exactly so no client-side scaling/translation is needed.
@@ -40,6 +65,7 @@ declare global {
         ellipse: (x: number, y: number, w: number, h: number, opts?: Record<string, unknown>) => void;
         line: (x1: number, y1: number, x2: number, y2: number, opts?: Record<string, unknown>) => void;
         linearPath: (points: [number, number][], opts?: Record<string, unknown>) => void;
+        path: (d: string, opts?: Record<string, unknown>) => void;
       };
     };
   }
@@ -110,6 +136,9 @@ export default function Call() {
   // the two animations interleaving their draws on the same canvas.
   const diagramGenerationRef = useRef(0);
   const diagramTimeoutsRef = useRef<number[]>([]);
+  // Skoolgpt logo stamped on every diagram; created lazily on first render
+  // and cached so repeated diagrams never re-fetch it.
+  const diagramLogoRef = useRef<HTMLImageElement | null>(null);
   // "video" and "reply_text" frames can arrive in either order (see
   // voice_call.py's module docstring) — this holds a video that arrived
   // BEFORE the tutor log entry it belongs to exists yet, so it can be
@@ -127,77 +156,103 @@ export default function Call() {
 
   // --- WebSocket lifecycle -------------------------------------------------
   useEffect(() => {
-    const token = getStudentToken();
-    if (!token) {
+    if (!isStudentAuthenticated()) {
       setStatus("error");
       setErrorNote("You're not logged in — please log in again.");
       return;
     }
 
-    const ws = new WebSocket(`${WS_BASE}/ws/voice-call?token=${encodeURIComponent(token)}`);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
+    // The student token itself never goes in the URL (URLs get logged) —
+    // a 60-second single-use ticket is fetched over the normal
+    // header-authenticated API right before connecting, and that's what
+    // the backend's `?ticket=` handshake accepts. `cancelled` covers the
+    // page unmounting while the ticket request is still in flight, so a
+    // socket is never opened for a page that's already gone.
+    let cancelled = false;
+    let ws: WebSocket | null = null;
 
-    ws.onopen = () => setStatus("open");
-    ws.onerror = () => {
-      setStatus("error");
-      setErrorNote("Couldn't connect to the tutor right now — please check your connection and try again.");
-    };
-    ws.onclose = () => setStatus((prev) => (prev === "error" ? prev : "closed"));
-
-    ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        let frame: Record<string, unknown>;
-        try {
-          frame = JSON.parse(event.data);
-        } catch {
-          return;
-        }
-        if (frame.type === "transcript") {
-          setLog((prev) => [...prev, { who: "you", text: String(frame.text ?? "") }]);
-        } else if (frame.type === "reply_text") {
-          const video = pendingVideoRef.current ?? undefined;
-          pendingVideoRef.current = null;
-          setLog((prev) => [...prev, { who: "tutor", text: String(frame.text ?? ""), video }]);
-        } else if (frame.type === "video") {
-          const video: VideoRef = { title: String(frame.title ?? "Video"), url: String(frame.url ?? "") };
-          setLog((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last && last.who === "tutor") {
-              // reply_text already arrived — attach directly.
-              copy[copy.length - 1] = { ...last, video };
-              return copy;
-            }
-            // reply_text hasn't arrived yet — stash it for the handler above.
-            pendingVideoRef.current = video;
-            return prev;
-          });
-        } else if (frame.type === "diagram") {
-          renderDiagram(Array.isArray(frame.scene) ? (frame.scene as DiagramElement[]) : []);
-        } else if (frame.type === "tts_failed") {
-          setLog((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last && last.who === "tutor") last.note = "voice reply unavailable, here's the text";
-            return copy;
-          });
-          setBusy(false);
-        } else if (frame.type === "error") {
-          setErrorNote(String(frame.message ?? "Something went wrong."));
-          setBusy(false);
-        }
-      } else {
-        // Binary frame: the synthesized reply audio.
-        const blob = new Blob([event.data], { type: "audio/opus" });
-        playAssistantAudio(blob);
-        setErrorNote(null);
-        setBusy(false);
+    (async () => {
+      let ticket: string;
+      try {
+        ({ ticket } = await studentApi.voiceCallTicket());
+      } catch (err) {
+        if (cancelled) return;
+        setStatus("error");
+        setErrorNote(errorMessage(err, "Couldn't start the call right now — please refresh and try again."));
+        return;
       }
-    };
+      if (cancelled) return;
+      ws = openSocket(ticket);
+    })();
+
+    function openSocket(ticket: string): WebSocket {
+      const ws = new WebSocket(`${WS_BASE}/ws/voice-call?ticket=${encodeURIComponent(ticket)}`);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+
+      ws.onopen = () => setStatus("open");
+      ws.onerror = () => {
+        setStatus("error");
+        setErrorNote("Couldn't connect to the tutor right now — please check your connection and try again.");
+      };
+      ws.onclose = () => setStatus((prev) => (prev === "error" ? prev : "closed"));
+
+      ws.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          let frame: Record<string, unknown>;
+          try {
+            frame = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          if (frame.type === "transcript") {
+            setLog((prev) => [...prev, { who: "you", text: String(frame.text ?? "") }]);
+          } else if (frame.type === "reply_text") {
+            const video = pendingVideoRef.current ?? undefined;
+            pendingVideoRef.current = null;
+            setLog((prev) => [...prev, { who: "tutor", text: String(frame.text ?? ""), video }]);
+          } else if (frame.type === "video") {
+            const video: VideoRef = { title: String(frame.title ?? "Video"), url: String(frame.url ?? "") };
+            setLog((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.who === "tutor") {
+                // reply_text already arrived — attach directly.
+                copy[copy.length - 1] = { ...last, video };
+                return copy;
+              }
+              // reply_text hasn't arrived yet — stash it for the handler above.
+              pendingVideoRef.current = video;
+              return prev;
+            });
+          } else if (frame.type === "diagram") {
+            renderDiagram(Array.isArray(frame.scene) ? (frame.scene as DiagramElement[]) : []);
+          } else if (frame.type === "tts_failed") {
+            setLog((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.who === "tutor") last.note = "voice reply unavailable, here's the text";
+              return copy;
+            });
+            setBusy(false);
+          } else if (frame.type === "error") {
+            setErrorNote(String(frame.message ?? "Something went wrong."));
+            setBusy(false);
+          }
+        } else {
+          // Binary frame: the synthesized reply audio.
+          const blob = new Blob([event.data], { type: "audio/opus" });
+          playAssistantAudio(blob);
+          setErrorNote(null);
+          setBusy(false);
+        }
+      };
+      return ws;
+    }
 
     return () => {
-      ws.close();
+      cancelled = true;
+      ws?.close();
       stopMicVisualizer();
       recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
       diagramGenerationRef.current += 1; // abandon any in-flight diagram animation
@@ -238,6 +293,7 @@ export default function Call() {
     diagramTimeoutsRef.current = [];
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawDiagramLogo(ctx, canvas, generation);
 
     const totalDurationMs = 4500; // within the ~3-6s target
     const stepMs = Math.max(150, totalDurationMs / scene.length);
@@ -253,26 +309,105 @@ export default function Call() {
     });
   }
 
+  // Stamps the logo at the canvas's bottom-right corner. If the image is
+  // still loading, it's painted from the onload handler instead — but only
+  // if `generation` is still the current diagram, so a slow first load
+  // never paints over a newer scene that has since cleared the canvas.
+  function drawDiagramLogo(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, generation: number) {
+    const paint = (img: HTMLImageElement) => {
+      if (!img.naturalWidth || !img.naturalHeight) return;
+      const w = 56;
+      const h = (w * img.naturalHeight) / img.naturalWidth;
+      const inset = 6;
+      try {
+        ctx.globalAlpha = 0.9;
+        ctx.drawImage(img, canvas.width - w - inset, canvas.height - h - inset, w, h);
+      } catch {
+        // A broken/undecodable image must never break the diagram.
+      } finally {
+        ctx.globalAlpha = 1;
+      }
+    };
+
+    let img = diagramLogoRef.current;
+    if (!img) {
+      img = new Image();
+      img.src = "/logo-tight.png";
+      diagramLogoRef.current = img;
+    }
+    if (img.complete) {
+      paint(img);
+      return;
+    }
+    img.addEventListener(
+      "load",
+      () => {
+        if (diagramGenerationRef.current === generation) paint(img!);
+      },
+      { once: true },
+    );
+  }
+
+  // Draws a text label with a translucent backing halo under it, sized and
+  // positioned to follow the alignment/font — see the "text" case below
+  // for why the halo exists. `y` is the text baseline.
+  function drawHaloedText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    opts: { font: string; size: number; color: string; align: "left" | "center" | "right" },
+  ) {
+    ctx.font = opts.font;
+    ctx.textAlign = opts.align;
+    ctx.textBaseline = "alphabetic";
+    const width = ctx.measureText(text).width;
+    const left = opts.align === "center" ? x - width / 2 : opts.align === "right" ? x - width : x;
+    const padX = 3, padY = 2;
+    // Ascent ≈ 0.8em for typical sans-serif faces (14px → 11px, matching
+    // the halo geometry this renderer has always used for 14px labels).
+    const ascent = Math.round(opts.size * 0.8);
+    ctx.fillStyle = "rgba(253, 253, 251, 0.88)";
+    ctx.fillRect(left - padX, y - ascent - padY, width + padX * 2, opts.size + padY * 2);
+    ctx.fillStyle = opts.color;
+    ctx.fillText(text, x, y);
+    ctx.textAlign = "left";
+  }
+
   function drawDiagramElement(
     rc: ReturnType<NonNullable<Window["rough"]>["canvas"]>,
     ctx: CanvasRenderingContext2D,
     element: DiagramElement,
   ) {
+    // Only pass stroke/fill options that were actually given, so elements
+    // without them keep rough.js's defaults exactly as before.
+    const strokeOpts = (el: { color?: string; width?: number; fill?: string }) => {
+      const o: Record<string, unknown> = {};
+      if (el.color) o.stroke = el.color;
+      if (typeof el.width === "number") o.strokeWidth = el.width;
+      if (el.fill) {
+        o.fill = el.fill;
+        o.fillStyle = "solid";
+      }
+      return o;
+    };
+
     try {
       switch (element.type) {
         case "rect":
-          rc.rectangle(element.x, element.y, element.w, element.h);
+          rc.rectangle(element.x, element.y, element.w, element.h, strokeOpts(element));
           break;
         case "ellipse":
           // rough.js takes a center point plus full width/height, not a
           // radius — the backend schema gives radii, so double them here.
-          rc.ellipse(element.x, element.y, element.rx * 2, element.ry * 2);
+          rc.ellipse(element.x, element.y, element.rx * 2, element.ry * 2, strokeOpts(element));
           break;
         case "line":
-          if (element.points.length >= 2) rc.linearPath(element.points);
+          if (element.points.length >= 2) rc.linearPath(element.points, strokeOpts(element));
           break;
         case "arrow": {
-          rc.line(element.x1, element.y1, element.x2, element.y2);
+          const opts = strokeOpts(element);
+          rc.line(element.x1, element.y1, element.x2, element.y2, opts);
           // rough.js has no arrowhead primitive — draw one manually as two
           // short lines angled back from the endpoint.
           const angle = Math.atan2(element.y2 - element.y1, element.x2 - element.x1);
@@ -283,17 +418,18 @@ export default function Call() {
             element.y2,
             element.x2 - headLen * Math.cos(angle - spread),
             element.y2 - headLen * Math.sin(angle - spread),
+            opts,
           );
           rc.line(
             element.x2,
             element.y2,
             element.x2 - headLen * Math.cos(angle + spread),
             element.y2 - headLen * Math.sin(angle + spread),
+            opts,
           );
           break;
         }
         case "text": {
-          ctx.font = "14px sans-serif";
           // The model is told to space labels apart, but it occasionally
           // misjudges text width and places two labels close enough to
           // overlap into an unreadable smear. A translucent white backing
@@ -302,18 +438,61 @@ export default function Call() {
           // keeps whichever label was placed last fully legible even when
           // they collide — imperfect, but strictly better than two
           // half-obscured labels blending together.
-          const metrics = ctx.measureText(element.text);
-          const padX = 3, padY = 2;
-          ctx.fillStyle = "rgba(253, 253, 251, 0.88)";
-          ctx.fillRect(
-            element.x - padX, element.y - 11 - padY, metrics.width + padX * 2, 14 + padY * 2,
-          );
+          //
+          // `align` defaults to "left" deliberately: the backend's label
+          // collision math assumes left-aligned text, so existing scenes
+          // must keep rendering exactly as before. New (mind-map) scenes
+          // opt into "center"/"right" explicitly.
+          //
           // canvas fillStyle can't resolve a CSS custom property, and the
           // diagram is drawn on a fixed light background (see .call-
           // diagram-canvas below) regardless of page theme, so a plain
-          // fixed dark color is used rather than trying to theme it.
-          ctx.fillStyle = "#333333";
-          ctx.fillText(element.text, element.x, element.y);
+          // fixed dark color is the default rather than trying to theme it.
+          const size = typeof element.size === "number" && element.size > 0 ? element.size : 14;
+          const weight = element.weight === "bold" ? "bold " : "";
+          drawHaloedText(ctx, element.text, element.x, element.y, {
+            font: `${weight}${size}px sans-serif`,
+            size,
+            color: element.color || "#333333",
+            align: element.align || "left",
+          });
+          break;
+        }
+        case "branch": {
+          // Buzan-style mind-map branch: a quadratic curve from start via a
+          // control point to end, drawn as one animation step together with
+          // its label (a branch without its label reads as an unfinished
+          // squiggle).
+          if (!Array.isArray(element.points) || element.points.length < 3) break;
+          const [[sx, sy], [cx, cy], [ex, ey]] = element.points;
+          rc.path(`M ${sx} ${sy} Q ${cx} ${cy} ${ex} ${ey}`, {
+            stroke: element.color,
+            strokeWidth: element.width,
+            roughness: 0.9,
+            bowing: 0.6,
+          });
+          if (!element.label) break;
+          const atEnd = element.label_at === "end" || (element.label_at !== "mid" && element.level === 2);
+          if (atEnd) {
+            // Level-2 (leaf) branches: small plain label at the branch tip.
+            drawHaloedText(ctx, element.label, ex, ey - 6, {
+              font: "11px sans-serif",
+              size: 11,
+              color: "#333333",
+              align: "center",
+            });
+          } else {
+            // Level-1 branches: bold label in the branch's own color,
+            // riding along the curve at its midpoint (t = 0.5).
+            const mx = 0.25 * sx + 0.5 * cx + 0.25 * ex;
+            const my = 0.25 * sy + 0.5 * cy + 0.25 * ey;
+            drawHaloedText(ctx, element.label, mx, my - 8, {
+              font: "bold 13px sans-serif",
+              size: 13,
+              color: element.color,
+              align: "center",
+            });
+          }
           break;
         }
       }

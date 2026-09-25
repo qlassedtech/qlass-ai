@@ -96,13 +96,35 @@ EOF
 systemctl daemon-reload
 echo "aitutor.service updated (takes effect on next restart)"
 
-log "7/9 nginx: upload size, timeouts, HSTS, forwarded proto; aitutor.qlass.in -> 301 skoolgpt.in"
+log "7/9 nginx: upload size, timeouts, HSTS + security headers, query-free access logs; aitutor.qlass.in -> 301 skoolgpt.in"
+# Access-log format without the query string: `$uri` instead of `$request`,
+# so a token/secret/phone in a URL (an OTP link, a webhook `?secret=`, a
+# `?ticket=` on the voice-call WebSocket) is never written to disk by nginx
+# on this shared host. `log_format` is only valid in the http{} context, so
+# it lives in conf.d (included by the stock nginx.conf) rather than a vhost.
+mkdir -p /etc/nginx/conf.d
+cat > /etc/nginx/conf.d/skoolgpt-logformat.conf <<'EOF'
+# Installed by scripts/server_hardening.sh — referenced by every Skoolgpt vhost's access_log.
+log_format skoolgpt_noquery '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+EOF
+grep -qE '^\s*include\s+/etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf \
+  || echo "WARNING: /etc/nginx/nginx.conf does not include /etc/nginx/conf.d/*.conf — add that include inside http {} or the skoolgpt_noquery log_format below will be unknown to nginx -t"
+
 cat > "$NGX/be-skoolgpt.skoolgpt.in.conf" <<'EOF'
 server {
     server_name be-skoolgpt.skoolgpt.in;
 
+    access_log /var/log/nginx/be-skoolgpt.skoolgpt.in.access.log skoolgpt_noquery;
+
     client_max_body_size 10m;
+    # Headers only make sense on the TLS block (the :80 block below is a
+    # bare 301). No add_header inside the location blocks, so these are
+    # inherited by every route — nginx drops server-level add_headers the
+    # moment a location declares its own.
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     # WebSocket routes (e.g. the real-time voice-call feature) need the
     # Upgrade/Connection headers forwarded and a long read/send timeout —
@@ -151,6 +173,8 @@ EOF
 cat > "$NGX/skoolgpt.in.conf" <<'EOF'
 server {
     server_name skoolgpt.in www.skoolgpt.in;
+
+    access_log /var/log/nginx/skoolgpt.in.access.log skoolgpt_noquery;
 
     root /usr/share/nginx/aitutor.qlass.in/public_python_aios/frontend/dist;
     index index.html;
@@ -218,23 +242,21 @@ nginx -t && systemctl reload nginx
 log "8/9 Postgres: drop duplicate students.phone index"
 sudo -u postgres psql -d aitutor2_db_prod -Atc "drop index if exists idx_students_phone;"
 
-log "9/9 Backups + cron jobs"
+log "9/9 Backups, log rotation + cron jobs"
 mkdir -p /var/backups/skoolgpt && chown "$APP_USER:$APP_USER" /var/backups/skoolgpt && chmod 700 /var/backups/skoolgpt
-chmod 755 "$APP/scripts/backup_db.sh" "$APP/scripts/deploy.sh" 2>/dev/null || true
-# First backup right now, as the app user.
+mkdir -p "$APP/logs" && chown "$APP_USER:$APP_USER" "$APP/logs"
+chmod 755 "$APP/scripts/backup_db.sh" "$APP/scripts/deploy.sh" "$APP/scripts/install_crontab.sh" 2>/dev/null || true
+# logrotate for logs/*.log (daily, 14 kept, compressed; copytruncate since cron holds them open).
+install -m 644 "$APP/scripts/logrotate-skoolgpt.conf" /etc/logrotate.d/skoolgpt
+logrotate -d /etc/logrotate.d/skoolgpt >/dev/null 2>&1 && echo "logrotate config OK: /etc/logrotate.d/skoolgpt" || echo "WARNING: logrotate rejected /etc/logrotate.d/skoolgpt (run: logrotate -d /etc/logrotate.d/skoolgpt)"
+# First backup right now, as the app user (warns if BACKUP_PASSPHRASE / BACKUP_RCLONE_REMOTE are unset in .env).
 sudo -u "$APP_USER" "$APP/scripts/backup_db.sh"
-# Merge the versioned cron fragment into the app user's crontab without touching other apps' entries.
+# Merge the versioned cron fragment into the app user's crontab — replaces
+# our own stale lines (schedule changes apply), leaves other apps' entries
+# alone. Same script deploy.sh runs on every release.
 if [ -f "$APP/scripts/crontab" ]; then
-  # Drop the old hand-added nudges entry (superseded by scripts/crontab) and any previous backup line.
-  existing=$(sudo -u "$APP_USER" crontab -l 2>/dev/null | grep -vE 'send_engagement_nudges\.py >> .*/logs/nudges\.log|skoolgpt-backup\.sh' || true)
-  merged="$existing"
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    case "$line" in \#*) continue;; esac
-    grep -qF -- "$line" <<<"$existing" || merged="$merged"$'\n'"$line"
-  done < "$APP/scripts/crontab"
-  printf '%s\n' "$merged" | sudo -u "$APP_USER" crontab -
+  bash "$APP/scripts/install_crontab.sh" --user "$APP_USER" "$APP/scripts/crontab"
   echo "crontab now:"; sudo -u "$APP_USER" crontab -l | grep -E 'skoolgpt|aitutor' || true
 fi
 
-log "Done. Remaining manual items: rotate the YouTube API key; switch the WATI webhook to header auth; copy backups off-box."
+log "Done. Remaining manual items: rotate the YouTube API key; switch the WATI webhook to header auth; set BACKUP_PASSPHRASE + BACKUP_RCLONE_REMOTE in $APP/.env (see README 'Backups') so backups are encrypted and copied off-box."

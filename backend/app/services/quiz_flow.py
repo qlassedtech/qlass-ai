@@ -147,6 +147,14 @@ async def handle_quiz_answer(db: Session, student: Student, message_text: str, q
             cache_write_tokens=grade_result.cache_write_tokens, cache_read_tokens=grade_result.cache_read_tokens,
             feature="quiz_classify",
         )
+        if is_correct is None:
+            # The grading call itself failed (see quiz_service.grade_answer)
+            # — don't record an Answer or a weak topic for it; the student
+            # just re-sends and the quiz stays on the same question.
+            return (
+                "Hmm, I couldn't check that answer just now — please send it once more in a moment "
+                "and I'll grade it. 🙏"
+            )
         feedback = "Correct! ✅" if is_correct else f"Not quite — the answer was *{current_question.correct_answer}*."
     db.add(Answer(
         question_id=current_question.id, student_id=student.id,

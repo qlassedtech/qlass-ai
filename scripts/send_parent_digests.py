@@ -11,6 +11,10 @@ hosted (not a local dev machine):
 
     0 18 * * FRI cd /path/to/qlass-ai && venv/bin/python3 scripts/send_parent_digests.py >> logs/parent_digests.log 2>&1
 
+Idempotent per (student, day): a Redis marker (scripts/job_markers.py) is
+set BEFORE each send, so re-running after a crash — or a cron overlap —
+never sends the same child's digest twice in one day.
+
 Usage:
     python scripts/send_parent_digests.py [--dry-run]
 """
@@ -20,6 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
@@ -28,19 +33,26 @@ from app.services.progress_report import (  # noqa: E402
     format_parent_digest, format_parent_digest_summary, get_activity_stats, get_student_stats,
 )
 from app.services.whatsapp_client import send_notification  # noqa: E402
+from job_markers import JobMarker  # noqa: E402
 
 DIGEST_WINDOW_DAYS = 7
+JOB_NAME = "parent_digests"
 
 
 async def send_digests(dry_run: bool) -> None:
     db = SessionLocal()
+    marker = JobMarker(JOB_NAME)
     sent = 0
+    skipped = 0
     try:
         parents = db.query(Parent).all()
         for parent in parents:
             student = db.query(Student).filter(Student.id == parent.student_id, Student.is_deleted.is_(False)).first()
             if student is None:
                 continue  # linked student's data-deletion request has been fulfilled, or row is stale
+            if await marker.already_sent(student.id):
+                skipped += 1
+                continue  # this child's digest already went out today (earlier/crashed run)
 
             stats = get_student_stats(db, student.id, days=DIGEST_WINDOW_DAYS)
             activity = get_activity_stats(db, student.id)
@@ -51,15 +63,17 @@ async def send_digests(dry_run: bool) -> None:
             if dry_run:
                 print(f"[DRY RUN] Would send to {parent.phone} (parent of {student.name}):\n{message}\n")
             else:
+                await marker.mark_sent(student.id)  # before the send, never after
                 result = await send_notification(
                     parent.phone, settings.parent_digest_template,
                     [parent_first_name, student.name, summary], message,
                 )
                 print(f"{'Sent' if result.get('sent') else 'FAILED'} parent digest to {parent.phone} ({student.name})")
             sent += 1
-        print(f"\n{sent} parent digest(s) {'would be ' if dry_run else ''}sent.")
+        print(f"\n{sent} parent digest(s) {'would be ' if dry_run else ''}sent, {skipped} already sent today.")
     finally:
         db.close()
+        await marker.close()
 
 
 def main() -> None:

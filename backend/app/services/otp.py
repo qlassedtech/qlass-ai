@@ -1,9 +1,7 @@
 import hmac
 import secrets
 
-import redis.asyncio as redis
-
-from app.config import settings
+from app.services import rate_limit
 
 OTP_TTL_SECONDS = 10 * 60
 
@@ -18,9 +16,13 @@ OTP_TTL_SECONDS = 10 * 60
 # reliably initiate contact.
 LOGIN_OTP_TEMPLATE_NAME = "ai_tutor_signup_activation"
 
-_redis = redis.Redis.from_url(settings.redis_url, decode_responses=True) if settings.redis_url else None
-# Fallback so a single-process dev setup without Redis running still works —
-# same limitation as active_profile.py/rate_limit.py's own fallbacks.
+# Redis comes from rate_limit._client(): one client per event loop, built
+# from settings.redis_url — this module used to open its own module-level
+# client, which was bound to whichever loop first touched it (see the
+# comment on rate_limit._loop_clients) and bypassed the test suite's
+# REDIS_URL override. Fallback so a single-process dev setup without Redis
+# running still works — same limitation as active_profile.py/rate_limit.py's
+# own fallbacks.
 _fallback_store: dict[str, str] = {}
 
 
@@ -28,25 +30,41 @@ def _key(purpose: str, phone: str) -> str:
     return f"otp:{purpose}:{phone}"
 
 
+async def _store(key: str, value: str) -> None:
+    client = rate_limit._client()
+    if client is None:
+        _fallback_store[key] = value
+    else:
+        await client.set(key, value, ex=OTP_TTL_SECONDS)
+
+
+async def _consume(key: str) -> str | None:
+    """Read-and-delete: returns the stored value (or None) and clears it so it can't be reused."""
+    client = rate_limit._client()
+    if client is None:
+        return _fallback_store.pop(key, None)
+    stored = await client.get(key)
+    if stored is not None:
+        await client.delete(key)
+    return stored
+
+
 async def generate_and_store_otp(purpose: str, phone: str) -> str:
     otp = f"{secrets.randbelow(1_000_000):06d}"
-    key = _key(purpose, phone)
-    if _redis is None:
-        _fallback_store[key] = otp
-    else:
-        await _redis.set(key, otp, ex=OTP_TTL_SECONDS)
+    await _store(_key(purpose, phone), otp)
     return otp
 
 
 async def verify_otp(purpose: str, phone: str, otp: str) -> bool:
     key = _key(purpose, phone)
-    stored = _fallback_store.get(key) if _redis is None else await _redis.get(key)
+    client = rate_limit._client()
+    stored = _fallback_store.get(key) if client is None else await client.get(key)
     if not stored or not hmac.compare_digest(stored, otp):
         return False
-    if _redis is None:
+    if client is None:
         _fallback_store.pop(key, None)
     else:
-        await _redis.delete(key)
+        await client.delete(key)
     return True
 
 
@@ -67,23 +85,11 @@ async def mark_otp_optional(purpose: str, phone: str) -> None:
     control could otherwise just omit the otp field and claim it wasn't
     needed.
     """
-    key = _optional_key(purpose, phone)
-    if _redis is None:
-        _fallback_store[key] = "1"
-    else:
-        await _redis.set(key, "1", ex=OTP_TTL_SECONDS)
+    await _store(_optional_key(purpose, phone), "1")
 
 
 async def consume_otp_optional(purpose: str, phone: str) -> bool:
     """Returns whether mark_otp_optional was called for this phone/purpose
     (and hasn't expired), clearing it so it can't be reused for a second
     registration attempt."""
-    key = _optional_key(purpose, phone)
-    stored = _fallback_store.get(key) if _redis is None else await _redis.get(key)
-    if not stored:
-        return False
-    if _redis is None:
-        _fallback_store.pop(key, None)
-    else:
-        await _redis.delete(key)
-    return True
+    return bool(await _consume(_optional_key(purpose, phone)))
