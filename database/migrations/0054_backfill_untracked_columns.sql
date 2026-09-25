@@ -32,7 +32,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = current_schema() AND tablename = 'students'
-          AND indexdef ILIKE 'CREATE UNIQUE INDEX%(email)'
+          AND indexdef ILIKE 'CREATE UNIQUE INDEX%%(email)'
     ) THEN
         CREATE UNIQUE INDEX idx_students_email ON students (email);
     END IF;
@@ -47,7 +47,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = current_schema() AND tablename = 'teachers'
-          AND indexdef ILIKE 'CREATE UNIQUE INDEX%(email)'
+          AND indexdef ILIKE 'CREATE UNIQUE INDEX%%(email)'
     ) THEN
         CREATE UNIQUE INDEX idx_teachers_email ON teachers (email);
     END IF;
