@@ -29,6 +29,7 @@ from app.services.whatsapp_client import (
     verify_webhook_auth,
     note_webhook_auth_rejected,
     WEBHOOK_AUTH_HEADER,
+    WEBHOOK_AUTH_QUERY_PARAM,
 )
 from app.services.sarvam_client import transcribe_audio, synthesize_speech
 from app.services.llm_client import translate_with_claude
@@ -497,15 +498,17 @@ async def receive_message(request: Request):
 
     Unlike Meta's Cloud API, Wati has no GET verification handshake — you just
     point Wati's dashboard webhook setting at this URL. The secret is
-    supplied ONLY as the custom Authorization header configured in Wati's
-    Webhook settings (see whatsapp_client.WEBHOOK_AUTH_HEADER); a `?secret=`
-    query parameter is ignored, so it can never appear in an access log.
-    A rejection is an empty 403 — no detail that would tell a scanner which
-    part of the credential was wrong.
+    accepted either as the custom Authorization header configured in Wati's
+    Webhook settings, or as a `?secret=` query parameter — see
+    whatsapp_client.verify_webhook_auth's docstring for why both are
+    accepted (Wati's own dashboard has no header field on this account's
+    plan, confirmed live). A rejection is an empty 403 — no detail that
+    would tell a scanner which part of the credential was wrong.
     """
     auth_header = request.headers.get(WEBHOOK_AUTH_HEADER)
-    if not verify_webhook_auth(auth_header):
-        note_webhook_auth_rejected(had_header=bool(auth_header), had_query_secret="secret" in request.query_params)
+    query_secret = request.query_params.get(WEBHOOK_AUTH_QUERY_PARAM)
+    if not verify_webhook_auth(auth_header, query_secret):
+        note_webhook_auth_rejected(had_header=bool(auth_header), had_query_secret=bool(query_secret))
         return Response(status_code=403)
 
     try:

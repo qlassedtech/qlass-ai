@@ -82,14 +82,24 @@ def split_message(body: str, limit: int = WHATSAPP_TEXT_LIMIT) -> list[str]:
     return [part for part in _pack(parts, "\n\n", limit) if part.strip()]
 
 
-# The one header the webhook is authenticated on. Wati's Webhook settings
-# let you attach a custom "Authorization" header value to every delivery —
-# that value (with or without a "Bearer " prefix) must equal
-# WATI_WEBHOOK_SECRET. A `?secret=` query-parameter alternative used to be
-# accepted as well and was removed (audit H1/H2): query strings land in the
-# reverse proxy's access log on a shared host, so the secret was being
-# written to disk on every delivery.
+# Wati's own Webhook-settings UI (confirmed live, 2026-09-30, on this
+# account's plan) has NO field for a custom header — despite Wati's docs
+# describing one — so a header-only credential can never actually be sent
+# back to us. `?secret=` on the URL is therefore the only credential Wati
+# can deliver in practice, and is accepted again after a ~2-week outage
+# where header-only auth silently rejected every real webhook call (audit
+# H1/H2 assumed the header field existed; it doesn't on this account). The
+# header is still checked too, in case a future Wati plan adds one — a
+# secret arriving either way is accepted.
+#
+# The original motivation for moving off the query string — that it lands
+# in the reverse-proxy access log — is now handled at the nginx layer
+# instead (see scripts/server_hardening.sh's skoolgpt_noquery log format,
+# which logs $uri, never the query string), so accepting it here again
+# doesn't reopen that leak as long as that hardening has actually been
+# applied on the server.
 WEBHOOK_AUTH_HEADER = "Authorization"
+WEBHOOK_AUTH_QUERY_PARAM = "secret"
 
 # Rejected webhook calls are logged at most once a minute per process —
 # same throttle pattern as rate_limit._note_redis_unavailable: a scanner
@@ -99,22 +109,24 @@ WEBHOOK_AUTH_LOG_INTERVAL_SECONDS = 60
 _last_auth_reject_log_at: float = 0.0
 
 
-def verify_webhook_auth(auth_header: str | None) -> bool:
+def verify_webhook_auth(auth_header: str | None, query_secret: str | None = None) -> bool:
     """
-    Wati doesn't sign webhook bodies with HMAC like Meta does; the only
-    accepted credential is the value of the WEBHOOK_AUTH_HEADER header,
-    configured under Wati's Webhook settings and sent back on every call.
-    Fails closed outside development when WATI_WEBHOOK_SECRET isn't
-    configured — app.config logs a loud startup warning when that's true.
+    The accepted credential is WATI_WEBHOOK_SECRET, sent back either as the
+    WEBHOOK_AUTH_HEADER header (with or without a "Bearer " prefix) or as
+    the WEBHOOK_AUTH_QUERY_PARAM query parameter — see the module comment
+    above for why both are accepted. Fails closed outside development when
+    WATI_WEBHOOK_SECRET isn't configured — app.config logs a loud startup
+    warning when that's true.
 
     hmac.compare_digest (not ==) so a byte-by-byte timing side-channel can't
     help an attacker recover the secret across many requests.
     """
     if not settings.wati_webhook_secret:
         return settings.environment.lower() == "development"
-    if not auth_header:
+    candidate = auth_header.removeprefix("Bearer ") if auth_header else query_secret
+    if not candidate:
         return False
-    return hmac.compare_digest(auth_header.removeprefix("Bearer "), settings.wati_webhook_secret)
+    return hmac.compare_digest(candidate, settings.wati_webhook_secret)
 
 
 def note_webhook_auth_rejected(*, had_header: bool, had_query_secret: bool) -> None:
@@ -125,11 +137,10 @@ def note_webhook_auth_rejected(*, had_header: bool, had_query_secret: bool) -> N
         return
     _last_auth_reject_log_at = now
     logger.warning(
-        "WhatsApp webhook call rejected (403): %s header %s%s — check that Wati's Webhook settings send "
-        "WATI_WEBHOOK_SECRET as that header; this line is logged at most once a minute",
-        WEBHOOK_AUTH_HEADER,
-        "did not match WATI_WEBHOOK_SECRET" if had_header else "missing",
-        " (a ?secret= query parameter was sent, which is no longer accepted)" if had_query_secret else "",
+        "WhatsApp webhook call rejected (403): no valid credential (header present=%s, query secret present=%s) "
+        "— check Wati's Webhook settings send WATI_WEBHOOK_SECRET as the %s header or a ?%s= query parameter; "
+        "this line is logged at most once a minute",
+        had_header, had_query_secret, WEBHOOK_AUTH_HEADER, WEBHOOK_AUTH_QUERY_PARAM,
     )
 
 
