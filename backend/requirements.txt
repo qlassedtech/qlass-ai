@@ -2,7 +2,12 @@ fastapi
 uvicorn[standard]
 google-genai
 psycopg2-binary
-sqlalchemy
+# Pinned: 2.1 changed the default driver resolution for a bare
+# "postgresql://" URL away from psycopg2-binary (tries to import psycopg v3
+# instead, which isn't installed here) — confirmed live, 2026-10-01, this
+# broke app startup entirely on a fresh install. requirements.lock pins the
+# same version; keep both in sync if this is ever bumped deliberately.
+sqlalchemy==2.0.51
 alembic
 pydantic
 pydantic-settings
