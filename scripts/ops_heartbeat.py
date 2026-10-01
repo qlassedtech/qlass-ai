@@ -12,7 +12,9 @@ Checks:
   (b) provider errors — an Anthropic/Sarvam/Wati error counter (see
       alerts.note_provider_error) at or above PROVIDER_ERROR_THRESHOLD in
       the current or previous hour;
-  (c) disk usage of the repo's filesystem at or above DISK_ALERT_PERCENT;
+  (c) disk usage of the repo's filesystem — a quiet, infrequent heads-up at
+      or above DISK_WARN_PERCENT, and a more urgent, more frequent alert at
+      or above DISK_ALERT_PERCENT;
   (d) the nightly DB backup (scripts/backup_db.sh -> BACKUP_DIR) missing
       or older than BACKUP_MAX_AGE_HOURS;
   (e) the app's /ready endpoint returning non-200 (Postgres or Redis down
@@ -54,8 +56,14 @@ WAKING_HOURS_END = 22
 PROVIDER_ERROR_THRESHOLD = 5
 PROVIDERS = ("anthropic", "sarvam", "wati")
 
-# (c) Disk.
+# (c) Disk. Two tiers: a quieter early warning at DISK_WARN_PERCENT (longer
+# cooldown — this is a heads-up, not an emergency) and the original
+# DISK_ALERT_PERCENT as a more urgent, more frequent alert. The warning
+# only fires below the critical threshold so one full-disk event doesn't
+# send two separate messages.
+DISK_WARN_PERCENT = 70
 DISK_ALERT_PERCENT = 85
+DISK_WARN_COOLDOWN_SECONDS = 24 * 3600
 
 # (d) Backups — scripts/backup_db.sh runs nightly at 02:30 IST, so anything
 # older than ~a day + slack means last night's run didn't happen.
@@ -115,6 +123,20 @@ def check_disk_usage() -> str | None:
     )
 
 
+def check_disk_usage_warning() -> str | None:
+    """Earlier, quieter heads-up — see the DISK_WARN_PERCENT comment above."""
+    usage = shutil.disk_usage(REPO_ROOT)
+    percent = usage.used / usage.total * 100
+    if percent < DISK_WARN_PERCENT or percent >= DISK_ALERT_PERCENT:
+        return None
+    free_gb = usage.free / 1024**3
+    return (
+        f"Disk on the app host is {percent:.0f}% full ({free_gb:.1f} GB free) — not urgent yet, but worth a "
+        f"look before it becomes one. This is a shared host; check other apps' usage too (`du -x -d 1 "
+        f"/usr/share/nginx`), not just Skoolgpt's own footprint."
+    )
+
+
 def check_backup_freshness(now: datetime | None = None) -> str | None:
     now = now or datetime.now(timezone.utc)
     if not BACKUP_DIR.is_dir():
@@ -150,13 +172,14 @@ async def run_heartbeat(dry_run: bool) -> int:
     problems = 0
     try:
         checks = [
-            ("heartbeat_inbound_silence", lambda: check_inbound_silence(db)),
-            ("heartbeat_provider_errors", check_provider_errors),
-            ("heartbeat_disk_usage", check_disk_usage),
-            ("heartbeat_backup_stale", check_backup_freshness),
-            ("heartbeat_not_ready", check_readiness),
+            ("heartbeat_inbound_silence", lambda: check_inbound_silence(db), ALERT_COOLDOWN_SECONDS),
+            ("heartbeat_provider_errors", check_provider_errors, ALERT_COOLDOWN_SECONDS),
+            ("heartbeat_disk_usage_warning", check_disk_usage_warning, DISK_WARN_COOLDOWN_SECONDS),
+            ("heartbeat_disk_usage", check_disk_usage, ALERT_COOLDOWN_SECONDS),
+            ("heartbeat_backup_stale", check_backup_freshness, ALERT_COOLDOWN_SECONDS),
+            ("heartbeat_not_ready", check_readiness, ALERT_COOLDOWN_SECONDS),
         ]
-        for kind, check in checks:
+        for kind, check, cooldown_seconds in checks:
             try:
                 message = check()
             except Exception as exc:  # one broken check must not stop the rest
@@ -168,7 +191,7 @@ async def run_heartbeat(dry_run: bool) -> int:
             if dry_run:
                 print(f"[DRY RUN] ALERT {kind}: {message}")
             else:
-                sent = await alerts.alert_ops(kind, message, cooldown_seconds=ALERT_COOLDOWN_SECONDS)
+                sent = await alerts.alert_ops(kind, message, cooldown_seconds=cooldown_seconds)
                 print(f"ALERT {kind} ({'sent' if sent else 'suppressed by cooldown / not delivered'}): {message}")
         print(f"\n{datetime.now():%Y-%m-%d %H:%M} heartbeat: {problems} problem(s) found.")
         return problems
