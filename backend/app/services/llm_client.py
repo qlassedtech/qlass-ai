@@ -219,11 +219,22 @@ async def classify(
     system_prompt: str, messages: list[dict], fallback: str, model: str = "claude-sonnet-4-6", max_tokens: int = 10,
 ) -> LLMResult:
     """
-    A separate, deterministic (temperature=0) call for narrow classification
-    tasks (e.g. "what language should the reply be in") — kept apart from
-    the main creative reply generation so the tutor's actual phrasing keeps
-    its normal variation/warmth, while decisions that need to be consistent
-    turn-to-turn don't ride on the same non-deterministic sampling.
+    A separate call for narrow classification tasks (e.g. "what language
+    should the reply be in") — kept apart from the main creative reply
+    generation so the tutor's actual phrasing keeps its normal variation/
+    warmth, while these decisions use a fresh, focused prompt instead of
+    riding on the same conversational turn.
+
+    No `temperature` pin here: the Anthropic SDK (1.x) dropped the
+    parameter entirely — `messages.create()` no longer accepts it at all,
+    confirmed live, 2026-10-14, after the SDK upgrade in 9f1e3af silently
+    broke every call site that still passed it (a plain `TypeError` before
+    the request even went out, not an `anthropic.APIError`, so it wasn't
+    caught by this function's own except block below — it propagated up
+    and failed the whole turn). `output_config.effort` exists in the new
+    API but controls reasoning depth, not sampling — there's no direct
+    replacement for a determinism guarantee; these are short, low-ambiguity
+    prompts, so this is an acceptable, not a dangerous, downgrade.
 
     max_tokens defaults to 10 (enough for a single bare label like "hi-IN"
     or "progress") — callers whose classifier returns a structured
@@ -237,7 +248,6 @@ async def classify(
         response = await _client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            temperature=0,
             system=_cached_system(system_prompt),
             messages=messages,
         )
@@ -315,10 +325,12 @@ async def translate_with_claude(
         "explanation."
     )
     try:
+        # No `temperature` pin — see classify()'s docstring: the Anthropic
+        # SDK (1.x) removed the parameter entirely, and passing it raises a
+        # plain TypeError that crashed every translated reply.
         response = await _client.messages.create(
             model=model,
             max_tokens=1024,
-            temperature=0,
             system=_cached_system(system_prompt),
             messages=[{"role": "user", "content": text}],
         )
